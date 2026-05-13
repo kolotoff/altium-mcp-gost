@@ -626,7 +626,7 @@ async def search_library_symbol(ctx: Context, symbol_name: str, library_path: st
 
 @mcp.tool()
 async def create_schematic_symbol(ctx: Context, symbol_name: str, description: str, pins: list, part_count: int = 1) -> str:
-    """
+    r"""
     Before executing, run get_symbol_placement_rules first.
     Create a new schematic symbol in the current library with the specified pins
     Instructions: pins should be grouped together via function and only placed on
@@ -645,7 +645,8 @@ async def create_schematic_symbol(ctx: Context, symbol_name: str, description: s
                     Pin types: eElectricHiZ, eElectricInput, eElectricIO, eElectricOpenCollector,
                                eElectricOpenEmitter, eElectricOutput, eElectricPassive, eElectricPower
                     Pin orientations: eRotate0 (right), eRotate90 (down), eRotate180 (left), eRotate270 (up)
-                    X,Y coordinates in mils
+                    X,Y coordinates in mils. The Altium script snaps generated
+                    symbol primitives to the configured 2.5 mm schematic grid.
                     owner_part_id (optional): Part number the pin belongs to (1-based).
                                Use 0 for pins shared across all parts (e.g. power/GND).
                                Defaults to 1 if omitted. Only needed for multi-part symbols.

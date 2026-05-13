@@ -42,12 +42,16 @@ var
     CurrentLib       : ISch_Lib;
     SchComponent     : ISch_Component;
     PinIterator      : ISch_Iterator;
+    ParameterIterator : ISch_Iterator;
     Pin              : ISch_Pin;
+    Parameter        : ISch_Parameter;
     ComponentProps   : TStringList;
     PinsArray        : TStringList;
+    ParametersProps  : TStringList;
     PinProps         : TStringList;
     OutputLines      : TStringList;
     PinName, PinNum  : String;
+    ParameterName, ParameterValue : String;
     PinType          : String;
     PinOrient        : String;
     PinX, PinY       : Integer;
@@ -79,7 +83,29 @@ begin
         AddJSONProperty(ComponentProps, 'component_name', SchComponent.LibReference);
         AddJSONProperty(ComponentProps, 'description', SchComponent.ComponentDescription);
         AddJSONProperty(ComponentProps, 'designator', SchComponent.Designator.Text);
+        if (SchComponent.Comment <> Nil) then
+            AddJSONProperty(ComponentProps, 'comment', SchComponent.Comment.Text)
+        else
+            AddJSONProperty(ComponentProps, 'comment', '');
         AddJSONInteger(ComponentProps, 'part_count', SchComponent.PartCount);
+
+        ParametersProps := TStringList.Create;
+        try
+            ParameterIterator := SchComponent.SchIterator_Create;
+            ParameterIterator.AddFilter_ObjectSet(MkSet(eParameter));
+            Parameter := ParameterIterator.FirstSchObject;
+            while (Parameter <> Nil) do
+            begin
+                ParameterName := Parameter.Name;
+                ParameterValue := Parameter.Text;
+                AddJSONProperty(ParametersProps, ParameterName, ParameterValue);
+                Parameter := ParameterIterator.NextSchObject;
+            end;
+            SchComponent.SchIterator_Destroy(ParameterIterator);
+            ComponentProps.Add('"parameters": ' + BuildJSONObject(ParametersProps, 1));
+        finally
+            ParametersProps.Free;
+        end;
 
         // Create an array for pins
         PinsArray := TStringList.Create;
@@ -131,6 +157,7 @@ begin
                     // Add pin properties
                     AddJSONProperty(PinProps, 'pin_number', PinNum);
                     AddJSONProperty(PinProps, 'pin_name', PinName);
+                    AddJSONProperty(PinProps, 'description', Pin.Description);
                     AddJSONProperty(PinProps, 'pin_type', PinType);
                     AddJSONProperty(PinProps, 'pin_orientation', PinOrient);
                     AddJSONNumber(PinProps, 'x', PinX);
@@ -170,25 +197,91 @@ begin
     end;
 end;
 
+function IsSymbolMetadataLine(Line: String): Boolean;
+begin
+    Result := (Pos('Description=', Line) = 1) or
+              (Pos('CenterLabel=', Line) = 1) or
+              (Pos('CenterLabelPosition=', Line) = 1) or
+              (Pos('Comment=', Line) = 1) or
+              (Pos('Manufacturer=', Line) = 1) or
+              (Pos('PinDescription=', Line) = 1) or
+              (Pos('SideSectionWidthMM=', Line) = 1) or
+              (Pos('Parameter=', Line) = 1);
+end;
+
+function MilsStringToGridIndex(Value: String; GridMM: Double): Integer;
+begin
+    Result := Round(CoordToMMs(MilsToCoord(SafeStrToFloat(Value))) / GridMM);
+end;
+
+function CoordToGridIndex(Value: Integer; GridMM: Double): Integer;
+begin
+    Result := Round(CoordToMMs(Value) / GridMM);
+end;
+
+function GridIndexToCoord(GridIndex: Integer; GridMM: Double): Integer;
+begin
+    Result := MMsToCoord(GridIndex * GridMM);
+end;
+
 function CreateSchematicSymbol(SymbolName: String; PinsList: TStringList; PartCount: Integer = 1): String;
 var
     CurrentLib       : ISch_Lib;
+    ReferenceComponent : ISch_Component;
+    ReferencePin     : ISch_Pin;
+    ReferenceRect    : ISch_Rectangle;
+    ReferenceLine1   : ISch_Line;
+    ReferenceLine2   : ISch_Line;
+    ReferenceLabel   : ISch_Label;
+    ReferenceParameter : ISch_Parameter;
+    SourceParameter  : ISch_Parameter;
+    StyleIterator    : ISch_Iterator;
+    ParameterIterator : ISch_Iterator;
+    ExistingComponent : ISch_Component;
+    ExistingIterator  : ISch_Iterator;
     SchComponent     : ISch_Component;
     SchPin           : ISch_Pin;
+    SchParameter      : ISch_Parameter;
+    SchLine          : ISch_Line;
+    SchLabel         : ISch_Label;
     R                : ISch_Rectangle;
+    LabelRect        : TCoordRect;
     I, J, PinCount   : Integer;
+    ReferenceLineCount : Integer;
     PinData          : TStringList;
     PinName, PinNum  : String;
     PinType          : String;
     PinOrient        : String;
     PinX, PinY       : Integer;
+    PinDescription   : String;
     PinOwnerPartId   : Integer;
     PinElec          : TPinElectrical;
     PinOrientation   : TRotationBy90;
     MinX, MaxX, MinY, MaxY : Integer;
+    RefMinX, RefMaxX : Integer;
+    RefLine1X, RefLine2X : Integer;
+    Divider1X, Divider2X : Integer;
+    CenterLabelX, CenterLabelY : Integer;
     HasPins          : Boolean;
     ResultProps      : TStringList;
     Description      : String;
+    CenterLabel      : String;
+    CenterLabelPosition : String;
+    CommentText      : String;
+    ManufacturerValue : String;
+    GridSizeMM       : Double;
+    SideSectionWidthGrid : Integer;
+    RefSideSectionWidthGrid : Integer;
+    BodyCenterXCoord : Integer;
+    LabelCenterOffsetX : Integer;
+    LabelYCoord      : Integer;
+    ParameterName    : String;
+    ParameterValue   : String;
+    ParameterLine    : String;
+    PipePos          : Integer;
+    ParameterOverrides : TStringList;
+    CopiedParameterNames : TStringList;
+    PinDescriptions  : TStringList;
     OutputLines      : TStringList;
 begin
     // Check if we have a schematic library document
@@ -199,32 +292,187 @@ begin
         Exit;
     end;
 
-    Description := 'New Component';  // Default description
-
-    // Parse the pins list for description and auto-detect PartCount from max owner_part_id
-    for I := 0 to PinsList.Count - 1 do
+    // Use the currently selected/open library component as a style reference.
+    // The new symbol still gets its own pins and body bounds, but replicated
+    // primitives preserve the reference pin length, font, colours, and line style.
+    ReferenceComponent := CurrentLib.CurrentSchComponent;
+    ReferencePin := Nil;
+    ReferenceRect := Nil;
+    ReferenceLine1 := Nil;
+    ReferenceLine2 := Nil;
+    ReferenceLabel := Nil;
+    ReferenceParameter := Nil;
+    if (ReferenceComponent <> Nil) then
     begin
-        if (Pos('Description=', PinsList[I]) = 1) then
-        begin
-            Description := Copy(PinsList[I], 13, Length(PinsList[I]) - 12);
-        end
-        else
-        begin
-            // Check for owner_part_id in pin data to auto-detect PartCount
-            PinData := TStringList.Create;
-            try
-                PinData.Delimiter := '|';
-                PinData.DelimitedText := PinsList[I];
-                if (PinData.Count >= 7) then
+        StyleIterator := ReferenceComponent.SchIterator_Create;
+        try
+            StyleIterator.AddFilter_ObjectSet(MkSet(ePin));
+            ReferencePin := StyleIterator.FirstSchObject;
+        finally
+            ReferenceComponent.SchIterator_Destroy(StyleIterator);
+        end;
+
+        StyleIterator := ReferenceComponent.SchIterator_Create;
+        try
+            StyleIterator.AddFilter_ObjectSet(MkSet(eRectangle));
+            ReferenceRect := StyleIterator.FirstSchObject;
+        finally
+            ReferenceComponent.SchIterator_Destroy(StyleIterator);
+        end;
+
+        StyleIterator := ReferenceComponent.SchIterator_Create;
+        try
+            StyleIterator.AddFilter_ObjectSet(MkSet(eLine));
+            ReferenceLineCount := 0;
+            SchLine := StyleIterator.FirstSchObject;
+            while (SchLine <> Nil) do
+            begin
+                if (Round(CoordToMils(SchLine.Location.X)) = Round(CoordToMils(SchLine.Corner.X))) then
                 begin
-                    PinOwnerPartId := StrToInt(PinData[6]);
-                    if (PinOwnerPartId > PartCount) then
-                        PartCount := PinOwnerPartId;
+                    ReferenceLineCount := ReferenceLineCount + 1;
+                    if (ReferenceLineCount = 1) then
+                        ReferenceLine1 := SchLine
+                    else if (ReferenceLineCount = 2) then
+                    begin
+                        ReferenceLine2 := SchLine;
+                        Break;
+                    end;
                 end;
-            finally
-                PinData.Free;
+                SchLine := StyleIterator.NextSchObject;
+            end;
+        finally
+            ReferenceComponent.SchIterator_Destroy(StyleIterator);
+        end;
+
+        StyleIterator := ReferenceComponent.SchIterator_Create;
+        try
+            StyleIterator.AddFilter_ObjectSet(MkSet(eLabel));
+            ReferenceLabel := StyleIterator.FirstSchObject;
+        finally
+            ReferenceComponent.SchIterator_Destroy(StyleIterator);
+        end;
+
+        StyleIterator := ReferenceComponent.SchIterator_Create;
+        try
+            StyleIterator.AddFilter_ObjectSet(MkSet(eParameter));
+            ReferenceParameter := StyleIterator.FirstSchObject;
+        finally
+            ReferenceComponent.SchIterator_Destroy(StyleIterator);
+        end;
+    end;
+
+    Description := 'New Component';  // Default description
+    CenterLabel := '';
+    CenterLabelPosition := '';
+    CommentText := SymbolName;
+    ManufacturerValue := '';
+    GridSizeMM := 2.5;
+    SideSectionWidthGrid := 0;
+    RefSideSectionWidthGrid := 0;
+    ParameterOverrides := TStringList.Create;
+    CopiedParameterNames := TStringList.Create;
+    PinDescriptions := TStringList.Create;
+    ParameterOverrides.CaseSensitive := False;
+    CopiedParameterNames.CaseSensitive := False;
+    PinDescriptions.CaseSensitive := False;
+
+    try
+        // Parse the pins list for metadata and auto-detect PartCount from max owner_part_id
+        for I := 0 to PinsList.Count - 1 do
+        begin
+            if (Pos('Description=', PinsList[I]) = 1) then
+            begin
+                Description := Copy(PinsList[I], 13, Length(PinsList[I]) - 12);
+            end
+            else if (Pos('CenterLabel=', PinsList[I]) = 1) then
+            begin
+                CenterLabel := Copy(PinsList[I], 13, Length(PinsList[I]) - 12);
+            end
+            else if (Pos('CenterLabelPosition=', PinsList[I]) = 1) then
+            begin
+                CenterLabelPosition := UpperCase(Copy(PinsList[I], 21, Length(PinsList[I]) - 20));
+            end
+            else if (Pos('Comment=', PinsList[I]) = 1) then
+            begin
+                CommentText := Copy(PinsList[I], 9, Length(PinsList[I]) - 8);
+            end
+            else if (Pos('Manufacturer=', PinsList[I]) = 1) then
+            begin
+                ManufacturerValue := Copy(PinsList[I], 14, Length(PinsList[I]) - 13);
+                ParameterOverrides.Values['Manufacturer'] := ManufacturerValue;
+            end
+            else if (Pos('PinDescription=', PinsList[I]) = 1) then
+            begin
+                ParameterLine := Copy(PinsList[I], 16, Length(PinsList[I]) - 15);
+                PipePos := Pos('|', ParameterLine);
+                if (PipePos > 0) then
+                begin
+                    PinNum := Copy(ParameterLine, 1, PipePos - 1);
+                    PinDescription := Copy(ParameterLine, PipePos + 1, Length(ParameterLine) - PipePos);
+                    if (PinNum <> '') then
+                        PinDescriptions.Values[PinNum] := PinDescription;
+                end;
+            end
+            else if (Pos('SideSectionWidthMM=', PinsList[I]) = 1) then
+            begin
+                SideSectionWidthGrid := Round(SafeStrToFloat(Copy(PinsList[I], 20, Length(PinsList[I]) - 19)) / GridSizeMM);
+            end
+            else if (Pos('Parameter=', PinsList[I]) = 1) then
+            begin
+                ParameterLine := Copy(PinsList[I], 11, Length(PinsList[I]) - 10);
+                PipePos := Pos('|', ParameterLine);
+                if (PipePos > 0) then
+                begin
+                    ParameterName := Copy(ParameterLine, 1, PipePos - 1);
+                    ParameterValue := Copy(ParameterLine, PipePos + 1, Length(ParameterLine) - PipePos);
+                    if (ParameterName <> '') then
+                        ParameterOverrides.Values[ParameterName] := ParameterValue;
+                end;
+            end
+            else
+            begin
+                // Check for owner_part_id in pin data to auto-detect PartCount
+                PinData := TStringList.Create;
+                try
+                    PinData.Delimiter := '|';
+                    PinData.DelimitedText := PinsList[I];
+                    if (PinData.Count >= 7) then
+                    begin
+                        PinOwnerPartId := StrToInt(PinData[6]);
+                        if (PinOwnerPartId > PartCount) then
+                            PartCount := PinOwnerPartId;
+                    end;
+                finally
+                    PinData.Free;
+                end;
             end;
         end;
+
+        if (CenterLabel <> '') and (CenterLabelPosition = '') then
+            CenterLabelPosition := 'TOPCENTER';
+
+        if (ReferenceComponent <> Nil) and (UpperCase(ReferenceComponent.LibReference) = UpperCase(SymbolName)) then
+        begin
+            Result := 'ERROR: Active library component is also the replacement target. Select the style reference symbol first.';
+            Exit;
+        end;
+
+    // Replace an existing symbol with the same library reference instead of appending a duplicate.
+    ExistingIterator := CurrentLib.SchLibIterator_Create;
+    try
+        ExistingIterator.AddFilter_ObjectSet(MkSet(eSchComponent));
+        ExistingComponent := ExistingIterator.FirstSchObject;
+        while (ExistingComponent <> Nil) do
+        begin
+            if (UpperCase(ExistingComponent.LibReference) = UpperCase(SymbolName)) then
+            begin
+                CurrentLib.RemoveSchComponent(ExistingComponent);
+                Break;
+            end;
+            ExistingComponent := ExistingIterator.NextSchObject;
+        end;
+    finally
+        CurrentLib.SchIterator_Destroy(ExistingIterator);
     end;
 
     // Create a library component (a page of the library is created)
@@ -235,15 +483,20 @@ begin
         Exit;
     end;
 
-    // Set up parameters for the library component
-    SchComponent.CurrentPartID := 1;
-    SchComponent.DisplayMode := 0;
-    SchComponent.PartCount := PartCount;
+        // Set up parameters for the library component
+        SchComponent.CurrentPartID := 1;
+        SchComponent.DisplayMode := 0;
+        SchComponent.PartCount := PartCount;
 
-    // Define the LibReference and component description
-    SchComponent.LibReference := SymbolName;
-    SchComponent.ComponentDescription := Description;
-    SchComponent.Designator.Text := 'U?';
+        // Define the LibReference, description, and comment
+        SchComponent.LibReference := SymbolName;
+        SchComponent.ComponentDescription := Description;
+        if (SchComponent.Comment <> Nil) then
+            SchComponent.Comment.Text := CommentText;
+        if (ReferenceComponent <> Nil) then
+            SchComponent.Designator.Text := ReferenceComponent.Designator.Text
+        else
+            SchComponent.Designator.Text := 'U?';
 
     // Create a body rectangle for each part
     PinCount := 0;
@@ -255,7 +508,7 @@ begin
 
         for I := 0 to PinsList.Count - 1 do
         begin
-            if (Pos('Description=', PinsList[I]) = 1) then Continue;
+            if IsSymbolMetadataLine(PinsList[I]) then Continue;
 
             PinData := TStringList.Create;
             try
@@ -264,8 +517,8 @@ begin
 
                 if (PinData.Count >= 6) then
                 begin
-                    PinX := StrToInt(PinData[4]);
-                    PinY := StrToInt(PinData[5]);
+                    PinX := MilsStringToGridIndex(PinData[4], GridSizeMM);
+                    PinY := MilsStringToGridIndex(PinData[5], GridSizeMM);
 
                     // Determine owner part id (default 1 for backward compatibility)
                     if (PinData.Count >= 7) then
@@ -291,19 +544,27 @@ begin
         // Default rectangle if no pins for this part
         if not HasPins then
         begin
-            MinX := 300; MinY := 0; MaxX := 1000; MaxY := 1000;
+            MinX := 3; MinY := 0; MaxX := 10; MaxY := 10;
         end;
 
         // Create a rectangle for this part's body
-        R := SchServer.SchObjectFactory(eRectangle, eCreate_Default);
+        R := Nil;
+        if (ReferenceRect <> Nil) then
+            R := ReferenceRect.Replicate;
+        if (R = Nil) then
+            R := SchServer.SchObjectFactory(eRectangle, eCreate_Default);
         if (R <> Nil) Then
         begin
-            R.LineWidth := eSmall;
-            R.Location := Point(MilsToCoord(MinX), MilsToCoord(MinY - 100));
-            R.Corner := Point(MilsToCoord(MaxX), MilsToCoord(MaxY + 100));
-            R.AreaColor := $00B0FFFF; // Yellow (BGR format)
-            R.Color := $00FF0000;     // Blue (BGR format)
-            R.IsSolid := True;
+            if (ReferenceRect = Nil) then
+                R.LineWidth := eSmall;
+            R.Location := Point(GridIndexToCoord(MinX, GridSizeMM), GridIndexToCoord(MinY - 1, GridSizeMM));
+            R.Corner := Point(GridIndexToCoord(MaxX, GridSizeMM), GridIndexToCoord(MaxY + 1, GridSizeMM));
+            if (ReferenceRect = Nil) then
+            begin
+                R.AreaColor := $00B0FFFF; // Yellow (BGR format)
+                R.Color := $00FF0000;     // Blue (BGR format)
+                R.IsSolid := True;
+            end;
             R.OwnerPartId := J;
             R.OwnerPartDisplayMode := 0;
             SchComponent.AddSchObject(R);
@@ -311,13 +572,123 @@ begin
 
         // Position designator using Part 1's bounding box
         if (J = 1) then
-            SchComponent.Designator.Location := Point(MilsToCoord(MinX), MilsToCoord(MaxY + 100));
+            SchComponent.Designator.Location := Point(GridIndexToCoord(MinX, GridSizeMM), GridIndexToCoord(MaxY + 1, GridSizeMM));
+
+        if (SideSectionWidthGrid > 0) and ((SideSectionWidthGrid * 2) < (MaxX - MinX)) then
+        begin
+            Divider1X := MinX + SideSectionWidthGrid;
+            Divider2X := MaxX - SideSectionWidthGrid;
+        end
+        else if (ReferenceLine1 <> Nil) and (ReferenceLine2 <> Nil) and (ReferenceRect <> Nil) then
+        begin
+            RefMinX := Min(CoordToGridIndex(ReferenceRect.Location.X, GridSizeMM), CoordToGridIndex(ReferenceRect.Corner.X, GridSizeMM));
+            RefMaxX := Max(CoordToGridIndex(ReferenceRect.Location.X, GridSizeMM), CoordToGridIndex(ReferenceRect.Corner.X, GridSizeMM));
+            RefLine1X := CoordToGridIndex(ReferenceLine1.Location.X, GridSizeMM);
+            RefLine2X := CoordToGridIndex(ReferenceLine2.Location.X, GridSizeMM);
+            if (RefLine1X > RefLine2X) then
+            begin
+                Divider1X := RefLine1X;
+                RefLine1X := RefLine2X;
+                RefLine2X := Divider1X;
+            end;
+            RefSideSectionWidthGrid := Max(RefLine1X - RefMinX, RefMaxX - RefLine2X);
+            if (RefSideSectionWidthGrid > 0) and ((RefSideSectionWidthGrid * 2) < (MaxX - MinX)) then
+            begin
+                Divider1X := MinX + RefSideSectionWidthGrid;
+                Divider2X := MaxX - RefSideSectionWidthGrid;
+            end
+            else
+            begin
+                Divider1X := MinX + ((MaxX - MinX) div 3);
+                Divider2X := MinX + (((MaxX - MinX) * 2) div 3);
+            end;
+        end
+        else
+        begin
+            Divider1X := MinX + ((MaxX - MinX) div 3);
+            Divider2X := MinX + (((MaxX - MinX) * 2) div 3);
+        end;
+
+        SchLine := Nil;
+        if (ReferenceLine1 <> Nil) then
+            SchLine := ReferenceLine1.Replicate;
+        if (SchLine = Nil) then
+            SchLine := SchServer.SchObjectFactory(eLine, eCreate_Default);
+        if (SchLine <> Nil) then
+        begin
+            if (ReferenceLine1 = Nil) and (ReferenceRect <> Nil) then
+            begin
+                SchLine.Color := ReferenceRect.Color;
+                SchLine.LineWidth := ReferenceRect.LineWidth;
+            end;
+            SchLine.Location := Point(GridIndexToCoord(Divider1X, GridSizeMM), GridIndexToCoord(MinY - 1, GridSizeMM));
+            SchLine.Corner := Point(GridIndexToCoord(Divider1X, GridSizeMM), GridIndexToCoord(MaxY + 1, GridSizeMM));
+            SchLine.OwnerPartId := J;
+            SchLine.OwnerPartDisplayMode := 0;
+            SchComponent.AddSchObject(SchLine);
+        end;
+
+        SchLine := Nil;
+        if (ReferenceLine2 <> Nil) then
+            SchLine := ReferenceLine2.Replicate;
+        if (SchLine = Nil) then
+            SchLine := SchServer.SchObjectFactory(eLine, eCreate_Default);
+        if (SchLine <> Nil) then
+        begin
+            if (ReferenceLine2 = Nil) and (ReferenceRect <> Nil) then
+            begin
+                SchLine.Color := ReferenceRect.Color;
+                SchLine.LineWidth := ReferenceRect.LineWidth;
+            end;
+            SchLine.Location := Point(GridIndexToCoord(Divider2X, GridSizeMM), GridIndexToCoord(MinY - 1, GridSizeMM));
+            SchLine.Corner := Point(GridIndexToCoord(Divider2X, GridSizeMM), GridIndexToCoord(MaxY + 1, GridSizeMM));
+            SchLine.OwnerPartId := J;
+            SchLine.OwnerPartDisplayMode := 0;
+            SchComponent.AddSchObject(SchLine);
+        end;
+
+        if (CenterLabel <> '') or (ReferenceLabel <> Nil) then
+        begin
+            if (CenterLabelPosition = 'TOPCENTER') then
+                CenterLabelY := MaxY - 1
+            else
+            begin
+                CenterLabelX := Divider1X + 1;
+                CenterLabelY := MinY + ((MaxY - MinY) div 2);
+            end;
+            SchLabel := Nil;
+            if (ReferenceLabel <> Nil) then
+                SchLabel := ReferenceLabel.Replicate;
+            if (SchLabel = Nil) then
+                SchLabel := SchServer.SchObjectFactory(eLabel, eCreate_Default);
+            if (SchLabel <> Nil) then
+            begin
+                if (CenterLabel <> '') then
+                    SchLabel.Text := CenterLabel
+                else
+                    SchLabel.Text := ReferenceLabel.Text;
+                if (CenterLabelPosition = 'TOPCENTER') then
+                begin
+                    BodyCenterXCoord := (GridIndexToCoord(MinX, GridSizeMM) + GridIndexToCoord(MaxX, GridSizeMM)) div 2;
+                    LabelYCoord := GridIndexToCoord(CenterLabelY, GridSizeMM);
+                    SchLabel.Location := Point(BodyCenterXCoord, LabelYCoord);
+                    LabelRect := SchLabel.BoundingRectangle;
+                    LabelCenterOffsetX := ((LabelRect.Left + LabelRect.Right) div 2) - BodyCenterXCoord;
+                    SchLabel.Location := Point(BodyCenterXCoord - LabelCenterOffsetX, LabelYCoord);
+                end
+                else
+                    SchLabel.Location := Point(GridIndexToCoord(CenterLabelX, GridSizeMM), GridIndexToCoord(CenterLabelY, GridSizeMM));
+                SchLabel.OwnerPartId := J;
+                SchLabel.OwnerPartDisplayMode := 0;
+                SchComponent.AddSchObject(SchLabel);
+            end;
+        end;
     end;
 
     // Add pins to the component
     for I := 0 to PinsList.Count - 1 do
     begin
-        if (Pos('Description=', PinsList[I]) = 1) then Continue;
+        if IsSymbolMetadataLine(PinsList[I]) then Continue;
 
         PinData := TStringList.Create;
         try
@@ -330,8 +701,8 @@ begin
                 PinName := PinData[1];
                 PinType := PinData[2];
                 PinOrient := PinData[3];
-                PinX := StrToInt(PinData[4]);
-                PinY := StrToInt(PinData[5]);
+                PinX := MilsStringToGridIndex(PinData[4], GridSizeMM);
+                PinY := MilsStringToGridIndex(PinData[5], GridSizeMM);
 
                 // Determine owner part id (default 1 for backward compatibility)
                 if (PinData.Count >= 7) then
@@ -340,7 +711,11 @@ begin
                     PinOwnerPartId := 1;
 
                 // Create a pin
-                SchPin := SchServer.SchObjectFactory(ePin, eCreate_Default);
+                SchPin := Nil;
+                if (ReferencePin <> Nil) then
+                    SchPin := ReferencePin.Replicate;
+                if (SchPin = Nil) then
+                    SchPin := SchServer.SchObjectFactory(ePin, eCreate_Default);
                 if (SchPin = Nil) Then
                     Continue;
 
@@ -352,7 +727,8 @@ begin
                 SchPin.Name := PinName;
                 SchPin.Electrical := PinElec;
                 SchPin.Orientation := PinOrientation;
-                SchPin.Location := Point(MilsToCoord(PinX), MilsToCoord(PinY));
+                SchPin.Location := Point(GridIndexToCoord(PinX, GridSizeMM), GridIndexToCoord(PinY, GridSizeMM));
+                SchPin.Description := PinDescriptions.Values[PinNum];
 
                 // Set ownership to the specified part (0 = shared across all parts)
                 SchPin.OwnerPartId := PinOwnerPartId;
@@ -363,6 +739,60 @@ begin
             end;
         finally
             PinData.Free;
+        end;
+    end;
+
+    // Copy all component parameters from the reference symbol, with explicit
+    // metadata overrides for fields that belong to the new part.
+    if (ReferenceComponent <> Nil) then
+    begin
+        ParameterIterator := ReferenceComponent.SchIterator_Create;
+        try
+            ParameterIterator.AddFilter_ObjectSet(MkSet(eParameter));
+            SourceParameter := ParameterIterator.FirstSchObject;
+            while (SourceParameter <> Nil) do
+            begin
+                ParameterName := SourceParameter.Name;
+                ParameterValue := SourceParameter.Text;
+
+                if (UpperCase(ParameterName) = 'MANUFACTURER') and (ManufacturerValue <> '') then
+                    ParameterValue := ManufacturerValue;
+                if (UpperCase(ParameterName) = 'COMMENT') and (CommentText <> '') then
+                    ParameterValue := CommentText;
+                if (ParameterOverrides.Values[ParameterName] <> '') then
+                    ParameterValue := ParameterOverrides.Values[ParameterName];
+
+                SchParameter := SourceParameter.Replicate;
+                if (SchParameter = Nil) then
+                    SchParameter := SchServer.SchObjectFactory(eParameter, eCreate_Default);
+                if (SchParameter <> Nil) then
+                begin
+                    SchParameter.Name := ParameterName;
+                    SchParameter.Text := ParameterValue;
+                    SchComponent.AddSchObject(SchParameter);
+                    CopiedParameterNames.Add(UpperCase(ParameterName));
+                end;
+
+                SourceParameter := ParameterIterator.NextSchObject;
+            end;
+        finally
+            ReferenceComponent.SchIterator_Destroy(ParameterIterator);
+        end;
+    end;
+
+    if (ManufacturerValue <> '') and (CopiedParameterNames.IndexOf('MANUFACTURER') < 0) then
+    begin
+        SchParameter := Nil;
+        if (ReferenceParameter <> Nil) then
+            SchParameter := ReferenceParameter.Replicate;
+        if (SchParameter = Nil) then
+            SchParameter := SchServer.SchObjectFactory(eParameter, eCreate_Default);
+        if (SchParameter <> Nil) then
+        begin
+            SchParameter.Name := 'Manufacturer';
+            SchParameter.Text := ManufacturerValue;
+            SchComponent.AddSchObject(SchParameter);
+            CopiedParameterNames.Add('MANUFACTURER');
         end;
     end;
 
@@ -394,6 +824,11 @@ begin
         end;
     finally
         ResultProps.Free;
+    end;
+    finally
+        ParameterOverrides.Free;
+        CopiedParameterNames.Free;
+        PinDescriptions.Free;
     end;
 end;
 

@@ -100,7 +100,8 @@ begin
 
     // Commands that handle their own document management - skip focusing
     if (CommandName = 'search_library_symbol') or
-       (CommandName = 'create_pcb_footprint') then
+       (CommandName = 'create_pcb_footprint') or
+       (CommandName = 'take_view_screenshot') then
     begin
         Result := True;
         Exit;
@@ -119,8 +120,7 @@ begin
        (CommandName = 'layout_duplicator_apply')             or
        (CommandName = 'move_components')                     or
        (CommandName = 'set_pcb_layer_visibility')            or
-       (CommandName = 'get_pcb_layer_stackup')               or
-       (CommandName = 'take_view_screenshot')                then
+       (CommandName = 'get_pcb_layer_stackup')               then
     begin
         DocumentKind := 'PCB';
     end
@@ -286,15 +286,9 @@ begin
     // TODO: Do I want to iterate through all workspace projects to find valid document if it is not current document?
     // Could use IWorkspace.DM_ProjectCount and for loop
 
-    // No matching document found or couldn't be focused
-    if not DocFound then
-    begin
-        ShowMessage('Error: No ' + DocumentKind + ' document found in the project.');
-    end
-    else
-    begin
-        ShowMessage('Error: Found ' + DocumentKind + ' document but could not focus it.');
-    end;
+    // No matching document found or couldn't be focused. Keep the bridge non-modal:
+    // callers receive Result=False and should report errors through JSON instead of
+    // blocking Altium with a message box.
     
     Result := False;
 end;

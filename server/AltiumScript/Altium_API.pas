@@ -218,6 +218,7 @@ begin
                     ParamValue := Trim(ParamValue);
                     // Unescape JSON backslashes (e.g. \\ -> \ for Altium overbar notation)
                     ParamValue := StringReplace(ParamValue, '\\', '\', REPLACEALL);
+                    ParamValue := JSONUnescapeString(ParamValue);
 
                     if (ParamValue <> '') and (ParamValue <> '[') then
                         PinsList.Add(ParamValue);

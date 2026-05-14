@@ -31,6 +31,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger("AltiumMCPServer")
 
+def json_dumps(data, **kwargs):
+    """Serialize MCP tool payloads without escaping readable Unicode text."""
+    kwargs.setdefault("ensure_ascii", False)
+    return json.dumps(data, **kwargs)
+
 # Set MCP_DIR to the directory of the current Python file
 MCP_DIR = Path(__file__).parent
 CONFIG_FILE = MCP_DIR / "config.json"
@@ -236,11 +241,11 @@ class AltiumBridge:
                 RESPONSE_FILE.unlink()
             
             # Write the request file with command and parameters
-            with open(REQUEST_FILE, "w") as f:
-                json.dump({
+            with open(REQUEST_FILE, "w", encoding="utf-8-sig") as f:
+                f.write(json_dumps({
                     "command": command,
                     **params  # Include parameters directly in the main JSON object
-                }, f, indent=2)
+                }, indent=2))
             
             logger.info(f"Wrote request file for command: {command}")
             
@@ -399,14 +404,14 @@ async def get_all_component_property_names(ctx: Context) -> str:
     if not response.get("success", False):
         error_msg = response.get("error", "Unknown error")
         logger.error(f"Error getting component data: {error_msg}")
-        return json.dumps({"error": f"Failed to get component data: {error_msg}"})
+        return json_dumps({"error": f"Failed to get component data: {error_msg}"})
     
     # Get the component data
     components_data = response.get("result", [])
     
     if not components_data:
         logger.info("No component data found")
-        return json.dumps({"error": "No component data found"})
+        return json_dumps({"error": "No component data found"})
     
     try:
         # Parse the data if it's a string
@@ -424,10 +429,10 @@ async def get_all_component_property_names(ctx: Context) -> str:
         property_list = sorted(list(property_names))
         
         logger.info(f"Found {len(property_list)} unique property names")
-        return json.dumps(property_list, indent=2)
+        return json_dumps(property_list, indent=2)
     except Exception as e:
         logger.error(f"Error processing component data: {e}")
-        return json.dumps({"error": f"Failed to process component data: {str(e)}"})
+        return json_dumps({"error": f"Failed to process component data: {str(e)}"})
 
 @mcp.tool()
 async def get_component_property_values(ctx: Context, property_name: str) -> str:
@@ -452,14 +457,14 @@ async def get_component_property_values(ctx: Context, property_name: str) -> str
     if not response.get("success", False):
         error_msg = response.get("error", "Unknown error")
         logger.error(f"Error getting component data: {error_msg}")
-        return json.dumps({"error": f"Failed to get component data: {error_msg}"})
+        return json_dumps({"error": f"Failed to get component data: {error_msg}"})
     
     # Get the component data
     components_data = response.get("result", [])
     
     if not components_data:
         logger.info("No component data found")
-        return json.dumps({"error": "No component data found"})
+        return json_dumps({"error": "No component data found"})
     
     try:
         # Parse the data if it's a string
@@ -479,10 +484,10 @@ async def get_component_property_values(ctx: Context, property_name: str) -> str
                 })
         
         logger.info(f"Found {len(property_values)} components with property '{property_name}'")
-        return json.dumps(property_values, indent=2)
+        return json_dumps(property_values, indent=2)
     except Exception as e:
         logger.error(f"Error processing component data: {e}")
-        return json.dumps({"error": f"Failed to process component data: {str(e)}"})
+        return json_dumps({"error": f"Failed to process component data: {str(e)}"})
     
 @mcp.tool()
 async def get_symbol_placement_rules(ctx: Context) -> str:
@@ -518,7 +523,7 @@ async def get_symbol_placement_rules(ctx: Context) -> str:
                       f"Suggested content: {default_rules}"
         }
         
-        return json.dumps(message, indent=2)
+        return json_dumps(message, indent=2)
     
     # Read the rules file if it exists
     try:
@@ -534,11 +539,11 @@ async def get_symbol_placement_rules(ctx: Context) -> str:
             "rules": rules_content
         }
         
-        return json.dumps(result, indent=2)
+        return json_dumps(result, indent=2)
         
     except Exception as e:
         logger.error(f"Error reading symbol placement rules file: {e}")
-        return json.dumps({
+        return json_dumps({
             "success": False,
             "error": f"Failed to read rules file: {str(e)}"
         }, indent=2)
@@ -564,17 +569,17 @@ async def get_library_symbol_reference(ctx: Context) -> str:
     if not response.get("success", False):
         error_msg = response.get("error", "Unknown error")
         logger.error(f"Error getting symbol reference: {error_msg}")
-        return json.dumps({"error": f"Failed to get symbol reference: {error_msg}"})
+        return json_dumps({"error": f"Failed to get symbol reference: {error_msg}"}, ensure_ascii=False)
     
     # Get the symbol reference data
     symbol_data = response.get("result", {})
     
     if not symbol_data:
         logger.info("No symbol reference data found")
-        return json.dumps({"error": "No symbol reference data found or no symbol is currently selected in the library"})
+        return json_dumps({"error": "No symbol reference data found or no symbol is currently selected in the library"}, ensure_ascii=False)
     
     logger.info(f"Retrieved symbol reference data")
-    return json.dumps(symbol_data, indent=2)
+    return json_dumps(symbol_data, indent=2, ensure_ascii=False)
 
 @mcp.tool()
 async def search_library_symbol(ctx: Context, symbol_name: str, library_path: str = "") -> str:
@@ -612,17 +617,17 @@ async def search_library_symbol(ctx: Context, symbol_name: str, library_path: st
     if not response.get("success", False):
         error_msg = response.get("error", "Unknown error")
         logger.error(f"Error searching for symbol: {error_msg}")
-        return json.dumps({"error": f"Failed to search for symbol: {error_msg}"})
+        return json_dumps({"error": f"Failed to search for symbol: {error_msg}"})
 
     # Get the result data
     result = response.get("result", {})
 
     if not result:
         logger.info("No search results returned")
-        return json.dumps({"error": "No results returned from symbol search"})
+        return json_dumps({"error": "No results returned from symbol search"})
 
     logger.info(f"Symbol search complete. Found: {result.get('found', False)}")
-    return json.dumps(result, indent=2)
+    return json_dumps(result, indent=2)
 
 @mcp.tool()
 async def create_schematic_symbol(ctx: Context, symbol_name: str, description: str, pins: list, part_count: int = 1) -> str:
@@ -647,6 +652,9 @@ async def create_schematic_symbol(ctx: Context, symbol_name: str, description: s
                     Pin orientations: eRotate0 (right), eRotate90 (down), eRotate180 (left), eRotate270 (up)
                     X,Y coordinates in mils. The Altium script snaps generated
                     symbol primitives to the configured 2.5 mm schematic grid.
+                    When a reference library component is open, generated pins and
+                               primitives copy reference styling, including pin length,
+                               font settings, line width, and colours.
                     owner_part_id (optional): Part number the pin belongs to (1-based).
                                Use 0 for pins shared across all parts (e.g. power/GND).
                                Defaults to 1 if omitted. Only needed for multi-part symbols.
@@ -677,13 +685,13 @@ async def create_schematic_symbol(ctx: Context, symbol_name: str, description: s
     if not response.get("success", False):
         error_msg = response.get("error", "Unknown error")
         logger.error(f"Error creating symbol: {error_msg}")
-        return json.dumps({"success": False, "error": f"Failed to create symbol: {error_msg}"})
+        return json_dumps({"success": False, "error": f"Failed to create symbol: {error_msg}"})
     
     # Get the result data
     result = response.get("result", {})
     
     logger.info(f"Symbol {symbol_name} created successfully with {len(pins)} pins")
-    return json.dumps(result, indent=2)
+    return json_dumps(result, indent=2)
 
 @mcp.tool()
 async def get_schematic_data(ctx: Context, cmp_designators: list) -> str:
@@ -708,14 +716,14 @@ async def get_schematic_data(ctx: Context, cmp_designators: list) -> str:
     if not response.get("success", False):
         error_msg = response.get("error", "Unknown error")
         logger.error(f"Error getting schematic data: {error_msg}")
-        return json.dumps({"error": f"Failed to get schematic data: {error_msg}"})
+        return json_dumps({"error": f"Failed to get schematic data: {error_msg}"})
     
     # Get the schematic data
     schematic_data = response.get("result", [])
     
     if not schematic_data:
         logger.info("No schematic data found")
-        return json.dumps({"error": "No schematic data found"})
+        return json_dumps({"error": "No schematic data found"})
     
     try:
         # Parse the data if it's a string
@@ -748,10 +756,10 @@ async def get_schematic_data(ctx: Context, cmp_designators: list) -> str:
             logger.info(f"Some designators not found in schematic data: {missing_designators}")
         
         logger.info(f"Found schematic data for {len(components)} components")
-        return json.dumps(result, indent=2)
+        return json_dumps(result, indent=2)
     except Exception as e:
         logger.error(f"Error processing schematic data: {e}")
-        return json.dumps({"error": f"Failed to process schematic data: {str(e)}"})
+        return json_dumps({"error": f"Failed to process schematic data: {str(e)}"})
     
 @mcp.tool()
 async def get_pcb_layers(ctx: Context) -> str:
@@ -774,17 +782,17 @@ async def get_pcb_layers(ctx: Context) -> str:
     if not response.get("success", False):
         error_msg = response.get("error", "Unknown error")
         logger.error(f"Error getting PCB layers: {error_msg}")
-        return json.dumps({"error": f"Failed to get PCB layers: {error_msg}"})
+        return json_dumps({"error": f"Failed to get PCB layers: {error_msg}"})
     
     # Get the layers data
     layers_data = response.get("result", [])
     
     if not layers_data:
         logger.info("No PCB layers found")
-        return json.dumps({"message": "No PCB layers found in the current document"})
+        return json_dumps({"message": "No PCB layers found in the current document"})
     
     logger.info(f"Retrieved PCB layers data")
-    return json.dumps(layers_data, indent=2)
+    return json_dumps(layers_data, indent=2)
 
 @mcp.tool()
 async def set_pcb_layer_visibility(ctx: Context, layer_names: list, visible: bool) -> str:
@@ -813,13 +821,13 @@ async def set_pcb_layer_visibility(ctx: Context, layer_names: list, visible: boo
     if not response.get("success", False):
         error_msg = response.get("error", "Unknown error")
         logger.error(f"Error setting layer visibility: {error_msg}")
-        return json.dumps({"success": False, "error": f"Failed to set layer visibility: {error_msg}"})
+        return json_dumps({"success": False, "error": f"Failed to set layer visibility: {error_msg}"})
     
     # Get the result data
     result = response.get("result", {})
     
     logger.info(f"Layer visibility set successfully")
-    return json.dumps(result, indent=2)
+    return json_dumps(result, indent=2)
 
 @mcp.tool()
 async def get_component_data(ctx: Context, cmp_designators: list) -> str:
@@ -844,14 +852,14 @@ async def get_component_data(ctx: Context, cmp_designators: list) -> str:
     if not response.get("success", False):
         error_msg = response.get("error", "Unknown error")
         logger.error(f"Error getting component data: {error_msg}")
-        return json.dumps({"error": f"Failed to get component data: {error_msg}"})
+        return json_dumps({"error": f"Failed to get component data: {error_msg}"})
     
     # Get the component data
     component_data = response.get("result", [])
     
     if not component_data:
         logger.info("No component data found")
-        return json.dumps({"error": "No component data found"})
+        return json_dumps({"error": "No component data found"})
     
     try:
         # Parse the data if it's a string
@@ -884,10 +892,10 @@ async def get_component_data(ctx: Context, cmp_designators: list) -> str:
             logger.info(f"Some designators not found: {missing_designators}")
         
         logger.info(f"Found data for {len(components)} components")
-        return json.dumps(result, indent=2)
+        return json_dumps(result, indent=2)
     except Exception as e:
         logger.error(f"Error processing component data: {e}")
-        return json.dumps({"error": f"Failed to process component data: {str(e)}"})
+        return json_dumps({"error": f"Failed to process component data: {str(e)}"})
 
 @mcp.tool()
 async def get_selected_components_coordinates(ctx: Context) -> str:
@@ -909,17 +917,17 @@ async def get_selected_components_coordinates(ctx: Context) -> str:
     if not response.get("success", False):
         error_msg = response.get("error", "Unknown error")
         logger.error(f"Error getting selected components coordinates: {error_msg}")
-        return json.dumps({"error": f"Failed to get selected components coordinates: {error_msg}"})
+        return json_dumps({"error": f"Failed to get selected components coordinates: {error_msg}"})
     
     # Get the components coordinates data
     components_coords = response.get("result", [])
     
     if not components_coords:
         logger.info("No selected components found")
-        return json.dumps({"message": "No components are currently selected in the layout"})
+        return json_dumps({"message": "No components are currently selected in the layout"})
     
     logger.info(f"Retrieved positioning data for selected components")
-    return json.dumps(components_coords, indent=2)
+    return json_dumps(components_coords, indent=2)
 
 @mcp.tool()
 async def get_all_designators(ctx: Context) -> str:
@@ -941,14 +949,14 @@ async def get_all_designators(ctx: Context) -> str:
     if not response.get("success", False):
         error_msg = response.get("error", "Unknown error")
         logger.error(f"Error getting component data: {error_msg}")
-        return json.dumps({"error": f"Failed to get component data: {error_msg}"})
+        return json_dumps({"error": f"Failed to get component data: {error_msg}"})
     
     # Get the component data
     component_data = response.get("result", [])
     
     if not component_data:
         logger.info("No component data found")
-        return json.dumps({"error": "No component data found"})
+        return json_dumps({"error": "No component data found"})
     
     try:
         # Parse the data if it's a string
@@ -961,10 +969,10 @@ async def get_all_designators(ctx: Context) -> str:
         designators = [comp.get("designator") for comp in component_list if "designator" in comp]
         
         logger.info(f"Found {len(designators)} designators")
-        return json.dumps(designators)
+        return json_dumps(designators)
     except Exception as e:
         logger.error(f"Error processing component data: {e}")
-        return json.dumps({"error": f"Failed to process component data: {str(e)}"})
+        return json_dumps({"error": f"Failed to process component data: {str(e)}"})
 
 @mcp.tool()
 async def get_component_pins(ctx: Context, cmp_designators: list) -> str:
@@ -989,17 +997,17 @@ async def get_component_pins(ctx: Context, cmp_designators: list) -> str:
     if not response.get("success", False):
         error_msg = response.get("error", "Unknown error")
         logger.error(f"Error getting pin data: {error_msg}")
-        return json.dumps({"error": f"Failed to get pin data: {error_msg}"})
+        return json_dumps({"error": f"Failed to get pin data: {error_msg}"})
     
     # Get the components pins data
     pins_data = response.get("result", [])
     
     if not pins_data:
         logger.info(f"No pin data found for designators: {cmp_designators}")
-        return json.dumps({"message": "No pin data found for the specified components"})
+        return json_dumps({"message": "No pin data found for the specified components"})
     
     logger.info(f"Retrieved pin data for components")
-    return json.dumps(pins_data, indent=2)
+    return json_dumps(pins_data, indent=2)
 
 @mcp.tool()
 async def get_all_nets(ctx: Context) -> str:
@@ -1018,10 +1026,10 @@ async def get_all_nets(ctx: Context) -> str:
     if not response.get("success", False):
         error_msg = response.get("error", "Unknown error")
         logger.error(f"Error getting nets: {error_msg}")
-        return json.dumps({"error": f"Failed to get nets: {error_msg}"})
+        return json_dumps({"error": f"Failed to get nets: {error_msg}"})
 
     # Result is already a JSON‑serialisable Python list
-    return json.dumps(response.get("result", []), indent=2)
+    return json_dumps(response.get("result", []), indent=2)
 
 @mcp.tool()
 async def create_net_class(ctx: Context, class_name: str, net_names: list) -> str:
@@ -1050,13 +1058,13 @@ async def create_net_class(ctx: Context, class_name: str, net_names: list) -> st
     if not response.get("success", False):
         error_msg = response.get("error", "Unknown error")
         logger.error(f"Error creating net class: {error_msg}")
-        return json.dumps({"success": False, "error": f"Failed to create net class: {error_msg}"})
+        return json_dumps({"success": False, "error": f"Failed to create net class: {error_msg}"})
     
     # Get the result data
     result = response.get("result", {})
     
     logger.info(f"Net class '{class_name}' created/modified successfully")
-    return json.dumps(result, indent=2)
+    return json_dumps(result, indent=2)
     
 @mcp.tool()
 async def set_component_position(ctx: Context, cmp_designator: str, x: float, y: float, rotation: float = -1) -> str:
@@ -1087,11 +1095,11 @@ async def set_component_position(ctx: Context, cmp_designator: str, x: float, y:
     if not response.get("success", False):
         error_msg = response.get("error", "Unknown error")
         logger.error(f"Error setting component position: {error_msg}")
-        return json.dumps({"success": False, "error": f"Failed to set component position: {error_msg}"})
+        return json_dumps({"success": False, "error": f"Failed to set component position: {error_msg}"})
     
     result = response.get("result", {})
     logger.info(f"Component position set successfully")
-    return json.dumps({"success": True, "result": result}, indent=2)
+    return json_dumps({"success": True, "result": result}, indent=2)
 
 @mcp.tool()
 async def move_components(ctx: Context, cmp_designators: list, x_offset: float, y_offset: float, rotation: float = 0) -> str:
@@ -1127,13 +1135,13 @@ async def move_components(ctx: Context, cmp_designators: list, x_offset: float, 
     if not response.get("success", False):
         error_msg = response.get("error", "Unknown error")
         logger.error(f"Error moving components: {error_msg}")
-        return json.dumps({"success": False, "error": f"Failed to move components: {error_msg}"})
+        return json_dumps({"success": False, "error": f"Failed to move components: {error_msg}"})
     
     # Get the result data
     result = response.get("result", {})
     
     logger.info(f"Components moved successfully")
-    return json.dumps({"success": True, "result": result}, indent=2)
+    return json_dumps({"success": True, "result": result}, indent=2)
 
 @mcp.tool()
 async def get_screenshot(ctx: Context, view_type: str = "pcb") -> str:
@@ -1159,7 +1167,7 @@ async def get_screenshot(ctx: Context, view_type: str = "pcb") -> str:
         if not response.get("success", False):
             error_msg = response.get("error", "Unknown error")
             logger.error(f"Error focusing {view_type} document: {error_msg}")
-            return json.dumps({"success": False, "error": f"Failed to focus the correct document type: {error_msg}"})
+            return json_dumps({"success": False, "error": f"Failed to focus the correct document type: {error_msg}"})
         
         # Run the screenshot capture in a separate thread
         import threading
@@ -1316,26 +1324,26 @@ async def get_screenshot(ctx: Context, view_type: str = "pcb") -> str:
         
         if thread.is_alive():
             logger.error("Screenshot thread timed out")
-            return json.dumps({"success": False, "error": "Screenshot operation timed out"})
+            return json_dumps({"success": False, "error": "Screenshot operation timed out"})
         
         # Get the result from the queue
         if result_queue.empty():
             logger.error("Screenshot thread did not return a result")
-            return json.dumps({"success": False, "error": "Screenshot thread did not return a result"})
+            return json_dumps({"success": False, "error": "Screenshot thread did not return a result"})
         
         result = result_queue.get()
         
         if not result.get("success", False):
             error_msg = result.get("error", "Unknown error")
             logger.error(f"Screenshot error: {error_msg}")
-            return json.dumps({"success": False, "error": error_msg})
+            return json_dumps({"success": False, "error": error_msg})
         
         logger.info(f"Screenshot taken successfully, size: {result['width']}x{result['height']}")
-        return json.dumps(result)
+        return json_dumps(result)
     
     except Exception as e:
         logger.error(f"Error in screenshot function: {str(e)}")
-        return json.dumps({"success": False, "error": f"Failed to take screenshot: {str(e)}"})
+        return json_dumps({"success": False, "error": f"Failed to take screenshot: {str(e)}"})
     
 @mcp.tool()
 async def layout_duplicator(ctx: Context) -> str:
@@ -1357,14 +1365,14 @@ async def layout_duplicator(ctx: Context) -> str:
     if not response.get("success", False):
         error_msg = response.get("error", "Unknown error")
         logger.error(f"Error in layout duplication selection: {error_msg}")
-        return json.dumps({"success": False, "error": f"Failed to start layout duplication: {error_msg}"})
+        return json_dumps({"success": False, "error": f"Failed to start layout duplication: {error_msg}"})
     
     # Get the component data
     components_data = response.get("result", {})
     
     if not components_data:
         logger.info("No component data found")
-        return json.dumps({"success": False, "error": "No component data returned from Altium"})
+        return json_dumps({"success": False, "error": "No component data returned from Altium"})
     
     # Parse the result to check if no source components were selected
     try:
@@ -1372,12 +1380,12 @@ async def layout_duplicator(ctx: Context) -> str:
             result_json = json.loads(components_data)
             if not result_json.get("success", True):
                 logger.info(f"Source component selection issue: {result_json.get('message', 'Unknown issue')}")
-                return json.dumps(result_json)
+                return json_dumps(result_json)
     except Exception as e:
         logger.error(f"Error parsing layout duplicator result: {e}")
     
     logger.info(f"Retrieved layout duplicator component data")
-    return json.dumps(components_data, indent=2)
+    return json_dumps(components_data, indent=2)
 
 @mcp.tool()
 async def layout_duplicator_apply(ctx: Context, source_designators: list, destination_designators: list) -> str:
@@ -1406,13 +1414,13 @@ async def layout_duplicator_apply(ctx: Context, source_designators: list, destin
     if not response.get("success", False):
         error_msg = response.get("error", "Unknown error")
         logger.error(f"Error applying layout duplication: {error_msg}")
-        return json.dumps({"success": False, "error": f"Failed to apply layout duplication: {error_msg}"})
+        return json_dumps({"success": False, "error": f"Failed to apply layout duplication: {error_msg}"})
     
     # Get the result data
     result = response.get("result", {})
     
     logger.info(f"Layout duplication applied successfully")
-    return json.dumps(result, indent=2)
+    return json_dumps(result, indent=2)
     
 @mcp.tool()
 async def get_pcb_rules(ctx: Context) -> str:
@@ -1434,17 +1442,17 @@ async def get_pcb_rules(ctx: Context) -> str:
     if not response.get("success", False):
         error_msg = response.get("error", "Unknown error")
         logger.error(f"Error getting PCB rules: {error_msg}")
-        return json.dumps({"error": f"Failed to get PCB rules: {error_msg}"})
+        return json_dumps({"error": f"Failed to get PCB rules: {error_msg}"})
     
     # Get the rules data
     rules_data = response.get("result", [])
     
     if not rules_data:
         logger.info("No PCB rules found")
-        return json.dumps({"message": "No PCB rules found in the current document"})
+        return json_dumps({"message": "No PCB rules found in the current document"})
     
     logger.info(f"Retrieved PCB rules data")
-    return json.dumps(rules_data, indent=2)
+    return json_dumps(rules_data, indent=2)
 
 @mcp.tool()
 async def get_pcb_layer_stackup(ctx: Context) -> str:
@@ -1467,17 +1475,17 @@ async def get_pcb_layer_stackup(ctx: Context) -> str:
     if not response.get("success", False):
         error_msg = response.get("error", "Unknown error")
         logger.error(f"Error getting PCB layer stackup: {error_msg}")
-        return json.dumps({"error": f"Failed to get PCB layer stackup: {error_msg}"})
+        return json_dumps({"error": f"Failed to get PCB layer stackup: {error_msg}"})
     
     # Get the stackup data
     stackup_data = response.get("result", {})
     
     if not stackup_data:
         logger.info("No PCB layer stackup found")
-        return json.dumps({"message": "No PCB layer stackup found in the current document"})
+        return json_dumps({"message": "No PCB layer stackup found in the current document"})
     
     logger.info(f"Retrieved PCB layer stackup data")
-    return json.dumps(stackup_data, indent=2)
+    return json_dumps(stackup_data, indent=2)
 
 @mcp.tool()
 async def get_output_job_containers(ctx: Context) -> str:
@@ -1502,14 +1510,14 @@ async def get_output_job_containers(ctx: Context) -> str:
     if not response.get("success", False):
         error_msg = response.get("error", "Unknown error")
         logger.error(f"Error getting output job containers: {error_msg}")
-        return json.dumps({"error": f"Failed to get output job containers: {error_msg}"})
+        return json_dumps({"error": f"Failed to get output job containers: {error_msg}"})
     
     # Get the containers data
     containers_data = response.get("result", [])
     
     if not containers_data:
         logger.info("No output job containers found")
-        return json.dumps({"message": "No output job containers found"})
+        return json_dumps({"message": "No output job containers found"})
     
     logger.info(f"Retrieved output job containers data")
     return containers_data  # Already in JSON format
@@ -1538,7 +1546,7 @@ async def run_output_jobs(ctx: Context, container_names: list) -> str:
     if not response.get("success", False):
         error_msg = response.get("error", "Unknown error")
         logger.error(f"Error running output jobs: {error_msg}")
-        return json.dumps({"error": f"Failed to run output jobs: {error_msg}"})
+        return json_dumps({"error": f"Failed to run output jobs: {error_msg}"})
     
     # Get the result data
     result_data = response.get("result", {})
@@ -1550,7 +1558,7 @@ async def run_output_jobs(ctx: Context, container_names: list) -> str:
         return result_data
     
     # Otherwise, convert to JSON
-    return json.dumps(result_data, indent=2)
+    return json_dumps(result_data, indent=2)
 
 @mcp.tool()
 async def create_pcb_footprint(ctx: Context, footprint_name: str, description: str, pads: list, courtyard_x_mm: float = 0, courtyard_y_mm: float = 0) -> str:
@@ -1592,11 +1600,11 @@ async def create_pcb_footprint(ctx: Context, footprint_name: str, description: s
     if not response.get("success", False):
         error_msg = response.get("error", "Unknown error")
         logger.error(f"Error creating footprint: {error_msg}")
-        return json.dumps({"success": False, "error": f"Failed to create footprint: {error_msg}"})
+        return json_dumps({"success": False, "error": f"Failed to create footprint: {error_msg}"})
 
     result = response.get("result", {})
     logger.info(f"Footprint {footprint_name} created successfully")
-    return json.dumps(result, indent=2)
+    return json_dumps(result, indent=2)
 
 @mcp.tool()
 async def get_server_status(ctx: Context) -> str:
@@ -1609,7 +1617,7 @@ async def get_server_status(ctx: Context) -> str:
         "script_found": os.path.exists(altium_bridge.config.script_path),
     }
     
-    return json.dumps(status, indent=2)
+    return json_dumps(status, indent=2)
 
 if __name__ == "__main__":
     logger.info("Starting Altium MCP Server...")

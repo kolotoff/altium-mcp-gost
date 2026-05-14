@@ -275,6 +275,55 @@ begin
     end;
 end;
 
+function SplitCenterLabelText(LabelText: String; var Line1: String; var Line2: String): Integer;
+var
+    TrimmedText : String;
+    MidPoint    : Integer;
+    BreakPos    : Integer;
+    BestDistance : Integer;
+    Distance    : Integer;
+    I           : Integer;
+begin
+    TrimmedText := Trim(LabelText);
+    Line1 := TrimmedText;
+    Line2 := '';
+    Result := 1;
+
+    if (Pos(' ', TrimmedText) = 0) then
+        Exit;
+
+    MidPoint := Length(TrimmedText) div 2;
+    BreakPos := 0;
+    BestDistance := Length(TrimmedText);
+
+    for I := 1 to Length(TrimmedText) do
+    begin
+        if (TrimmedText[I] = ' ') then
+        begin
+            Distance := Abs(I - MidPoint);
+            if (Distance < BestDistance) then
+            begin
+                BestDistance := Distance;
+                BreakPos := I;
+            end;
+        end;
+    end;
+
+    if (BreakPos > 0) then
+    begin
+        Line1 := Trim(Copy(TrimmedText, 1, BreakPos - 1));
+        Line2 := Trim(Copy(TrimmedText, BreakPos + 1, Length(TrimmedText) - BreakPos));
+        if (Line1 <> '') and (Line2 <> '') then
+            Result := 2
+        else
+        begin
+            Line1 := TrimmedText;
+            Line2 := '';
+            Result := 1;
+        end;
+    end;
+end;
+
 function CreateSchematicSymbol(SymbolName: String; PinsList: TStringList; PartCount: Integer = 1): String;
 var
     CurrentLib       : ISch_Lib;
@@ -336,6 +385,9 @@ var
     ParameterLine    : String;
     DelimiterSpec, DelimiterSide, DelimiterYText : String;
     PipePos          : Integer;
+    CenterLabelLine1, CenterLabelLine2, CenterLabelText : String;
+    CenterLabelLineCount, CenterLabelLineIndex, CenterLabelLineY : Integer;
+    LabelCenterXCoord : Integer;
     ParameterOverrides : TStringList;
     CopiedParameterNames : TStringList;
     PinDescriptions  : TStringList;
@@ -830,25 +882,52 @@ begin
                 CenterLabelX := Divider1X + 1;
                 CenterLabelY := MinY + ((MaxY - MinY) div 2);
             end;
-            SchLabel := Nil;
-            if (ReferenceLabel <> Nil) then
-                SchLabel := ReferenceLabel.Replicate;
-            if (SchLabel = Nil) then
-                SchLabel := SchServer.SchObjectFactory(eLabel, eCreate_Default);
-            if (SchLabel <> Nil) then
+
+            CenterLabelLineCount := SplitCenterLabelText(CenterLabel, CenterLabelLine1, CenterLabelLine2);
+            for CenterLabelLineIndex := 1 to CenterLabelLineCount do
             begin
-                SchLabel.Text := CenterLabel;
+                if (CenterLabelLineIndex = 1) then
+                    CenterLabelText := CenterLabelLine1
+                else
+                    CenterLabelText := CenterLabelLine2;
+
+                SchLabel := Nil;
+                if (ReferenceLabel <> Nil) then
+                    SchLabel := ReferenceLabel.Replicate;
+                if (SchLabel = Nil) then
+                    SchLabel := SchServer.SchObjectFactory(eLabel, eCreate_Default);
+                if (SchLabel = Nil) then
+                    Continue;
+
+                SchLabel.Text := CenterLabelText;
                 if (CenterLabelPosition = 'TOPCENTER') then
                 begin
                     BodyCenterXCoord := (GridIndexToCoord(MinX, GridSizeMM) + GridIndexToCoord(MaxX, GridSizeMM)) div 2;
-                    LabelYCoord := GridIndexToCoord(CenterLabelY, GridSizeMM);
-                    SchLabel.Location := Point(BodyCenterXCoord, LabelYCoord);
-                    LabelRect := SchLabel.BoundingRectangle;
-                    LabelCenterOffsetX := ((LabelRect.Left + LabelRect.Right) div 2) - BodyCenterXCoord;
-                    SchLabel.Location := Point(BodyCenterXCoord - LabelCenterOffsetX, LabelYCoord);
+                    if (CenterLabelLineCount = 2) then
+                        CenterLabelLineY := CenterLabelY - ((CenterLabelLineIndex - 1) * 2)
+                    else
+                        CenterLabelLineY := CenterLabelY;
+                    LabelCenterXCoord := BodyCenterXCoord;
                 end
                 else
-                    SchLabel.Location := Point(GridIndexToCoord(CenterLabelX, GridSizeMM), GridIndexToCoord(CenterLabelY, GridSizeMM));
+                begin
+                    if (CenterLabelLineCount = 2) then
+                    begin
+                        if (CenterLabelLineIndex = 1) then
+                            CenterLabelLineY := CenterLabelY + 1
+                        else
+                            CenterLabelLineY := CenterLabelY - 1;
+                    end
+                    else
+                        CenterLabelLineY := CenterLabelY;
+                    LabelCenterXCoord := (GridIndexToCoord(Divider1X, GridSizeMM) + GridIndexToCoord(Divider2X, GridSizeMM)) div 2;
+                end;
+
+                LabelYCoord := GridIndexToCoord(CenterLabelLineY, GridSizeMM);
+                SchLabel.Location := Point(LabelCenterXCoord, LabelYCoord);
+                LabelRect := SchLabel.BoundingRectangle;
+                LabelCenterOffsetX := ((LabelRect.Left + LabelRect.Right) div 2) - LabelCenterXCoord;
+                SchLabel.Location := Point(LabelCenterXCoord - LabelCenterOffsetX, LabelYCoord);
                 SchLabel.OwnerPartId := J;
                 SchLabel.OwnerPartDisplayMode := 0;
                 SchComponent.AddSchObject(SchLabel);

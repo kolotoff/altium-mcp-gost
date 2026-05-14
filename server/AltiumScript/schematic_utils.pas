@@ -205,6 +205,8 @@ begin
               (Pos('Comment=', Line) = 1) or
               (Pos('Manufacturer=', Line) = 1) or
               (Pos('PinDescription=', Line) = 1) or
+              (Pos('GroupDelimiter=', Line) = 1) or
+              (Pos('GroupDelimiterYMM=', Line) = 1) or
               (Pos('SideSectionWidthMM=', Line) = 1) or
               (Pos('Parameter=', Line) = 1);
 end;
@@ -232,12 +234,14 @@ var
     ReferenceRect    : ISch_Rectangle;
     ReferenceLine1   : ISch_Line;
     ReferenceLine2   : ISch_Line;
+    ReferenceHorizontalLine : ISch_Line;
     ReferenceLabel   : ISch_Label;
     ReferenceParameter : ISch_Parameter;
     SourceParameter  : ISch_Parameter;
     StyleIterator    : ISch_Iterator;
     ParameterIterator : ISch_Iterator;
     ExistingComponent : ISch_Component;
+    ExistingComponentToRemove : ISch_Component;
     ExistingIterator  : ISch_Iterator;
     SchComponent     : ISch_Component;
     SchPin           : ISch_Pin;
@@ -262,6 +266,7 @@ var
     RefLine1X, RefLine2X : Integer;
     Divider1X, Divider2X : Integer;
     CenterLabelX, CenterLabelY : Integer;
+    DelimiterY, DelimiterX1, DelimiterX2 : Integer;
     HasPins          : Boolean;
     ResultProps      : TStringList;
     Description      : String;
@@ -278,10 +283,12 @@ var
     ParameterName    : String;
     ParameterValue   : String;
     ParameterLine    : String;
+    DelimiterSpec, DelimiterSide, DelimiterYText : String;
     PipePos          : Integer;
     ParameterOverrides : TStringList;
     CopiedParameterNames : TStringList;
     PinDescriptions  : TStringList;
+    GroupDelimiters  : TStringList;
     OutputLines      : TStringList;
 begin
     // Check if we have a schematic library document
@@ -300,6 +307,7 @@ begin
     ReferenceRect := Nil;
     ReferenceLine1 := Nil;
     ReferenceLine2 := Nil;
+    ReferenceHorizontalLine := Nil;
     ReferenceLabel := Nil;
     ReferenceParameter := Nil;
     if (ReferenceComponent <> Nil) then
@@ -333,10 +341,12 @@ begin
                     if (ReferenceLineCount = 1) then
                         ReferenceLine1 := SchLine
                     else if (ReferenceLineCount = 2) then
-                    begin
                         ReferenceLine2 := SchLine;
-                        Break;
-                    end;
+                end
+                else if (Round(CoordToMils(SchLine.Location.Y)) = Round(CoordToMils(SchLine.Corner.Y))) and
+                        (ReferenceHorizontalLine = Nil) then
+                begin
+                    ReferenceHorizontalLine := SchLine;
                 end;
                 SchLine := StyleIterator.NextSchObject;
             end;
@@ -372,6 +382,7 @@ begin
     ParameterOverrides := TStringList.Create;
     CopiedParameterNames := TStringList.Create;
     PinDescriptions := TStringList.Create;
+    GroupDelimiters := TStringList.Create;
     ParameterOverrides.CaseSensitive := False;
     CopiedParameterNames.CaseSensitive := False;
     PinDescriptions.CaseSensitive := False;
@@ -413,6 +424,14 @@ begin
                         PinDescriptions.Values[PinNum] := PinDescription;
                 end;
             end
+            else if (Pos('GroupDelimiter=', PinsList[I]) = 1) then
+            begin
+                GroupDelimiters.Add(Copy(PinsList[I], 16, Length(PinsList[I]) - 15));
+            end
+            else if (Pos('GroupDelimiterYMM=', PinsList[I]) = 1) then
+            begin
+                GroupDelimiters.Add('BOTH|' + Copy(PinsList[I], 19, Length(PinsList[I]) - 18));
+            end
             else if (Pos('SideSectionWidthMM=', PinsList[I]) = 1) then
             begin
                 SideSectionWidthGrid := Round(SafeStrToFloat(Copy(PinsList[I], 20, Length(PinsList[I]) - 19)) / GridSizeMM);
@@ -451,13 +470,10 @@ begin
         if (CenterLabel <> '') and (CenterLabelPosition = '') then
             CenterLabelPosition := 'TOPCENTER';
 
-        if (ReferenceComponent <> Nil) and (UpperCase(ReferenceComponent.LibReference) = UpperCase(SymbolName)) then
-        begin
-            Result := 'ERROR: Active library component is also the replacement target. Select the style reference symbol first.';
-            Exit;
-        end;
-
-    // Replace an existing symbol with the same library reference instead of appending a duplicate.
+    // Find an existing symbol with the same library reference so it can be
+    // replaced after the new component has copied all style primitives. This
+    // also allows the active target symbol itself to be used as the reference.
+    ExistingComponentToRemove := Nil;
     ExistingIterator := CurrentLib.SchLibIterator_Create;
     try
         ExistingIterator.AddFilter_ObjectSet(MkSet(eSchComponent));
@@ -466,7 +482,7 @@ begin
         begin
             if (UpperCase(ExistingComponent.LibReference) = UpperCase(SymbolName)) then
             begin
-                CurrentLib.RemoveSchComponent(ExistingComponent);
+                ExistingComponentToRemove := ExistingComponent;
                 Break;
             end;
             ExistingComponent := ExistingIterator.NextSchObject;
@@ -647,7 +663,92 @@ begin
             SchComponent.AddSchObject(SchLine);
         end;
 
-        if (CenterLabel <> '') or (ReferenceLabel <> Nil) then
+        for I := 0 to GroupDelimiters.Count - 1 do
+        begin
+            DelimiterSpec := GroupDelimiters[I];
+            PipePos := Pos('|', DelimiterSpec);
+            if (PipePos > 0) then
+            begin
+                DelimiterSide := UpperCase(Copy(DelimiterSpec, 1, PipePos - 1));
+                DelimiterYText := Copy(DelimiterSpec, PipePos + 1, Length(DelimiterSpec) - PipePos);
+            end
+            else
+            begin
+                DelimiterSide := 'BOTH';
+                DelimiterYText := DelimiterSpec;
+            end;
+            DelimiterY := Round(SafeStrToFloat(DelimiterYText) / GridSizeMM);
+
+            if (DelimiterSide = 'FULL') then
+            begin
+                DelimiterX1 := MinX;
+                DelimiterX2 := MaxX;
+            end
+            else if (DelimiterSide = 'CENTER') then
+            begin
+                DelimiterX1 := Divider1X;
+                DelimiterX2 := Divider2X;
+            end
+            else if (DelimiterSide = 'RIGHT') then
+            begin
+                DelimiterX1 := Divider2X;
+                DelimiterX2 := MaxX;
+            end
+            else
+            begin
+                DelimiterX1 := MinX;
+                DelimiterX2 := Divider1X;
+            end;
+
+            SchLine := Nil;
+            if (ReferenceHorizontalLine <> Nil) then
+                SchLine := ReferenceHorizontalLine.Replicate
+            else if (ReferenceLine1 <> Nil) then
+                SchLine := ReferenceLine1.Replicate;
+            if (SchLine = Nil) then
+                SchLine := SchServer.SchObjectFactory(eLine, eCreate_Default);
+            if (SchLine <> Nil) then
+            begin
+                if (ReferenceHorizontalLine = Nil) and (ReferenceLine1 = Nil) and (ReferenceRect <> Nil) then
+                begin
+                    SchLine.Color := ReferenceRect.Color;
+                    SchLine.LineWidth := ReferenceRect.LineWidth;
+                end;
+                SchLine.Location := Point(GridIndexToCoord(DelimiterX1, GridSizeMM), GridIndexToCoord(DelimiterY, GridSizeMM));
+                SchLine.Corner := Point(GridIndexToCoord(DelimiterX2, GridSizeMM), GridIndexToCoord(DelimiterY, GridSizeMM));
+                SchLine.OwnerPartId := J;
+                SchLine.OwnerPartDisplayMode := 0;
+                SchComponent.AddSchObject(SchLine);
+            end;
+
+            if (DelimiterSide = 'BOTH') then
+            begin
+                SchLine := Nil;
+                if (ReferenceHorizontalLine <> Nil) then
+                    SchLine := ReferenceHorizontalLine.Replicate
+                else if (ReferenceLine2 <> Nil) then
+                    SchLine := ReferenceLine2.Replicate
+                else if (ReferenceLine1 <> Nil) then
+                    SchLine := ReferenceLine1.Replicate;
+                if (SchLine = Nil) then
+                    SchLine := SchServer.SchObjectFactory(eLine, eCreate_Default);
+                if (SchLine <> Nil) then
+                begin
+                    if (ReferenceHorizontalLine = Nil) and (ReferenceLine1 = Nil) and (ReferenceRect <> Nil) then
+                    begin
+                        SchLine.Color := ReferenceRect.Color;
+                        SchLine.LineWidth := ReferenceRect.LineWidth;
+                    end;
+                    SchLine.Location := Point(GridIndexToCoord(Divider2X, GridSizeMM), GridIndexToCoord(DelimiterY, GridSizeMM));
+                    SchLine.Corner := Point(GridIndexToCoord(MaxX, GridSizeMM), GridIndexToCoord(DelimiterY, GridSizeMM));
+                    SchLine.OwnerPartId := J;
+                    SchLine.OwnerPartDisplayMode := 0;
+                    SchComponent.AddSchObject(SchLine);
+                end;
+            end;
+        end;
+
+        if (CenterLabel <> '') then
         begin
             if (CenterLabelPosition = 'TOPCENTER') then
                 CenterLabelY := MaxY - 1
@@ -663,10 +764,7 @@ begin
                 SchLabel := SchServer.SchObjectFactory(eLabel, eCreate_Default);
             if (SchLabel <> Nil) then
             begin
-                if (CenterLabel <> '') then
-                    SchLabel.Text := CenterLabel
-                else
-                    SchLabel.Text := ReferenceLabel.Text;
+                SchLabel.Text := CenterLabel;
                 if (CenterLabelPosition = 'TOPCENTER') then
                 begin
                     BodyCenterXCoord := (GridIndexToCoord(MinX, GridSizeMM) + GridIndexToCoord(MaxX, GridSizeMM)) div 2;
@@ -796,6 +894,11 @@ begin
         end;
     end;
 
+    // Replace the old component only after all reference style objects have
+    // been replicated into the new component.
+    if (ExistingComponentToRemove <> Nil) then
+        CurrentLib.RemoveSchComponent(ExistingComponentToRemove);
+
     // Add the component to the library
     CurrentLib.AddSchComponent(SchComponent);
 
@@ -829,6 +932,7 @@ begin
         ParameterOverrides.Free;
         CopiedParameterNames.Free;
         PinDescriptions.Free;
+        GroupDelimiters.Free;
     end;
 end;
 

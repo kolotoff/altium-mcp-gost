@@ -226,6 +226,55 @@ begin
     Result := MMsToCoord(GridIndex * GridMM);
 end;
 
+function StripPinNameFormatting(PinName: String): String;
+begin
+    Result := StringReplace(PinName, '\', '', REPLACEALL);
+end;
+
+function RoundUpMMToGrid(ValueMM: Double; GridMM: Double): Integer;
+begin
+    Result := Trunc(ValueMM / GridMM);
+    if ((Result * GridMM) + 0.001) < ValueMM then
+        Result := Result + 1;
+end;
+
+function EstimatePinNameLabelWidthGrid(PinName: String; GridMM: Double): Integer;
+var
+    VisibleText : String;
+begin
+    VisibleText := StripPinNameFormatting(PinName);
+    Result := RoundUpMMToGrid(Length(VisibleText) * 1.55, GridMM);
+end;
+
+function PinNameLabelWidthGrid(PinName: String; ReferenceLabel: ISch_Label; GridMM: Double): Integer;
+var
+    MeasurementLabel : ISch_Label;
+    MeasurementRect  : TCoordRect;
+    WidthCoord       : Integer;
+    MeasuredGrid     : Integer;
+begin
+    Result := EstimatePinNameLabelWidthGrid(PinName, GridMM);
+
+    MeasurementLabel := Nil;
+    if (ReferenceLabel <> Nil) then
+        MeasurementLabel := ReferenceLabel.Replicate;
+    if (MeasurementLabel = Nil) then
+        MeasurementLabel := SchServer.SchObjectFactory(eLabel, eCreate_Default);
+
+    if (MeasurementLabel <> Nil) then
+    begin
+        MeasurementLabel.Text := StripPinNameFormatting(PinName);
+        MeasurementLabel.Location := Point(0, 0);
+        MeasurementRect := MeasurementLabel.BoundingRectangle;
+        WidthCoord := Abs(MeasurementRect.Right - MeasurementRect.Left);
+        MeasuredGrid := RoundUpMMToGrid(CoordToMMs(WidthCoord), GridMM);
+        if (MeasuredGrid > 1) then
+            MeasuredGrid := MeasuredGrid - 1;
+        if (MeasuredGrid > Result) and (MeasuredGrid < 30) then
+            Result := MeasuredGrid;
+    end;
+end;
+
 function CreateSchematicSymbol(SymbolName: String; PinsList: TStringList; PartCount: Integer = 1): String;
 var
     CurrentLib       : ISch_Lib;
@@ -267,6 +316,8 @@ var
     Divider1X, Divider2X : Integer;
     CenterLabelX, CenterLabelY : Integer;
     DelimiterY, DelimiterX1, DelimiterX2 : Integer;
+    RequiredSideSectionWidthGrid : Integer;
+    PinNameWidthGrid : Integer;
     HasPins          : Boolean;
     ResultProps      : TStringList;
     Description      : String;
@@ -469,6 +520,8 @@ begin
 
         if (CenterLabel <> '') and (CenterLabelPosition = '') then
             CenterLabelPosition := 'TOPCENTER';
+        CommentText := SymbolName;
+        ParameterOverrides.Values['PartNumber'] := '=Comment';
 
     // Find an existing symbol with the same library reference so it can be
     // replaced after the new component has copied all style primitives. This
@@ -521,6 +574,7 @@ begin
         // Compute bounding box for this part's pins (including shared pins with OwnerPartId=0)
         MinX := 9999; MaxX := -9999; MinY := 9999; MaxY := -9999;
         HasPins := False;
+        RequiredSideSectionWidthGrid := 0;
 
         for I := 0 to PinsList.Count - 1 do
         begin
@@ -545,10 +599,18 @@ begin
                     // Include pin in this part's bounding box if it belongs to this part or is shared (0)
                     if (PinOwnerPartId = J) or (PinOwnerPartId = 0) then
                     begin
+                        PinName := PinData[1];
+                        PinOrient := PinData[3];
                         MinX := Min(MinX, PinX);
                         MaxX := Max(MaxX, PinX);
                         MinY := Min(MinY, PinY);
                         MaxY := Max(MaxY, PinY);
+                        if (PinOrient = 'eRotate0') or (PinOrient = 'eRotate180') then
+                        begin
+                            PinNameWidthGrid := PinNameLabelWidthGrid(PinName, ReferenceLabel, GridSizeMM);
+                            if (PinNameWidthGrid > RequiredSideSectionWidthGrid) then
+                                RequiredSideSectionWidthGrid := PinNameWidthGrid;
+                        end;
                         HasPins := True;
                     end;
                 end;
@@ -624,6 +686,17 @@ begin
             Divider1X := MinX + ((MaxX - MinX) div 3);
             Divider2X := MinX + (((MaxX - MinX) * 2) div 3);
         end;
+
+        if (RequiredSideSectionWidthGrid > 0) and ((RequiredSideSectionWidthGrid * 2) < (MaxX - MinX)) then
+        begin
+            if ((Divider1X - MinX) < RequiredSideSectionWidthGrid) then
+                Divider1X := MinX + RequiredSideSectionWidthGrid;
+            if ((MaxX - Divider2X) < RequiredSideSectionWidthGrid) then
+                Divider2X := MaxX - RequiredSideSectionWidthGrid;
+        end;
+
+        if (CenterLabel <> '') and (CenterLabelPosition = 'TOPCENTER') then
+            CenterLabelY := MaxY - 1;
 
         SchLine := Nil;
         if (ReferenceLine1 <> Nil) then
@@ -891,6 +964,22 @@ begin
             SchParameter.Text := ManufacturerValue;
             SchComponent.AddSchObject(SchParameter);
             CopiedParameterNames.Add('MANUFACTURER');
+        end;
+    end;
+
+    if (CopiedParameterNames.IndexOf('PARTNUMBER') < 0) then
+    begin
+        SchParameter := Nil;
+        if (ReferenceParameter <> Nil) then
+            SchParameter := ReferenceParameter.Replicate;
+        if (SchParameter = Nil) then
+            SchParameter := SchServer.SchObjectFactory(eParameter, eCreate_Default);
+        if (SchParameter <> Nil) then
+        begin
+            SchParameter.Name := 'PartNumber';
+            SchParameter.Text := '=Comment';
+            SchComponent.AddSchObject(SchParameter);
+            CopiedParameterNames.Add('PARTNUMBER');
         end;
     end;
 

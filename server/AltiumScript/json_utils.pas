@@ -11,6 +11,40 @@ end;
 
 // JSON utility functions for Altium MCP Bridge
 
+function JSONUnescapeString(const S: String): String;
+var
+    I                       : Integer;
+    NextChar                : Char;
+begin
+    Result := '';
+    I := 1;
+    while I <= Length(S) do
+    begin
+        if (S[I] = '\') and (I < Length(S)) then
+        begin
+            NextChar := S[I + 1];
+            case NextChar of
+                '"': Result := Result + '"';
+                '\': Result := Result + '\';
+                '/': Result := Result + '/';
+                'b': Result := Result + #8;
+                'f': Result := Result + #12;
+                'n': Result := Result + #10;
+                'r': Result := Result + #13;
+                't': Result := Result + #9;
+            else
+                Result := Result + S[I] + NextChar;
+            end;
+            I := I + 2;
+        end
+        else
+        begin
+            Result := Result + S[I];
+            I := I + 1;
+        end;
+    end;
+end;
+
 function TrimJSON(InputStr: String): String;
 begin
   // Remove quotes and commas
@@ -19,6 +53,7 @@ begin
   Result := RemoveChar(Result, ',');
   // Trim whitespace
   Result := Trim(Result);
+  Result := JSONUnescapeString(Result);
 end;
 
 // Helper function to escape JSON strings

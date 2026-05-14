@@ -650,6 +650,10 @@ async def create_schematic_symbol(ctx: Context, symbol_name: str, description: s
                     owner_part_id (optional): Part number the pin belongs to (1-based).
                                Use 0 for pins shared across all parts (e.g. power/GND).
                                Defaults to 1 if omitted. Only needed for multi-part symbols.
+                    Metadata entries may be included, e.g. GroupDelimiter=LEFT|-12.5,
+                               GroupDelimiter=RIGHT|-17.5, GroupDelimiter=BOTH|-42.5,
+                               GroupDelimiter=FULL|-20.0, or GroupDelimiter=CENTER|-20.0.
+                               GroupDelimiter Y values are in mm and snap to the 2.5 mm grid.
         part_count (int): Number of parts in the symbol (default 1).
                          Use >1 for multi-part symbols like quad op-amps or hex buffers.
 

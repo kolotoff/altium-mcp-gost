@@ -243,17 +243,47 @@ var
     VisibleText : String;
 begin
     VisibleText := StripPinNameFormatting(PinName);
-    Result := RoundUpMMToGrid(Length(VisibleText) * 1.55, GridMM);
+    Result := RoundUpMMToGrid(Length(VisibleText) * 1.35, GridMM);
 end;
 
-function PinNameLabelWidthGrid(PinName: String; ReferenceLabel: ISch_Label; GridMM: Double): Integer;
+function PinNameLabelWidthGrid(PinName: String; ReferenceLabel: ISch_Label; ReferencePin: ISch_Pin; PinOrient: String; GridMM: Double): Integer;
 var
     MeasurementLabel : ISch_Label;
     MeasurementRect  : TCoordRect;
+    MeasurementPin   : ISch_Pin;
+    MeasurementPinRect : TCoordRect;
     WidthCoord       : Integer;
     MeasuredGrid     : Integer;
+    PinMeasuredGrid  : Integer;
 begin
     Result := EstimatePinNameLabelWidthGrid(PinName, GridMM);
+    PinMeasuredGrid := 0;
+
+    MeasurementPin := Nil;
+    if (ReferencePin <> Nil) then
+        MeasurementPin := ReferencePin.Replicate;
+    if (MeasurementPin = Nil) then
+        MeasurementPin := SchServer.SchObjectFactory(ePin, eCreate_Default);
+
+    if (MeasurementPin <> Nil) then
+    begin
+        MeasurementPin.Name := PinName;
+        MeasurementPin.Designator := '88';
+        MeasurementPin.Orientation := StrToPinOrientation(PinOrient);
+        MeasurementPin.Location := Point(0, 0);
+        MeasurementPinRect := MeasurementPin.BoundingRectangle;
+        if (PinOrient = 'eRotate0') then
+            WidthCoord := Abs(MeasurementPinRect.Left)
+        else if (PinOrient = 'eRotate180') then
+            WidthCoord := Abs(MeasurementPinRect.Right)
+        else
+            WidthCoord := 0;
+        if (WidthCoord > 0) then
+            PinMeasuredGrid := RoundUpMMToGrid(CoordToMMs(WidthCoord), GridMM);
+    end;
+
+    if (PinMeasuredGrid > Result) then
+        Result := PinMeasuredGrid;
 
     MeasurementLabel := Nil;
     if (ReferenceLabel <> Nil) then
@@ -268,11 +298,13 @@ begin
         MeasurementRect := MeasurementLabel.BoundingRectangle;
         WidthCoord := Abs(MeasurementRect.Right - MeasurementRect.Left);
         MeasuredGrid := RoundUpMMToGrid(CoordToMMs(WidthCoord), GridMM);
-        if (MeasuredGrid > 1) then
-            MeasuredGrid := MeasuredGrid - 1;
-        if (MeasuredGrid > Result) and (MeasuredGrid < 30) then
+        if (PinMeasuredGrid = 0) and (MeasuredGrid > 0) and (MeasuredGrid < Result) then
             Result := MeasuredGrid;
     end;
+
+    if (Result < 1) then
+        Result := 1;
+    Result := Result + 1;
 end;
 
 function SplitCenterLabelText(LabelText: String; var Line1: String; var Line2: String): Integer;
@@ -377,6 +409,7 @@ var
     GridSizeMM       : Double;
     SideSectionWidthGrid : Integer;
     RefSideSectionWidthGrid : Integer;
+    DesiredSideSectionWidthGrid : Integer;
     BodyCenterXCoord : Integer;
     LabelCenterOffsetX : Integer;
     LabelYCoord      : Integer;
@@ -659,7 +692,7 @@ begin
                         MaxY := Max(MaxY, PinY);
                         if (PinOrient = 'eRotate0') or (PinOrient = 'eRotate180') then
                         begin
-                            PinNameWidthGrid := PinNameLabelWidthGrid(PinName, ReferenceLabel, GridSizeMM);
+                            PinNameWidthGrid := PinNameLabelWidthGrid(PinName, ReferenceLabel, ReferencePin, PinOrient, GridSizeMM);
                             if (PinNameWidthGrid > RequiredSideSectionWidthGrid) then
                                 RequiredSideSectionWidthGrid := PinNameWidthGrid;
                         end;
@@ -704,10 +737,16 @@ begin
         if (J = 1) then
             SchComponent.Designator.Location := Point(GridIndexToCoord(MinX, GridSizeMM), GridIndexToCoord(MaxY + 1, GridSizeMM));
 
-        if (SideSectionWidthGrid > 0) and ((SideSectionWidthGrid * 2) < (MaxX - MinX)) then
+        DesiredSideSectionWidthGrid := 0;
+        if (SideSectionWidthGrid > 0) then
+            DesiredSideSectionWidthGrid := SideSectionWidthGrid
+        else if (RequiredSideSectionWidthGrid > 0) then
+            DesiredSideSectionWidthGrid := RequiredSideSectionWidthGrid;
+
+        if (DesiredSideSectionWidthGrid > 0) and ((DesiredSideSectionWidthGrid * 2) < (MaxX - MinX)) then
         begin
-            Divider1X := MinX + SideSectionWidthGrid;
-            Divider2X := MaxX - SideSectionWidthGrid;
+            Divider1X := MinX + DesiredSideSectionWidthGrid;
+            Divider2X := MaxX - DesiredSideSectionWidthGrid;
         end
         else if (ReferenceLine1 <> Nil) and (ReferenceLine2 <> Nil) and (ReferenceRect <> Nil) then
         begin

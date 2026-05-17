@@ -454,6 +454,89 @@ begin
     end;
 end;
 
+// Extract the move selected vias logic
+function ExecuteMoveSelectedVias(RequestData: TStringList): String;
+var
+    ParamValue: String;
+    i, ValueStart: Integer;
+    XOffset, YOffset: Integer;
+begin
+    XOffset := 0;
+    YOffset := 0;
+
+    try
+        // Parse parameters from the request
+        for i := 0 to RequestData.Count - 1 do
+        begin
+            // Look for x_offset
+            if (Pos('"x_offset"', RequestData[i]) > 0) then
+            begin
+                ValueStart := Pos(':', RequestData[i]) + 1;
+                ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
+                ParamValue := TrimJSON(ParamValue);
+                XOffset := MilsToCoord(SafeStrToFloat(ParamValue));
+            end
+            // Look for y_offset
+            else if (Pos('"y_offset"', RequestData[i]) > 0) then
+            begin
+                ValueStart := Pos(':', RequestData[i]) + 1;
+                ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
+                ParamValue := TrimJSON(ParamValue);
+                YOffset := MilsToCoord(SafeStrToFloat(ParamValue));
+            end;
+        end;
+
+        Result := MoveSelectedViasByOffset(XOffset, YOffset);
+    finally
+    end;
+end;
+
+// Extract the move selected pads and touching vias logic
+function ExecuteMoveSelectedPadsAndTouchingVias(RequestData: TStringList): String;
+var
+    ParamValue: String;
+    i, ValueStart: Integer;
+    XOffset, YOffset, TouchTolerance: Integer;
+begin
+    XOffset := 0;
+    YOffset := 0;
+    TouchTolerance := MilsToCoord(1);
+
+    try
+        // Parse parameters from the request
+        for i := 0 to RequestData.Count - 1 do
+        begin
+            // Look for x_offset
+            if (Pos('"x_offset"', RequestData[i]) > 0) then
+            begin
+                ValueStart := Pos(':', RequestData[i]) + 1;
+                ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
+                ParamValue := TrimJSON(ParamValue);
+                XOffset := MilsToCoord(SafeStrToFloat(ParamValue));
+            end
+            // Look for y_offset
+            else if (Pos('"y_offset"', RequestData[i]) > 0) then
+            begin
+                ValueStart := Pos(':', RequestData[i]) + 1;
+                ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
+                ParamValue := TrimJSON(ParamValue);
+                YOffset := MilsToCoord(SafeStrToFloat(ParamValue));
+            end
+            // Look for touch tolerance
+            else if (Pos('"touch_tolerance_mils"', RequestData[i]) > 0) then
+            begin
+                ValueStart := Pos(':', RequestData[i]) + 1;
+                ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
+                ParamValue := TrimJSON(ParamValue);
+                TouchTolerance := MilsToCoord(SafeStrToFloat(ParamValue));
+            end;
+        end;
+
+        Result := MoveSelectedPadsAndTouchingViasByOffset(XOffset, YOffset, TouchTolerance);
+    finally
+    end;
+end;
+
 // Extract the layout duplicator apply logic
 function ExecuteLayoutDuplicatorApply(RequestData: TStringList): String;
 var
@@ -745,6 +828,10 @@ begin
 			Result := ExecuteSetComponentPosition(RequestData);
         'move_components':
             Result := ExecuteMoveComponents(RequestData);            
+        'move_selected_vias':
+            Result := ExecuteMoveSelectedVias(RequestData);
+        'move_selected_pads_and_touching_vias':
+            Result := ExecuteMoveSelectedPadsAndTouchingVias(RequestData);
         'layout_duplicator':
             Result := GetLayoutDuplicatorComponents(True);            
         'layout_duplicator_apply':

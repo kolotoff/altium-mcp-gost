@@ -365,8 +365,8 @@ class AltiumBridge:
             # outside the MSIX sandbox) can find the script files
             script_path = self._resolve_msix_path(self.config.script_path)
 
-            # Command format: "X2.EXE" -RScriptingSystem:RunScript(ProjectName="path\file.PrjScr"|ProcName="ModuleName>Run")
-            command = f'"{self.config.altium_exe_path}" -RScriptingSystem:RunScript(ProjectName="{script_path}"^|ProcName="Altium_API>Run")'
+            # Command format: "X2.EXE" -RScriptingSystem:RunScript(ProjectName="path\file.PrjScr"|ProcName="ModuleName.pas>Run")
+            command = f'"{self.config.altium_exe_path}" -RScriptingSystem:RunScript(ProjectName="{script_path}"^|ProcName="Altium_API.pas>Run")'
             
             logger.info(f"Running command: {command}")
             

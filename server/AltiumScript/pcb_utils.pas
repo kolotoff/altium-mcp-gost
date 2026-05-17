@@ -1527,3 +1527,197 @@ begin
         MissingArray.Free;
     end;
 end;
+
+// Function to move currently selected vias by X and Y offsets
+function MoveSelectedViasByOffset(XOffset, YOffset: TCoord): String;
+var
+    Board       : IPCB_Board;
+    Iterator    : IPCB_BoardIterator;
+    Via         : IPCB_Primitive;
+    ResultProps : TStringList;
+    OutputLines : TStringList;
+    MovedCount  : Integer;
+begin
+    Board := PCBServer.GetCurrentPCBBoard;
+    if (Board = nil) then
+    begin
+        Result := 'ERROR: No PCB document is currently active';
+        Exit;
+    end;
+
+    ResultProps := TStringList.Create;
+    MovedCount := 0;
+
+    try
+        Iterator := Board.BoardIterator_Create;
+        Iterator.AddFilter_ObjectSet(MkSet(eViaObject));
+        Iterator.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
+        Iterator.AddFilter_Method(eProcessAll);
+
+        PCBServer.PreProcess;
+
+        Via := Iterator.FirstPCBObject;
+        while (Via <> Nil) do
+        begin
+            if Via.Selected then
+            begin
+                PCBServer.SendMessageToRobots(Via.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+                Via.x := Via.x + XOffset;
+                Via.y := Via.y + YOffset;
+                PCBServer.SendMessageToRobots(Via.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+                MovedCount := MovedCount + 1;
+            end;
+
+            Via := Iterator.NextPCBObject;
+        end;
+
+        PCBServer.PostProcess;
+        Board.BoardIterator_Destroy(Iterator);
+
+        Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
+
+        AddJSONBoolean(ResultProps, 'success', True);
+        AddJSONInteger(ResultProps, 'moved_count', MovedCount);
+        AddJSONNumber(ResultProps, 'x_offset_mils', CoordToMils(XOffset));
+        AddJSONNumber(ResultProps, 'y_offset_mils', CoordToMils(YOffset));
+
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := OutputLines.Text;
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        ResultProps.Free;
+    end;
+end;
+
+// Function to move selected pads and any vias touching those pads
+function MoveSelectedPadsAndTouchingViasByOffset(XOffset, YOffset, TouchTolerance: TCoord): String;
+var
+    Board       : IPCB_Board;
+    Iterator    : IPCB_BoardIterator;
+    SelectedObj : IPCB_Primitive;
+    Pad         : IPCB_Primitive;
+    Via         : IPCB_Primitive;
+    Pads        : TObjectList;
+    Vias        : TObjectList;
+    PadSeen     : TStringList;
+    ViaSeen     : TStringList;
+    ResultProps : TStringList;
+    OutputLines : TStringList;
+    i           : Integer;
+    ObjKey      : String;
+begin
+    Board := PCBServer.GetCurrentPCBBoard;
+    if (Board = nil) then
+    begin
+        Result := 'ERROR: No PCB document is currently active';
+        Exit;
+    end;
+
+    Pads := TObjectList.Create;
+    Pads.OwnsObjects := False;
+    Vias := TObjectList.Create;
+    Vias.OwnsObjects := False;
+    PadSeen := TStringList.Create;
+    PadSeen.Duplicates := dupIgnore;
+    ViaSeen := TStringList.Create;
+    ViaSeen.Duplicates := dupIgnore;
+    ResultProps := TStringList.Create;
+
+    try
+        for i := 0 to Board.SelectecObjectCount - 1 do
+        begin
+            SelectedObj := Board.SelectecObject[i];
+            if (SelectedObj <> Nil) and (SelectedObj.ObjectId = ePadObject) then
+            begin
+                ObjKey := IntToStr(SelectedObj.I_ObjectAddress);
+                if PadSeen.IndexOf(ObjKey) < 0 then
+                begin
+                    PadSeen.Add(ObjKey);
+                    Pads.Add(SelectedObj);
+                end;
+            end;
+        end;
+
+        if Pads.Count = 0 then
+        begin
+            Result := 'ERROR: No selected pads found';
+            Exit;
+        end;
+
+        Iterator := Board.BoardIterator_Create;
+        Iterator.AddFilter_ObjectSet(MkSet(eViaObject));
+        Iterator.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
+        Iterator.AddFilter_Method(eProcessAll);
+
+        Via := Iterator.FirstPCBObject;
+        while (Via <> Nil) do
+        begin
+            for i := 0 to Pads.Count - 1 do
+            begin
+                Pad := Pads[i];
+                if Board.PrimPrimDistance(Pad, Via) <= TouchTolerance then
+                begin
+                    ObjKey := IntToStr(Via.I_ObjectAddress);
+                    if ViaSeen.IndexOf(ObjKey) < 0 then
+                    begin
+                        ViaSeen.Add(ObjKey);
+                        Vias.Add(Via);
+                    end;
+                    Break;
+                end;
+            end;
+
+            Via := Iterator.NextPCBObject;
+        end;
+        Board.BoardIterator_Destroy(Iterator);
+
+        PCBServer.PreProcess;
+
+        for i := 0 to Pads.Count - 1 do
+        begin
+            Pad := Pads[i];
+            PCBServer.SendMessageToRobots(Pad.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+            Pad.x := Pad.x + XOffset;
+            Pad.y := Pad.y + YOffset;
+            PCBServer.SendMessageToRobots(Pad.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+        end;
+
+        for i := 0 to Vias.Count - 1 do
+        begin
+            Via := Vias[i];
+            PCBServer.SendMessageToRobots(Via.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+            Via.x := Via.x + XOffset;
+            Via.y := Via.y + YOffset;
+            PCBServer.SendMessageToRobots(Via.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+        end;
+
+        PCBServer.PostProcess;
+        Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
+        Board.ViewManager_FullUpdate;
+
+        AddJSONBoolean(ResultProps, 'success', True);
+        AddJSONInteger(ResultProps, 'moved_pads', Pads.Count);
+        AddJSONInteger(ResultProps, 'moved_vias', Vias.Count);
+        AddJSONNumber(ResultProps, 'x_offset_mils', CoordToMils(XOffset));
+        AddJSONNumber(ResultProps, 'y_offset_mils', CoordToMils(YOffset));
+        AddJSONNumber(ResultProps, 'touch_tolerance_mils', CoordToMils(TouchTolerance));
+
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := OutputLines.Text;
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        Pads.Free;
+        Vias.Free;
+        PadSeen.Free;
+        ViaSeen.Free;
+        ResultProps.Free;
+    end;
+end;

@@ -119,6 +119,8 @@ begin
        (CommandName = 'layout_duplicator')                   or
        (CommandName = 'layout_duplicator_apply')             or
        (CommandName = 'move_components')                     or
+       (CommandName = 'move_selected_vias')                  or
+       (CommandName = 'move_selected_pads_and_touching_vias') or
        (CommandName = 'set_pcb_layer_visibility')            or
        (CommandName = 'get_pcb_layer_stackup')               then
     begin

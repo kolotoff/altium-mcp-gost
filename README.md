@@ -194,6 +194,12 @@ The server communicates with Altium Designer using a scripting bridge:
 3. The script processes the request and writes results to `workspace\response.json`
 4. The server reads and returns the response
 
+The script runner procedure should include the `.pas` unit name:
+
+```text
+ProcName=Altium_API.pas>Run
+```
+
 ## References
 - Get scripts' project path from Jeff Collins and William Kitchen's stripped down version
 - BlenderMCP: I got inspired by hearing about MCP being used in Blender and used it as a reference. https://github.com/ahujasid/blender-mcp

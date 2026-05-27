@@ -204,11 +204,48 @@ begin
               (Pos('CenterLabelPosition=', Line) = 1) or
               (Pos('Comment=', Line) = 1) or
               (Pos('Manufacturer=', Line) = 1) or
+              (Pos('Footprint=', Line) = 1) or
+              (Pos('FootprintLibrary=', Line) = 1) or
+              (Pos('FootprintLibraryPath=', Line) = 1) or
+              (Pos('NoVerticalSeparators=', Line) = 1) or
+              (Pos('VerticalSeparators=', Line) = 1) or
               (Pos('PinDescription=', Line) = 1) or
               (Pos('GroupDelimiter=', Line) = 1) or
               (Pos('GroupDelimiterYMM=', Line) = 1) or
               (Pos('SideSectionWidthMM=', Line) = 1) or
               (Pos('Parameter=', Line) = 1);
+end;
+
+function BuildPinMapString(PinsList: TStringList): String;
+var
+    I       : Integer;
+    PinData : TStringList;
+    PinNum  : String;
+begin
+    Result := '';
+
+    for I := 0 to PinsList.Count - 1 do
+    begin
+        if IsSymbolMetadataLine(PinsList[I]) then Continue;
+
+        PinData := TStringList.Create;
+        try
+            PinData.Delimiter := '|';
+            PinData.DelimitedText := PinsList[I];
+            if (PinData.Count >= 1) then
+            begin
+                PinNum := PinData[0];
+                if (PinNum <> '') then
+                begin
+                    if (Result <> '') then
+                        Result := Result + ',';
+                    Result := Result + '(' + PinNum + ':' + PinNum + ')';
+                end;
+            end;
+        finally
+            PinData.Free;
+        end;
+    end;
 end;
 
 function MilsStringToGridIndex(Value: String; GridMM: Double): Integer;
@@ -368,6 +405,7 @@ var
     ReferenceLabel   : ISch_Label;
     ReferenceParameter : ISch_Parameter;
     SourceParameter  : ISch_Parameter;
+    SchImplementation : ISch_Implementation;
     StyleIterator    : ISch_Iterator;
     ParameterIterator : ISch_Iterator;
     ExistingComponent : ISch_Component;
@@ -406,6 +444,9 @@ var
     CenterLabelPosition : String;
     CommentText      : String;
     ManufacturerValue : String;
+    FootprintName    : String;
+    FootprintLibraryName : String;
+    FootprintMap     : String;
     GridSizeMM       : Double;
     SideSectionWidthGrid : Integer;
     RefSideSectionWidthGrid : Integer;
@@ -426,6 +467,7 @@ var
     PinDescriptions  : TStringList;
     GroupDelimiters  : TStringList;
     OutputLines      : TStringList;
+    VerticalSeparatorsEnabled : Boolean;
 begin
     // Check if we have a schematic library document
     CurrentLib := SchServer.GetCurrentSchDocument;
@@ -512,6 +554,9 @@ begin
     CenterLabelPosition := '';
     CommentText := SymbolName;
     ManufacturerValue := '';
+    FootprintName := '';
+    FootprintLibraryName := '';
+    VerticalSeparatorsEnabled := True;
     GridSizeMM := 2.5;
     SideSectionWidthGrid := 0;
     RefSideSectionWidthGrid := 0;
@@ -547,6 +592,26 @@ begin
             begin
                 ManufacturerValue := Copy(PinsList[I], 14, Length(PinsList[I]) - 13);
                 ParameterOverrides.Values['Manufacturer'] := ManufacturerValue;
+            end
+            else if (Pos('Footprint=', PinsList[I]) = 1) then
+            begin
+                FootprintName := Copy(PinsList[I], 11, Length(PinsList[I]) - 10);
+            end
+            else if (Pos('FootprintLibrary=', PinsList[I]) = 1) then
+            begin
+                FootprintLibraryName := Copy(PinsList[I], 18, Length(PinsList[I]) - 17);
+            end
+            else if (Pos('FootprintLibraryPath=', PinsList[I]) = 1) then
+            begin
+                FootprintLibraryName := Copy(PinsList[I], 22, Length(PinsList[I]) - 21);
+            end
+            else if (Pos('NoVerticalSeparators=', PinsList[I]) = 1) then
+            begin
+                VerticalSeparatorsEnabled := not (UpperCase(Copy(PinsList[I], 22, Length(PinsList[I]) - 21)) = 'TRUE');
+            end
+            else if (Pos('VerticalSeparators=', PinsList[I]) = 1) then
+            begin
+                VerticalSeparatorsEnabled := UpperCase(Copy(PinsList[I], 20, Length(PinsList[I]) - 19)) = 'TRUE';
             end
             else if (Pos('PinDescription=', PinsList[I]) = 1) then
             begin
@@ -789,42 +854,45 @@ begin
         if (CenterLabel <> '') and (CenterLabelPosition = 'TOPCENTER') then
             CenterLabelY := MaxY - 1;
 
-        SchLine := Nil;
-        if (ReferenceLine1 <> Nil) then
-            SchLine := ReferenceLine1.Replicate;
-        if (SchLine = Nil) then
-            SchLine := SchServer.SchObjectFactory(eLine, eCreate_Default);
-        if (SchLine <> Nil) then
+        if VerticalSeparatorsEnabled then
         begin
-            if (ReferenceLine1 = Nil) and (ReferenceRect <> Nil) then
+            SchLine := Nil;
+            if (ReferenceLine1 <> Nil) then
+                SchLine := ReferenceLine1.Replicate;
+            if (SchLine = Nil) then
+                SchLine := SchServer.SchObjectFactory(eLine, eCreate_Default);
+            if (SchLine <> Nil) then
             begin
-                SchLine.Color := ReferenceRect.Color;
-                SchLine.LineWidth := ReferenceRect.LineWidth;
+                if (ReferenceLine1 = Nil) and (ReferenceRect <> Nil) then
+                begin
+                    SchLine.Color := ReferenceRect.Color;
+                    SchLine.LineWidth := ReferenceRect.LineWidth;
+                end;
+                SchLine.Location := Point(GridIndexToCoord(Divider1X, GridSizeMM), GridIndexToCoord(MinY - 1, GridSizeMM));
+                SchLine.Corner := Point(GridIndexToCoord(Divider1X, GridSizeMM), GridIndexToCoord(MaxY + 1, GridSizeMM));
+                SchLine.OwnerPartId := J;
+                SchLine.OwnerPartDisplayMode := 0;
+                SchComponent.AddSchObject(SchLine);
             end;
-            SchLine.Location := Point(GridIndexToCoord(Divider1X, GridSizeMM), GridIndexToCoord(MinY - 1, GridSizeMM));
-            SchLine.Corner := Point(GridIndexToCoord(Divider1X, GridSizeMM), GridIndexToCoord(MaxY + 1, GridSizeMM));
-            SchLine.OwnerPartId := J;
-            SchLine.OwnerPartDisplayMode := 0;
-            SchComponent.AddSchObject(SchLine);
-        end;
 
-        SchLine := Nil;
-        if (ReferenceLine2 <> Nil) then
-            SchLine := ReferenceLine2.Replicate;
-        if (SchLine = Nil) then
-            SchLine := SchServer.SchObjectFactory(eLine, eCreate_Default);
-        if (SchLine <> Nil) then
-        begin
-            if (ReferenceLine2 = Nil) and (ReferenceRect <> Nil) then
+            SchLine := Nil;
+            if (ReferenceLine2 <> Nil) then
+                SchLine := ReferenceLine2.Replicate;
+            if (SchLine = Nil) then
+                SchLine := SchServer.SchObjectFactory(eLine, eCreate_Default);
+            if (SchLine <> Nil) then
             begin
-                SchLine.Color := ReferenceRect.Color;
-                SchLine.LineWidth := ReferenceRect.LineWidth;
+                if (ReferenceLine2 = Nil) and (ReferenceRect <> Nil) then
+                begin
+                    SchLine.Color := ReferenceRect.Color;
+                    SchLine.LineWidth := ReferenceRect.LineWidth;
+                end;
+                SchLine.Location := Point(GridIndexToCoord(Divider2X, GridSizeMM), GridIndexToCoord(MinY - 1, GridSizeMM));
+                SchLine.Corner := Point(GridIndexToCoord(Divider2X, GridSizeMM), GridIndexToCoord(MaxY + 1, GridSizeMM));
+                SchLine.OwnerPartId := J;
+                SchLine.OwnerPartDisplayMode := 0;
+                SchComponent.AddSchObject(SchLine);
             end;
-            SchLine.Location := Point(GridIndexToCoord(Divider2X, GridSizeMM), GridIndexToCoord(MinY - 1, GridSizeMM));
-            SchLine.Corner := Point(GridIndexToCoord(Divider2X, GridSizeMM), GridIndexToCoord(MaxY + 1, GridSizeMM));
-            SchLine.OwnerPartId := J;
-            SchLine.OwnerPartDisplayMode := 0;
-            SchComponent.AddSchObject(SchLine);
         end;
 
         for I := 0 to GroupDelimiters.Count - 1 do
@@ -1098,6 +1166,27 @@ begin
             SchParameter.Text := '=Comment';
             SchComponent.AddSchObject(SchParameter);
             CopiedParameterNames.Add('PARTNUMBER');
+        end;
+    end;
+
+    if (FootprintName <> '') then
+    begin
+        SchImplementation := SchComponent.AddSchImplementation;
+        if (SchImplementation <> Nil) then
+        begin
+            SchImplementation.ModelName := FootprintName;
+            SchImplementation.ModelType := 'PCBLIB';
+            SchImplementation.Description := FootprintName;
+            SchImplementation.IsCurrent := True;
+            SchImplementation.IntegratedModel := False;
+            SchImplementation.DatabaseModel := False;
+            SchImplementation.ClearAllDatafileLinks;
+            if (FootprintLibraryName <> '') then
+                SchImplementation.AddDataFileLink(FootprintName, FootprintLibraryName, 'PCBLIB');
+
+            FootprintMap := BuildPinMapString(PinsList);
+            if (FootprintMap <> '') then
+                SchImplementation.MapAsString := FootprintMap;
         end;
     end;
 

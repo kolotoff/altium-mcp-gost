@@ -935,6 +935,10 @@ begin
             Result := ExecuteRunOutputJobs(RequestData);
         'search_library_symbol':
             Result := ExecuteSearchLibrarySymbol(RequestData);
+        'save_current_document':
+            Result := SaveCurrentDocument(ROOT_DIR);
+        'get_pcblib_footprints':
+            Result := GetPCBLibraryFootprints(ROOT_DIR);
         'create_pcb_footprint':
             Result := ExecuteCreatePCBFootprint(RequestData);
         'set_pcb_library_pad_shapes':

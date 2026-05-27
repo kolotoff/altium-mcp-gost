@@ -100,6 +100,7 @@ begin
 
     // Commands that handle their own document management - skip focusing
     if (CommandName = 'search_library_symbol') or
+       (CommandName = 'save_current_document') or
        (CommandName = 'create_pcb_footprint') or
        (CommandName = 'take_view_screenshot') then
     begin
@@ -132,6 +133,7 @@ begin
         DocumentKind := 'SCHLIB';
     end
     else if (CommandName = 'create_pcb_footprint') or
+            (CommandName = 'get_pcblib_footprints') or
             (CommandName = 'set_pcb_library_pad_shapes') or
             (CommandName = 'move_pcb_library_mechanical_layers') then
     begin
@@ -295,6 +297,34 @@ begin
     // blocking Altium with a message box.
     
     Result := False;
+end;
+
+function SaveCurrentDocument(ROOT_DIR: String): String;
+var
+    ResultProps : TStringList;
+    OutputLines : TStringList;
+begin
+    ResetParameters;
+    AddStringParameter('ObjectKind', 'Document');
+    AddStringParameter('SaveMode', 'Standard');
+    RunProcess('WorkspaceManager:SaveObject');
+    Client.SendMessage('WorkspaceManager:SaveObject', 'ObjectKind=Document|SaveMode=Standard', 255, Client.CurrentView);
+
+    ResultProps := TStringList.Create;
+    try
+        AddJSONBoolean(ResultProps, 'success', True);
+        AddJSONProperty(ResultProps, 'process', 'WorkspaceManager:SaveObject');
+
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := OutputLines.Text;
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        ResultProps.Free;
+    end;
 end;
 
 // Add a screenshot function that supports both PCB and SCH views

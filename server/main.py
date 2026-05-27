@@ -1607,6 +1607,36 @@ async def create_pcb_footprint(ctx: Context, footprint_name: str, description: s
     return json_dumps(result, indent=2)
 
 @mcp.tool()
+async def set_pcb_library_pad_shapes(ctx: Context, exclude_footprint_names: list) -> str:
+    """
+    Set all copper pad shapes in the currently active PCB library to Rounded Rectangle,
+    except footprints whose names are listed in exclude_footprint_names.
+
+    The PcbLib must be the focused document in Altium.
+
+    Args:
+        exclude_footprint_names (list): Footprint names to skip, e.g. ["53398-0271"]
+
+    Returns:
+        str: JSON object with result
+    """
+    logger.info(f"Setting PCB library pad shapes to Rounded Rectangle, excluding {exclude_footprint_names}")
+
+    response = await altium_bridge.execute_command(
+        "set_pcb_library_pad_shapes",
+        {"exclude_footprint_names": exclude_footprint_names}
+    )
+
+    if not response.get("success", False):
+        error_msg = response.get("error", "Unknown error")
+        logger.error(f"Error setting PCB library pad shapes: {error_msg}")
+        return json_dumps({"success": False, "error": f"Failed to set PCB library pad shapes: {error_msg}"})
+
+    result = response.get("result", {})
+    logger.info("PCB library pad shapes updated successfully")
+    return json_dumps(result, indent=2)
+
+@mcp.tool()
 async def get_server_status(ctx: Context) -> str:
     """Get the current status of the Altium MCP server"""
     status = {

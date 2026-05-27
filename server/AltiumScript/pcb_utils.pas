@@ -4516,6 +4516,65 @@ begin
     end;
 end;
 
+function GetPCBLibraryFootprints(ROOT_DIR: String): String;
+var
+    PcbLib            : IPCB_Library;
+    FootprintIterator : IPCB_LibraryIterator;
+    Footprint         : IPCB_LibComponent;
+    FootprintsArray   : TStringList;
+    ResultProps       : TStringList;
+    OutputLines       : TStringList;
+    FootprintCount    : Integer;
+begin
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    if PcbLib = Nil then
+    begin
+        Result := '{"success": false, "error": "No PCB library document is currently active. Open a .PcbLib file first."}';
+        Exit;
+    end;
+
+    FootprintsArray := TStringList.Create;
+    ResultProps := TStringList.Create;
+    FootprintCount := 0;
+
+    try
+        FootprintIterator := PcbLib.LibraryIterator_Create;
+        if FootprintIterator = Nil then
+        begin
+            Result := '{"success": false, "error": "Failed to create PCB library footprint iterator."}';
+            Exit;
+        end;
+
+        try
+            FootprintIterator.SetState_FilterAll;
+            Footprint := FootprintIterator.FirstPCBObject;
+            while Footprint <> Nil do
+            begin
+                FootprintCount := FootprintCount + 1;
+                FootprintsArray.Add('"' + JSONEscapeString(Footprint.Name) + '"');
+                Footprint := FootprintIterator.NextPCBObject;
+            end;
+        finally
+            PcbLib.LibraryIterator_Destroy(FootprintIterator);
+        end;
+
+        AddJSONBoolean(ResultProps, 'success', True);
+        AddJSONInteger(ResultProps, 'footprint_count', FootprintCount);
+        ResultProps.Add(BuildJSONArray(FootprintsArray, 'footprints'));
+
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := WriteJSONToFile(OutputLines, ROOT_DIR + 'temp_pcblib_footprints.json');
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        FootprintsArray.Free;
+        ResultProps.Free;
+    end;
+end;
+
 // Create a PCB footprint (SMD pads + silkscreen + courtyard) in the active PcbLib
 function CreatePCBFootprint(FootprintName: String; Description: String; PadsList: TStringList; CourtyardXMM: Double; CourtyardYMM: Double): String;
 var

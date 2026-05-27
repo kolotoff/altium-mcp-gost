@@ -16,6 +16,10 @@ ALTIUM_WORKSPACE_OFFSET_MM = 1270.0
 COORDINATE_WRAP_THRESHOLD_MM = 500.0
 ALTIUM_TOP_PROJECTION_Z_BASELINE_DEG = 180.0
 ROTATION_EPSILON_DEG = 1e-6
+FACE_VISIBLE_EPSILON = 1e-6
+COPLANAR_FACE_DOT = 0.9999
+OCCLUSION_EPSILON_MM = 0.01
+POINT_EPSILON_MM = 1e-5
 
 
 NUM_RE = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][+-]?\d+)?"
@@ -23,6 +27,10 @@ NUM_RE = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][+-]?\d+)?"
 
 def vec_sub(a, b):
     return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
+
+
+def vec_neg(v):
+    return (-v[0], -v[1], -v[2])
 
 
 def dot(a, b):
@@ -48,6 +56,10 @@ def parse_tuple(text: str) -> tuple[float, ...]:
     return tuple(float(item) for item in re.findall(NUM_RE, text))
 
 
+def parse_ref_list(text: str) -> list[int]:
+    return [int(item) for item in re.findall(r"#(\d+)", text)]
+
+
 def split_step_records(text: str) -> list[str]:
     records: list[str] = []
     current: list[str] = []
@@ -69,7 +81,7 @@ def split_step_records(text: str) -> list[str]:
     return records
 
 
-def parse_step_edges(path: Path) -> list[tuple[float, float, float, float]]:
+def parse_step_geometry(path: Path) -> dict:
     text = path.read_text(encoding="latin-1", errors="ignore")
     records = split_step_records(text)
 
@@ -78,7 +90,12 @@ def parse_step_edges(path: Path) -> list[tuple[float, float, float, float]]:
     vertices: dict[int, int] = {}
     placements: dict[int, tuple[int, int, int]] = {}
     circles: dict[int, tuple[int, float]] = {}
-    edges: list[tuple[int, int, int, bool]] = []
+    planes: dict[int, int] = {}
+    edges: dict[int, tuple[int, int, int, bool]] = {}
+    oriented_edges: dict[int, tuple[int, bool]] = {}
+    edge_loops: dict[int, list[int]] = {}
+    face_bounds: dict[int, tuple[int, bool]] = {}
+    faces: dict[int, tuple[list[int], int, bool]] = {}
 
     for record in records:
         record = " ".join(record.split())
@@ -113,6 +130,11 @@ def parse_step_edges(path: Path) -> list[tuple[float, float, float, float]]:
             )
             continue
 
+        match = re.match(r"#(\d+)\s*=\s*PLANE\s*\(\s*[^,]*,\s*#(\d+)\s*\)\s*;?$", record)
+        if match:
+            planes[int(match.group(1))] = int(match.group(2))
+            continue
+
         match = re.match(rf"#(\d+)\s*=\s*CIRCLE\s*\(\s*[^,]*,\s*#(\d+)\s*,\s*({NUM_RE})\s*\)\s*;?$", record)
         if match:
             circles[int(match.group(1))] = (int(match.group(2)), float(match.group(3)))
@@ -123,66 +145,442 @@ def parse_step_edges(path: Path) -> list[tuple[float, float, float, float]]:
             record,
         )
         if match:
-            edges.append((int(match.group(2)), int(match.group(3)), int(match.group(4)), match.group(5) == "T"))
-
-    def point_for_vertex(vertex_id: int) -> tuple[float, float, float] | None:
-        point_id = vertices.get(vertex_id)
-        if point_id is None:
-            return None
-        return points.get(point_id)
-
-    def project(point: tuple[float, float, float]) -> tuple[float, float]:
-        return (point[0], point[2])
-
-    raw_segments: list[tuple[float, float, float, float]] = []
-    for start_vertex, end_vertex, curve_id, _same_sense in edges:
-        start = point_for_vertex(start_vertex)
-        end = point_for_vertex(end_vertex)
-        if start is None or end is None:
+            edges[int(match.group(1))] = (
+                int(match.group(2)),
+                int(match.group(3)),
+                int(match.group(4)),
+                match.group(5) == "T",
+            )
             continue
 
-        if curve_id in circles:
-            placement_id, radius = circles[curve_id]
-            placement = placements.get(placement_id)
-            if placement is not None:
-                center_id, axis_id, ref_id = placement
-                center = points.get(center_id)
-                axis = directions.get(axis_id)
-                x_dir = directions.get(ref_id)
-                if center is not None and axis is not None and x_dir is not None and radius > 0:
-                    y_dir = norm(cross(axis, x_dir))
+        match = re.match(
+            r"#(\d+)\s*=\s*ORIENTED_EDGE\s*\(\s*(?:'[^']*'|\$|\*)\s*,\s*\*\s*,\s*\*\s*,\s*#(\d+)\s*,\s*\.(T|F)\.\s*\)\s*;?$",
+            record,
+        )
+        if match:
+            oriented_edges[int(match.group(1))] = (int(match.group(2)), match.group(3) == "T")
+            continue
 
-                    def angle(point):
-                        rel = vec_sub(point, center)
-                        return math.atan2(dot(rel, y_dir), dot(rel, x_dir))
+        match = re.match(r"#(\d+)\s*=\s*EDGE_LOOP\s*\(\s*[^,]*,\s*\((.*?)\)\s*\)\s*;?$", record)
+        if match:
+            edge_loops[int(match.group(1))] = parse_ref_list(match.group(2))
+            continue
 
-                    a1 = angle(start)
-                    a2 = angle(end)
-                    delta = (a2 - a1 + math.pi) % (2.0 * math.pi) - math.pi
-                    if abs(delta) < 1e-9 and math.dist(start, end) > 1e-6:
-                        delta = 2.0 * math.pi
+        match = re.match(
+            r"#(\d+)\s*=\s*(FACE_OUTER_BOUND|FACE_BOUND)\s*\(\s*[^,]*,\s*#(\d+)\s*,\s*\.(T|F)\.\s*\)\s*;?$",
+            record,
+        )
+        if match:
+            face_bounds[int(match.group(1))] = (int(match.group(3)), match.group(2) == "FACE_OUTER_BOUND")
+            continue
 
-                    steps = max(2, min(24, int(math.ceil(abs(delta) * radius / 0.12))))
-                    arc_points = []
-                    for index in range(steps + 1):
-                        theta = a1 + delta * index / steps
-                        point = (
+        match = re.match(
+            r"#(\d+)\s*=\s*ADVANCED_FACE\s*\(\s*[^,]*,\s*\((.*?)\)\s*,\s*#(\d+)\s*,\s*\.(T|F)\.\s*\)\s*;?$",
+            record,
+        )
+        if match:
+            faces[int(match.group(1))] = (parse_ref_list(match.group(2)), int(match.group(3)), match.group(4) == "T")
+
+    return {
+        "points": points,
+        "directions": directions,
+        "vertices": vertices,
+        "placements": placements,
+        "circles": circles,
+        "planes": planes,
+        "edges": edges,
+        "oriented_edges": oriented_edges,
+        "edge_loops": edge_loops,
+        "face_bounds": face_bounds,
+        "faces": faces,
+    }
+
+
+def point_for_vertex(geometry: dict, vertex_id: int) -> tuple[float, float, float] | None:
+    point_id = geometry["vertices"].get(vertex_id)
+    if point_id is None:
+        return None
+    return geometry["points"].get(point_id)
+
+
+def rotation_angle_from_state(state: dict | None, key: str, default: float = 0.0) -> float:
+    if state is None:
+        return default
+    value = state.get(key)
+    if value is None:
+        return default
+    return float(value)
+
+
+def rotate_x(point: tuple[float, float, float], angle_deg: float) -> tuple[float, float, float]:
+    radians = math.radians(angle_deg)
+    cos_a = math.cos(radians)
+    sin_a = math.sin(radians)
+    x, y, z = point
+    return (x, y * cos_a - z * sin_a, y * sin_a + z * cos_a)
+
+
+def rotate_y(point: tuple[float, float, float], angle_deg: float) -> tuple[float, float, float]:
+    radians = math.radians(angle_deg)
+    cos_a = math.cos(radians)
+    sin_a = math.sin(radians)
+    x, y, z = point
+    return (x * cos_a + z * sin_a, y, -x * sin_a + z * cos_a)
+
+
+def rotate_view_xy(u: float, v: float, angle_deg: float) -> tuple[float, float]:
+    angle_deg = normalize_rotation_degrees(angle_deg)
+    if angle_deg == 0.0:
+        return (u, v)
+    radians = math.radians(angle_deg)
+    cos_a = math.cos(radians)
+    sin_a = math.sin(radians)
+    return (u * cos_a - v * sin_a, u * sin_a + v * cos_a)
+
+
+def transform_model_point(point: tuple[float, float, float], state: dict | None) -> tuple[float, float, float]:
+    rotated = rotate_x(point, rotation_angle_from_state(state, "rotx", 90.0))
+    rotated = rotate_y(rotated, rotation_angle_from_state(state, "roty"))
+
+    # Altium's common STEP placement for these PcbLib bodies uses ROTX=90,
+    # which maps STEP Y to board height and STEP Z to board Y. Use view
+    # coordinates that preserve the previous top-projection convention:
+    # source X -> view X, source Z -> view Y, source Y -> view height.
+    u = rotated[0]
+    v = -rotated[1]
+    w = rotated[2]
+    u, v = rotate_view_xy(u, v, projection_rotation_from_model_state(state))
+    return (u, v, w)
+
+
+def transform_model_vector(vector: tuple[float, float, float], state: dict | None) -> tuple[float, float, float]:
+    return transform_model_point(vector, state)
+
+
+def edge_polyline_points(geometry: dict, edge_id: int) -> list[tuple[float, float, float]]:
+    edge = geometry["edges"].get(edge_id)
+    if edge is None:
+        return []
+
+    start_vertex, end_vertex, curve_id, _same_sense = edge
+    start = point_for_vertex(geometry, start_vertex)
+    end = point_for_vertex(geometry, end_vertex)
+    if start is None or end is None:
+        return []
+
+    if curve_id in geometry["circles"]:
+        placement_id, radius = geometry["circles"][curve_id]
+        placement = geometry["placements"].get(placement_id)
+        if placement is not None:
+            center_id, axis_id, ref_id = placement
+            center = geometry["points"].get(center_id)
+            axis = geometry["directions"].get(axis_id)
+            x_dir = geometry["directions"].get(ref_id)
+            if center is not None and axis is not None and x_dir is not None and radius > 0:
+                y_dir = norm(cross(axis, x_dir))
+
+                def angle(point):
+                    rel = vec_sub(point, center)
+                    return math.atan2(dot(rel, y_dir), dot(rel, x_dir))
+
+                a1 = angle(start)
+                a2 = angle(end)
+                delta = (a2 - a1 + math.pi) % (2.0 * math.pi) - math.pi
+                if abs(delta) < 1e-9 and math.dist(start, end) > 1e-6:
+                    delta = 2.0 * math.pi
+
+                steps = max(2, min(24, int(math.ceil(abs(delta) * radius / 0.12))))
+                arc_points = []
+                for index in range(steps + 1):
+                    theta = a1 + delta * index / steps
+                    arc_points.append(
+                        (
                             center[0] + radius * (math.cos(theta) * x_dir[0] + math.sin(theta) * y_dir[0]),
                             center[1] + radius * (math.cos(theta) * x_dir[1] + math.sin(theta) * y_dir[1]),
                             center[2] + radius * (math.cos(theta) * x_dir[2] + math.sin(theta) * y_dir[2]),
                         )
-                        arc_points.append(project(point))
-                    raw_segments.extend(
-                        (arc_points[index][0], arc_points[index][1], arc_points[index + 1][0], arc_points[index + 1][1])
-                        for index in range(len(arc_points) - 1)
                     )
+                return arc_points
+
+    return [start, end]
+
+
+def projected_segments_for_edges(
+    geometry: dict,
+    state: dict | None,
+    edge_ids: list[int],
+    occluder_faces: list[dict] | None = None,
+    adjacent_face_ids_by_edge: dict[int, set[int]] | None = None,
+) -> tuple[list[tuple[float, float, float, float]], int]:
+    segments: list[tuple[float, float, float, float]] = []
+    occluded_segments = 0
+    for edge_id in edge_ids:
+        points = [transform_model_point(point, state) for point in edge_polyline_points(geometry, edge_id)]
+        for index in range(len(points) - 1):
+            p1 = points[index]
+            p2 = points[index + 1]
+            if math.hypot(p2[0] - p1[0], p2[1] - p1[1]) < 1e-9:
+                continue
+
+            adjacent_face_ids = set()
+            if adjacent_face_ids_by_edge is not None:
+                adjacent_face_ids = adjacent_face_ids_by_edge.get(edge_id, set())
+
+            if occluder_faces is not None and segment_is_occluded(p1, p2, occluder_faces, adjacent_face_ids):
+                occluded_segments += 1
+                continue
+
+            segments.append((p1[0], p1[1], p2[0], p2[1]))
+    return segments, occluded_segments
+
+
+def face_normal(geometry: dict, face: tuple[list[int], int, bool], state: dict | None) -> tuple[float, float, float] | None:
+    _bound_ids, surface_id, same_sense = face
+    placement_id = geometry["planes"].get(surface_id)
+    if placement_id is None:
+        return None
+
+    placement = geometry["placements"].get(placement_id)
+    if placement is None:
+        return None
+
+    _center_id, axis_id, _ref_id = placement
+    axis = geometry["directions"].get(axis_id)
+    if axis is None:
+        return None
+
+    normal = axis if same_sense else vec_neg(axis)
+    return norm(transform_model_vector(normal, state))
+
+
+def face_plane_point(geometry: dict, face: tuple[list[int], int, bool], state: dict | None) -> tuple[float, float, float] | None:
+    _bound_ids, surface_id, _same_sense = face
+    placement_id = geometry["planes"].get(surface_id)
+    if placement_id is None:
+        return None
+
+    placement = geometry["placements"].get(placement_id)
+    if placement is None:
+        return None
+
+    center_id, _axis_id, _ref_id = placement
+    point = geometry["points"].get(center_id)
+    if point is None:
+        return None
+    return transform_model_point(point, state)
+
+
+def oriented_loop_points(geometry: dict, loop_id: int, state: dict | None) -> list[tuple[float, float, float]]:
+    result: list[tuple[float, float, float]] = []
+    for oriented_edge_id in geometry["edge_loops"].get(loop_id, []):
+        oriented_edge = geometry["oriented_edges"].get(oriented_edge_id)
+        if oriented_edge is None:
+            continue
+
+        edge_id, forward = oriented_edge
+        points = edge_polyline_points(geometry, edge_id)
+        if not forward:
+            points = list(reversed(points))
+        transformed = [transform_model_point(point, state) for point in points]
+        if result and transformed and math.dist(result[-1], transformed[0]) <= POINT_EPSILON_MM:
+            transformed = transformed[1:]
+        result.extend(transformed)
+
+    if len(result) > 2 and math.dist(result[0], result[-1]) <= POINT_EPSILON_MM:
+        result.pop()
+    return result
+
+
+def face_polygons(geometry: dict, face: tuple[list[int], int, bool], state: dict | None) -> tuple[list[list[tuple[float, float]]], list[list[tuple[float, float]]]]:
+    bound_ids, _surface_id, _same_sense = face
+    outers: list[list[tuple[float, float]]] = []
+    holes: list[list[tuple[float, float]]] = []
+    for bound_id in bound_ids:
+        bound = geometry["face_bounds"].get(bound_id)
+        if bound is None:
+            continue
+        loop_id, is_outer = bound
+        points = oriented_loop_points(geometry, loop_id, state)
+        polygon = [(point[0], point[1]) for point in points]
+        if len(polygon) < 3:
+            continue
+        if is_outer:
+            outers.append(polygon)
+        else:
+            holes.append(polygon)
+    return outers, holes
+
+
+def point_near_segment_2d(
+    point: tuple[float, float],
+    start: tuple[float, float],
+    end: tuple[float, float],
+    epsilon: float = POINT_EPSILON_MM,
+) -> bool:
+    px, py = point
+    x1, y1 = start
+    x2, y2 = end
+    dx = x2 - x1
+    dy = y2 - y1
+    length_sq = dx * dx + dy * dy
+    if length_sq <= epsilon * epsilon:
+        return math.hypot(px - x1, py - y1) <= epsilon
+    t = max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / length_sq))
+    nearest_x = x1 + t * dx
+    nearest_y = y1 + t * dy
+    return math.hypot(px - nearest_x, py - nearest_y) <= epsilon
+
+
+def point_in_polygon_strict(point: tuple[float, float], polygon: list[tuple[float, float]]) -> bool:
+    if len(polygon) < 3:
+        return False
+
+    for index, start in enumerate(polygon):
+        end = polygon[(index + 1) % len(polygon)]
+        if point_near_segment_2d(point, start, end):
+            return False
+
+    x, y = point
+    inside = False
+    previous_x, previous_y = polygon[-1]
+    for current_x, current_y in polygon:
+        if (current_y > y) != (previous_y > y):
+            intersection_x = (previous_x - current_x) * (y - current_y) / (previous_y - current_y) + current_x
+            if x < intersection_x:
+                inside = not inside
+        previous_x, previous_y = current_x, current_y
+    return inside
+
+
+def face_contains_point(face_info: dict, point: tuple[float, float]) -> bool:
+    if not any(point_in_polygon_strict(point, polygon) for polygon in face_info["outers"]):
+        return False
+    return not any(point_in_polygon_strict(point, polygon) for polygon in face_info["holes"])
+
+
+def face_height_at(face_info: dict, u: float, v: float) -> float | None:
+    normal = face_info["normal"]
+    plane_point = face_info["plane_point"]
+    if abs(normal[2]) <= FACE_VISIBLE_EPSILON:
+        return None
+    return plane_point[2] - (normal[0] * (u - plane_point[0]) + normal[1] * (v - plane_point[1])) / normal[2]
+
+
+def segment_is_occluded(
+    p1: tuple[float, float, float],
+    p2: tuple[float, float, float],
+    face_infos: list[dict],
+    adjacent_face_ids: set[int],
+) -> bool:
+    midpoint = ((p1[0] + p2[0]) / 2.0, (p1[1] + p2[1]) / 2.0)
+    segment_height = (p1[2] + p2[2]) / 2.0
+
+    for face_info in face_infos:
+        if face_info["face_id"] in adjacent_face_ids:
+            continue
+        if not face_contains_point(face_info, midpoint):
+            continue
+        face_height = face_height_at(face_info, midpoint[0], midpoint[1])
+        if face_height is not None and face_height > segment_height + OCCLUSION_EPSILON_MM:
+            return True
+    return False
+
+
+def visible_edge_projection(geometry: dict, state: dict | None) -> dict:
+    all_edge_ids = sorted(geometry["edges"])
+    all_segments, _occluded = projected_segments_for_edges(geometry, state, all_edge_ids)
+    if not all_segments:
+        return {
+            "segments": [],
+            "source_bbox": None,
+            "stats": {"all_edges": len(all_edge_ids), "visible_edges": 0, "fallback_all_edges": False},
+        }
+
+    source_bbox = bbox_for_segments(all_segments)
+    edge_face_ids: dict[int, set[int]] = {}
+    visible_edge_face_ids: dict[int, set[int]] = {}
+    face_infos: dict[int, dict] = {}
+
+    for face_id, face in geometry["faces"].items():
+        normal = face_normal(geometry, face, state)
+        plane_point = face_plane_point(geometry, face, state)
+        if normal is None or plane_point is None:
+            continue
+
+        bound_ids, _surface_id, _same_sense = face
+        face_edge_ids: set[int] = set()
+        for bound_id in bound_ids:
+            bound = geometry["face_bounds"].get(bound_id)
+            if bound is None:
+                continue
+            loop_id, _is_outer = bound
+            for oriented_edge_id in geometry["edge_loops"].get(loop_id, []):
+                oriented_edge = geometry["oriented_edges"].get(oriented_edge_id)
+                if oriented_edge is None:
                     continue
+                edge_id, _forward = oriented_edge
+                face_edge_ids.add(edge_id)
+                edge_face_ids.setdefault(edge_id, set()).add(face_id)
 
-        p1 = project(start)
-        p2 = project(end)
-        raw_segments.append((p1[0], p1[1], p2[0], p2[1]))
+        if normal[2] <= FACE_VISIBLE_EPSILON:
+            continue
 
-    return raw_segments
+        outers, holes = face_polygons(geometry, face, state)
+        face_infos[face_id] = {
+            "face_id": face_id,
+            "normal": normal,
+            "plane_point": plane_point,
+            "outers": outers,
+            "holes": holes,
+        }
+        for edge_id in face_edge_ids:
+            visible_edge_face_ids.setdefault(edge_id, set()).add(face_id)
+
+    top_visible_faces = list(face_infos.values())
+    visible_edge_ids: list[int] = []
+    coplanar_edges_removed = 0
+    for edge_id, adjacent_visible_faces in visible_edge_face_ids.items():
+        if len(adjacent_visible_faces) >= 2 and edge_face_ids.get(edge_id, set()).issubset(adjacent_visible_faces):
+            normals = [face_infos[face_id]["normal"] for face_id in adjacent_visible_faces]
+            first_normal = normals[0]
+            if all(abs(dot(first_normal, normal)) >= COPLANAR_FACE_DOT for normal in normals[1:]):
+                coplanar_edges_removed += 1
+                continue
+        visible_edge_ids.append(edge_id)
+
+    visible_segments, occluded_segments_removed = projected_segments_for_edges(
+        geometry,
+        state,
+        sorted(visible_edge_ids),
+        top_visible_faces,
+        visible_edge_face_ids,
+    )
+
+    fallback_all_edges = False
+    if not visible_segments:
+        visible_segments = all_segments
+        fallback_all_edges = True
+
+    return {
+        "segments": visible_segments,
+        "source_bbox": source_bbox,
+        "stats": {
+            "all_edges": len(all_edge_ids),
+            "all_projected_segments": len(all_segments),
+            "top_visible_faces": len(top_visible_faces),
+            "visible_edges": len(visible_edge_ids),
+            "visible_projected_segments": len(visible_segments),
+            "coplanar_edges_removed": coplanar_edges_removed,
+            "occluded_segments_removed": occluded_segments_removed,
+            "fallback_all_edges": fallback_all_edges,
+        },
+    }
+
+
+def parse_step_edges(path: Path) -> list[tuple[float, float, float, float]]:
+    geometry = parse_step_geometry(path)
+    segments, _occluded = projected_segments_for_edges(geometry, None, sorted(geometry["edges"]))
+    return segments
 
 
 def bbox_for_segments(segments: list[tuple[float, float, float, float]]) -> tuple[float, float, float, float]:
@@ -194,8 +592,11 @@ def bbox_for_segments(segments: list[tuple[float, float, float, float]]) -> tupl
 def scale_segments(
     segments: list[tuple[float, float, float, float]],
     target_bbox: tuple[float, float, float, float],
+    source_bbox: tuple[float, float, float, float] | None = None,
 ) -> list[tuple[float, float, float, float]]:
-    source_left, source_bottom, source_right, source_top = bbox_for_segments(segments)
+    if source_bbox is None:
+        source_bbox = bbox_for_segments(segments)
+    source_left, source_bottom, source_right, source_top = source_bbox
     target_left, target_bottom, target_right, target_top = target_bbox
     source_w = source_right - source_left
     source_h = source_top - source_bottom
@@ -433,13 +834,14 @@ def main() -> int:
     library_path = library_path_arg or (Path(library_path_text) if library_path_text else None)
     model_states = load_pcb_library_model_states(library_path)
 
-    model_cache: dict[Path, list[tuple[float, float, float, float]]] = {}
+    model_cache: dict[Path, dict] = {}
     lines: list[str] = []
     used_models: dict[str, str] = {}
     skipped: dict[str, str] = {}
     normalized_bboxes: dict[str, dict[str, list[float]]] = {}
     model_rotation_metadata: dict[str, dict[str, float | str | None]] = {}
     missing_rotation_metadata: list[str] = []
+    hidden_line_stats: dict[str, dict] = {}
 
     for body in bodies:
         footprint = str(body["footprint"])
@@ -449,12 +851,7 @@ def main() -> int:
             continue
 
         if model_path not in model_cache:
-            model_cache[model_path] = parse_step_edges(model_path)
-
-        raw_segments = model_cache[model_path]
-        if not raw_segments:
-            skipped[footprint] = "no projected STEP edges"
-            continue
+            model_cache[model_path] = parse_step_geometry(model_path)
 
         target_bbox = (
             float(body["left_mm"]),
@@ -474,16 +871,25 @@ def main() -> int:
             missing_rotation_metadata.append(footprint)
 
         projection_rotation_deg = projection_rotation_from_model_state(model_state)
-        source_segments = raw_segments
-        if projection_rotation_deg != 0.0:
-            source_segments = rotate_segments(raw_segments, bbox_for_segments(raw_segments), projection_rotation_deg)
+        if model_state is not None:
             model_rotation_metadata[footprint] = {
                 "projection_rotation_deg": round(projection_rotation_deg, 6),
-                "model_3d_rotz_deg": round(float(model_state["rotz"]), 6) if model_state else None,
-                "model_name": str(model_state["model_name"]) if model_state else None,
+                "model_3d_rotx_deg": round(float(model_state["rotx"]), 6) if model_state.get("rotx") is not None else None,
+                "model_3d_roty_deg": round(float(model_state["roty"]), 6) if model_state.get("roty") is not None else None,
+                "model_3d_rotz_deg": round(float(model_state["rotz"]), 6),
+                "model_2d_rotation_deg": round(float(model_state.get("rotation_2d") or 0.0), 6),
+                "model_name": str(model_state["model_name"]),
             }
 
-        scaled = scale_segments(source_segments, normalized_bbox)
+        projection = visible_edge_projection(model_cache[model_path], model_state)
+        source_segments = projection["segments"]
+        source_bbox = projection["source_bbox"]
+        hidden_line_stats[footprint] = projection["stats"]
+        if not source_segments or source_bbox is None:
+            skipped[footprint] = "no visible projected STEP edges"
+            continue
+
+        scaled = scale_segments(source_segments, normalized_bbox, source_bbox)
         if not scaled:
             skipped[footprint] = "no scaled segments"
             continue
@@ -506,6 +912,7 @@ def main() -> int:
                 "normalized_bboxes": normalized_bboxes,
                 "library_path": str(library_path) if library_path is not None else None,
                 "model_rotation_metadata": model_rotation_metadata,
+                "hidden_line_stats": hidden_line_stats,
                 "missing_rotation_metadata": missing_rotation_metadata,
             },
             indent=2,

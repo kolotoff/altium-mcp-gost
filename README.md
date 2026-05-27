@@ -192,7 +192,8 @@ The PcbLib mechanical-layer tool also has internal commands used to create Draft
 2. Run `tools/generate_step_silhouette.py` against that dump. The generator uses only exact embedded `.step`/`.stp` files from `C:\Users\Public\altium_mcp\embedded_3d_models` and writes `C:\Users\Public\altium_mcp\3d_body_silhouette.txt`.
 3. Remove old generated tracks with `3D_BODY_EDITOR_CLEAN|<mechanical_layer>|<line_width_mm>`.
 4. Append the generated segments with `3D_BODY_SILHOUETTE_APPEND|<mechanical_layer>|<line_width_mm>`.
-5. Verify with `3D_BODY_TRACK_COUNT|<mechanical_layer>|<line_width_mm>`.
+5. Add `.Designator` and `.Comment` special strings with `3D_BODY_TEXT|<mechanical_layer>`, for example `3D_BODY_TEXT|2`. Text style and placement are defined in code as TrueType/Arial, 1.5 mm height. `.Comment` is centered below the projection with a 0.2 mm visual Y-axis gap. `.Designator` uses the `.De` anchor for alignment and overlap checks; the generator searches around the projection center for the nearest clear anchor position before falling back above the projection.
+6. Verify with `3D_BODY_TRACK_COUNT|<mechanical_layer>|<line_width_mm>`.
 
 Do not infer projection rotation from footprint names. The generator reads the PcbLib's embedded model state records (`MODEL.NAME`, `MODEL.3D.ROTX`, `MODEL.3D.ROTY`, `MODEL.3D.ROTZ`, `MODEL.2D.ROTATION`, and `IDENTIFIER`) and derives the correction from that metadata. It applies that 3D placement before filtering the STEP topology to top-facing visible face boundaries, so hidden/back-side edges are not emitted. This keeps top-entry, side-entry, and future connector variants tied to their actual embedded 3D body placement instead of a hard-coded suffix such as `GHS-TBT`.
 

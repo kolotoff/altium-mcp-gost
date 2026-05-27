@@ -1646,6 +1646,125 @@ begin
     end;
 end;
 
+function Parse3DBodyTextCommand(MoveText: String; var DestinationNumber: Integer; var ReferenceFootprintName: String): Boolean;
+var
+    FirstSeparatorPos: Integer;
+    SecondSeparatorPos: Integer;
+    CommandName: String;
+    RemainderText: String;
+    DestinationText: String;
+begin
+    Result := False;
+    DestinationNumber := 0;
+    ReferenceFootprintName := '';
+    MoveText := Trim(MoveText);
+
+    FirstSeparatorPos := Pos('|', MoveText);
+    if FirstSeparatorPos <= 1 then
+        Exit;
+
+    CommandName := UpperCase(Trim(Copy(MoveText, 1, FirstSeparatorPos - 1)));
+    if CommandName <> '3D_BODY_TEXT' then
+        Exit;
+
+    RemainderText := Copy(MoveText, FirstSeparatorPos + 1, Length(MoveText) - FirstSeparatorPos);
+    SecondSeparatorPos := Pos('|', RemainderText);
+    if SecondSeparatorPos > 1 then
+    begin
+        DestinationText := Copy(RemainderText, 1, SecondSeparatorPos - 1);
+        ReferenceFootprintName := Trim(Copy(RemainderText, SecondSeparatorPos + 1, Length(RemainderText) - SecondSeparatorPos));
+    end
+    else
+    begin
+        DestinationText := RemainderText;
+        ReferenceFootprintName := '';
+    end;
+
+    if not TryParsePositiveInteger(DestinationText, DestinationNumber) then
+        Exit;
+
+    if (DestinationNumber < 1) or (DestinationNumber > 32) then
+        Exit;
+
+    Result := True;
+end;
+
+function Find3DBodyTextCommand(LayerMoves: TStringList; var DestinationNumber: Integer; var ReferenceFootprintName: String): Boolean;
+var
+    i: Integer;
+begin
+    Result := False;
+    DestinationNumber := 0;
+    ReferenceFootprintName := '';
+
+    for i := 0 to LayerMoves.Count - 1 do
+    begin
+        if Parse3DBodyTextCommand(LayerMoves[i], DestinationNumber, ReferenceFootprintName) then
+        begin
+            Result := True;
+            Exit;
+        end;
+    end;
+end;
+
+function Parse3DBodyTextDumpCommand(MoveText: String; var DestinationNumber: Integer; var FootprintName: String): Boolean;
+var
+    FirstSeparatorPos: Integer;
+    SecondSeparatorPos: Integer;
+    CommandName: String;
+    RemainderText: String;
+    DestinationText: String;
+begin
+    Result := False;
+    DestinationNumber := 0;
+    FootprintName := '';
+    MoveText := Trim(MoveText);
+
+    FirstSeparatorPos := Pos('|', MoveText);
+    if FirstSeparatorPos <= 1 then
+        Exit;
+
+    CommandName := UpperCase(Trim(Copy(MoveText, 1, FirstSeparatorPos - 1)));
+    if CommandName <> '3D_BODY_TEXT_DUMP' then
+        Exit;
+
+    RemainderText := Copy(MoveText, FirstSeparatorPos + 1, Length(MoveText) - FirstSeparatorPos);
+    SecondSeparatorPos := Pos('|', RemainderText);
+    if SecondSeparatorPos <= 1 then
+        Exit;
+
+    DestinationText := Copy(RemainderText, 1, SecondSeparatorPos - 1);
+    FootprintName := Trim(Copy(RemainderText, SecondSeparatorPos + 1, Length(RemainderText) - SecondSeparatorPos));
+    if FootprintName = '' then
+        Exit;
+
+    if not TryParsePositiveInteger(DestinationText, DestinationNumber) then
+        Exit;
+
+    if (DestinationNumber < 1) or (DestinationNumber > 32) then
+        Exit;
+
+    Result := True;
+end;
+
+function Find3DBodyTextDumpCommand(LayerMoves: TStringList; var DestinationNumber: Integer; var FootprintName: String): Boolean;
+var
+    i: Integer;
+begin
+    Result := False;
+    DestinationNumber := 0;
+    FootprintName := '';
+
+    for i := 0 to LayerMoves.Count - 1 do
+    begin
+        if Parse3DBodyTextDumpCommand(LayerMoves[i], DestinationNumber, FootprintName) then
+        begin
+            Result := True;
+            Exit;
+        end;
+    end;
+end;
+
 function Parse3DBodyEditorCleanCommand(MoveText: String; var DestinationNumber: Integer; var LineWidthMM: Double): Boolean;
 var
     FirstSeparatorPos: Integer;
@@ -2400,6 +2519,576 @@ begin
     end;
 end;
 
+function MeasureProjectionTracks(Footprint: IPCB_LibComponent; DestinationLayer: TLayer; LineWidth: TCoord; var Left, Bottom, Right, Top: TCoord): Integer;
+var
+    PrimitiveIterator: IPCB_GroupIterator;
+    Primitive: IPCB_Primitive;
+    Track: IPCB_Track;
+    MinX, MaxX: TCoord;
+    MinY, MaxY: TCoord;
+begin
+    Result := 0;
+    Left := 0;
+    Bottom := 0;
+    Right := 0;
+    Top := 0;
+
+    if Footprint = Nil then
+        Exit;
+
+    PrimitiveIterator := Footprint.GroupIterator_Create;
+    if PrimitiveIterator = Nil then
+        Exit;
+
+    try
+        PrimitiveIterator.AddFilter_ObjectSet(MkSet(eTrackObject));
+        PrimitiveIterator.AddFilter_LayerSet(MkSet(DestinationLayer));
+
+        Primitive := PrimitiveIterator.FirstPCBObject;
+        while Primitive <> Nil do
+        begin
+            Track := Primitive;
+            if Track.Width = LineWidth then
+            begin
+                if Track.x1 < Track.x2 then
+                begin
+                    MinX := Track.x1;
+                    MaxX := Track.x2;
+                end
+                else
+                begin
+                    MinX := Track.x2;
+                    MaxX := Track.x1;
+                end;
+
+                if Track.y1 < Track.y2 then
+                begin
+                    MinY := Track.y1;
+                    MaxY := Track.y2;
+                end
+                else
+                begin
+                    MinY := Track.y2;
+                    MaxY := Track.y1;
+                end;
+
+                if Result = 0 then
+                begin
+                    Left := MinX;
+                    Right := MaxX;
+                    Bottom := MinY;
+                    Top := MaxY;
+                end
+                else
+                begin
+                    if MinX < Left then
+                        Left := MinX;
+                    if MaxX > Right then
+                        Right := MaxX;
+                    if MinY < Bottom then
+                        Bottom := MinY;
+                    if MaxY > Top then
+                        Top := MaxY;
+                end;
+
+                Result := Result + 1;
+            end;
+            Primitive := PrimitiveIterator.NextPCBObject;
+        end;
+    finally
+        Footprint.GroupIterator_Destroy(PrimitiveIterator);
+    end;
+end;
+
+function PCBLibLocalX(Board: IPCB_Board; X: TCoord): TCoord;
+begin
+    Result := X;
+    if Board <> Nil then
+    begin
+        if Abs(CoordToMMs(X)) > 100 then
+            Result := X - Board.XOrigin;
+    end;
+end;
+
+function PCBLibLocalY(Board: IPCB_Board; Y: TCoord): TCoord;
+begin
+    Result := Y;
+    if Board <> Nil then
+    begin
+        if Abs(CoordToMMs(Y)) > 100 then
+            Result := Y - Board.YOrigin;
+    end;
+end;
+
+function IsProjectionText(TextValue: String): Boolean;
+begin
+    TextValue := UpperCase(Trim(TextValue));
+    Result := (TextValue = '.DESIGNATOR') or (TextValue = '.COMMENT');
+end;
+
+function ProjectionTextHeight: TCoord;
+begin
+    Result := MMsToCoord(1.5);
+end;
+
+function ProjectionTextStrokeWidth: TCoord;
+begin
+    Result := MMsToCoord(0.1);
+end;
+
+function ProjectionTextAverageCharWidthMM: Double;
+begin
+    Result := CoordToMMs(ProjectionTextHeight) * 0.45;
+end;
+
+function ProjectionTextWidth(TextValue: String): TCoord;
+begin
+    Result := MMsToCoord(Length(TextValue) * ProjectionTextAverageCharWidthMM);
+end;
+
+function ProjectionTextKeepout: TCoord;
+begin
+    Result := MMsToCoord(0.05);
+end;
+
+function ProjectionTextGap: TCoord;
+begin
+    Result := MMsToCoord(0.45);
+end;
+
+function ProjectionCommentGap: TCoord;
+begin
+    Result := MMsToCoord(0.2);
+end;
+
+function ProjectionTrueTypeVisibleHeight: TCoord;
+begin
+    Result := MMsToCoord(CoordToMMs(ProjectionTextHeight) * 0.675);
+end;
+
+function ProjectionDesignatorAnchorOverlapHeight: TCoord;
+begin
+    Result := MMsToCoord(CoordToMMs(ProjectionTextHeight) * 0.6);
+end;
+
+function CoordMin(A, B: TCoord): TCoord;
+begin
+    if A < B then
+        Result := A
+    else
+        Result := B;
+end;
+
+function CoordMax(A, B: TCoord): TCoord;
+begin
+    if A > B then
+        Result := A
+    else
+        Result := B;
+end;
+
+function PointInsideRect(X, Y, Left, Bottom, Right, Top: TCoord): Boolean;
+begin
+    Result := (X >= Left) and (X <= Right) and (Y >= Bottom) and (Y <= Top);
+end;
+
+function SegmentDirection(AX, AY, BX, BY, CX, CY: TCoord): Double;
+begin
+    Result := ((CX - AX) * 1.0 * (BY - AY)) - ((BX - AX) * 1.0 * (CY - AY));
+end;
+
+function PointOnSegment(AX, AY, BX, BY, CX, CY: TCoord): Boolean;
+begin
+    Result := (Abs(SegmentDirection(AX, AY, BX, BY, CX, CY)) < 1.0) and
+              (CX >= CoordMin(AX, BX)) and (CX <= CoordMax(AX, BX)) and
+              (CY >= CoordMin(AY, BY)) and (CY <= CoordMax(AY, BY));
+end;
+
+function SegmentsIntersect(A1X, A1Y, A2X, A2Y, B1X, B1Y, B2X, B2Y: TCoord): Boolean;
+var
+    D1, D2, D3, D4: Double;
+begin
+    D1 := SegmentDirection(B1X, B1Y, B2X, B2Y, A1X, A1Y);
+    D2 := SegmentDirection(B1X, B1Y, B2X, B2Y, A2X, A2Y);
+    D3 := SegmentDirection(A1X, A1Y, A2X, A2Y, B1X, B1Y);
+    D4 := SegmentDirection(A1X, A1Y, A2X, A2Y, B2X, B2Y);
+
+    Result := False;
+    if (((D1 > 0) and (D2 < 0)) or ((D1 < 0) and (D2 > 0))) and
+       (((D3 > 0) and (D4 < 0)) or ((D3 < 0) and (D4 > 0))) then
+    begin
+        Result := True;
+        Exit;
+    end;
+
+    if (Abs(D1) < 1.0) and PointOnSegment(B1X, B1Y, B2X, B2Y, A1X, A1Y) then
+        Result := True
+    else if (Abs(D2) < 1.0) and PointOnSegment(B1X, B1Y, B2X, B2Y, A2X, A2Y) then
+        Result := True
+    else if (Abs(D3) < 1.0) and PointOnSegment(A1X, A1Y, A2X, A2Y, B1X, B1Y) then
+        Result := True
+    else if (Abs(D4) < 1.0) and PointOnSegment(A1X, A1Y, A2X, A2Y, B2X, B2Y) then
+        Result := True;
+end;
+
+function SegmentIntersectsRect(X1, Y1, X2, Y2, Left, Bottom, Right, Top: TCoord): Boolean;
+begin
+    Result := False;
+
+    if CoordMax(X1, X2) < Left then
+        Exit;
+    if CoordMin(X1, X2) > Right then
+        Exit;
+    if CoordMax(Y1, Y2) < Bottom then
+        Exit;
+    if CoordMin(Y1, Y2) > Top then
+        Exit;
+
+    if PointInsideRect(X1, Y1, Left, Bottom, Right, Top) or
+       PointInsideRect(X2, Y2, Left, Bottom, Right, Top) then
+    begin
+        Result := True;
+        Exit;
+    end;
+
+    Result := SegmentsIntersect(X1, Y1, X2, Y2, Left, Bottom, Right, Bottom) or
+              SegmentsIntersect(X1, Y1, X2, Y2, Right, Bottom, Right, Top) or
+              SegmentsIntersect(X1, Y1, X2, Y2, Right, Top, Left, Top) or
+              SegmentsIntersect(X1, Y1, X2, Y2, Left, Top, Left, Bottom);
+end;
+
+function ProjectionTracksIntersectRect(Board: IPCB_Board; Footprint: IPCB_LibComponent; DestinationLayer: TLayer; LineWidth: TCoord; Left, Bottom, Right, Top: TCoord): Boolean;
+var
+    PrimitiveIterator: IPCB_GroupIterator;
+    Primitive: IPCB_Primitive;
+    Track: IPCB_Track;
+    X1, Y1, X2, Y2: TCoord;
+    Keepout: TCoord;
+begin
+    Result := False;
+
+    if Footprint = Nil then
+        Exit;
+
+    Keepout := ProjectionTextKeepout;
+    Left := Left - Keepout;
+    Bottom := Bottom - Keepout;
+    Right := Right + Keepout;
+    Top := Top + Keepout;
+
+    PrimitiveIterator := Footprint.GroupIterator_Create;
+    if PrimitiveIterator = Nil then
+        Exit;
+
+    try
+        PrimitiveIterator.AddFilter_ObjectSet(MkSet(eTrackObject));
+        PrimitiveIterator.AddFilter_LayerSet(MkSet(DestinationLayer));
+
+        Primitive := PrimitiveIterator.FirstPCBObject;
+        while Primitive <> Nil do
+        begin
+            Track := Primitive;
+            if Track.Width = LineWidth then
+            begin
+                X1 := PCBLibLocalX(Board, Track.x1);
+                Y1 := PCBLibLocalY(Board, Track.y1);
+                X2 := PCBLibLocalX(Board, Track.x2);
+                Y2 := PCBLibLocalY(Board, Track.y2);
+                if SegmentIntersectsRect(X1, Y1, X2, Y2, Left, Bottom, Right, Top) then
+                begin
+                    Result := True;
+                    Exit;
+                end;
+            end;
+            Primitive := PrimitiveIterator.NextPCBObject;
+        end;
+    finally
+        Footprint.GroupIterator_Destroy(PrimitiveIterator);
+    end;
+end;
+
+function ProjectionDesignatorAnchorWidth: TCoord;
+begin
+    Result := ProjectionTextWidth('.De');
+end;
+
+function ProjectionDesignatorAnchorIsClear(Board: IPCB_Board; Footprint: IPCB_LibComponent; DestinationLayer: TLayer; LineWidth: TCoord; CenterX, CenterY, TextHeight: TCoord): Boolean;
+var
+    Left, Bottom, Right, Top: TCoord;
+    AnchorWidth: TCoord;
+    AnchorHeight: TCoord;
+begin
+    AnchorWidth := ProjectionDesignatorAnchorWidth;
+    AnchorHeight := ProjectionDesignatorAnchorOverlapHeight;
+    Left := CenterX - (AnchorWidth div 2);
+    Right := CenterX + (AnchorWidth div 2);
+    Bottom := CenterY - (AnchorHeight div 2);
+    Top := CenterY + (AnchorHeight div 2);
+    Result := not ProjectionTracksIntersectRect(Board, Footprint, DestinationLayer, LineWidth, Left, Bottom, Right, Top);
+end;
+
+function TryChooseProjectionDesignatorCenter(Board: IPCB_Board; Footprint: IPCB_LibComponent; DestinationLayer: TLayer; LineWidth: TCoord; CenterX, CenterY, Bottom, Top, TextHeight: TCoord; var DesignatorY: TCoord): Boolean;
+var
+    Offset: TCoord;
+    Step: TCoord;
+    MaxOffset: TCoord;
+    CandidateCenterY: TCoord;
+    MinCenterY: TCoord;
+    MaxCenterY: TCoord;
+begin
+    Result := False;
+    DesignatorY := CenterY - (TextHeight div 2);
+
+    MinCenterY := Bottom + (TextHeight div 2);
+    MaxCenterY := Top - (TextHeight div 2);
+    if MaxCenterY < MinCenterY then
+        Exit;
+
+    Step := MMsToCoord(0.025);
+    MaxOffset := CoordMax(Abs(CenterY - MinCenterY), Abs(MaxCenterY - CenterY));
+    Offset := 0;
+    while Offset <= MaxOffset do
+    begin
+        CandidateCenterY := CenterY - Offset;
+        if (CandidateCenterY >= MinCenterY) and (CandidateCenterY <= MaxCenterY) then
+        begin
+            if ProjectionDesignatorAnchorIsClear(Board, Footprint, DestinationLayer, LineWidth, CenterX, CandidateCenterY, TextHeight) then
+            begin
+                DesignatorY := CandidateCenterY - (TextHeight div 2);
+                Result := True;
+                Exit;
+            end;
+        end;
+
+        if Offset > 0 then
+        begin
+            CandidateCenterY := CenterY + Offset;
+            if (CandidateCenterY >= MinCenterY) and (CandidateCenterY <= MaxCenterY) then
+            begin
+                if ProjectionDesignatorAnchorIsClear(Board, Footprint, DestinationLayer, LineWidth, CenterX, CandidateCenterY, TextHeight) then
+                begin
+                    DesignatorY := CandidateCenterY - (TextHeight div 2);
+                    Result := True;
+                    Exit;
+                end;
+            end;
+        end;
+
+        Offset := Offset + Step;
+    end;
+end;
+
+procedure ChooseProjectionTextLocations(Board: IPCB_Board; Footprint: IPCB_LibComponent; DestinationLayer: TLayer; LineWidth: TCoord; var DesignatorX, DesignatorY, CommentX, CommentY: TCoord; var DesignatorAtCenter: Boolean);
+var
+    Left, Bottom, Right, Top: TCoord;
+    CenterX, CenterY: TCoord;
+    DesignatorHeight: TCoord;
+    DesignatorAnchorWidth: TCoord;
+    CommentWidth: TCoord;
+    Gap: TCoord;
+    CommentGap: TCoord;
+begin
+    DesignatorHeight := ProjectionTextHeight;
+    DesignatorAnchorWidth := ProjectionDesignatorAnchorWidth;
+    CommentWidth := ProjectionTextWidth('.Comment');
+    Gap := ProjectionTextGap;
+    CommentGap := ProjectionCommentGap;
+    DesignatorAtCenter := False;
+
+    if MeasureProjectionTracks(Footprint, DestinationLayer, LineWidth, Left, Bottom, Right, Top) <= 0 then
+    begin
+        CenterX := 0;
+        CenterY := 0;
+        DesignatorX := CenterX - (DesignatorAnchorWidth div 2);
+        DesignatorY := CenterY - (DesignatorHeight div 2);
+        CommentX := CenterX - (CommentWidth div 2);
+        CommentY := CenterY - DesignatorHeight - CommentGap - ProjectionTrueTypeVisibleHeight;
+        Exit;
+    end;
+
+    Left := PCBLibLocalX(Board, Left);
+    Right := PCBLibLocalX(Board, Right);
+    Bottom := PCBLibLocalY(Board, Bottom);
+    Top := PCBLibLocalY(Board, Top);
+    CenterX := (Left + Right) div 2;
+    CenterY := (Bottom + Top) div 2;
+
+    if TryChooseProjectionDesignatorCenter(Board, Footprint, DestinationLayer, LineWidth, CenterX, CenterY, Bottom, Top, DesignatorHeight, DesignatorY) then
+    begin
+        DesignatorX := CenterX - (DesignatorAnchorWidth div 2);
+        DesignatorAtCenter := True;
+    end
+    else
+    begin
+        DesignatorX := CenterX - (DesignatorAnchorWidth div 2);
+        DesignatorY := Top + Gap;
+    end;
+
+    CommentX := CenterX - (CommentWidth div 2);
+    CommentY := Bottom - CommentGap - ProjectionTrueTypeVisibleHeight;
+end;
+
+function SelectProjectionTexts(Footprint: IPCB_LibComponent; DestinationLayer: TLayer): Integer;
+var
+    PrimitiveIterator: IPCB_GroupIterator;
+    Primitive: IPCB_Primitive;
+    TextPrimitive: IPCB_Text;
+begin
+    Result := 0;
+
+    if Footprint = Nil then
+        Exit;
+
+    PrimitiveIterator := Footprint.GroupIterator_Create;
+    if PrimitiveIterator = Nil then
+        Exit;
+
+    try
+        PrimitiveIterator.AddFilter_ObjectSet(MkSet(eTextObject));
+        PrimitiveIterator.AddFilter_LayerSet(MkSet(DestinationLayer));
+
+        Primitive := PrimitiveIterator.FirstPCBObject;
+        while Primitive <> Nil do
+        begin
+            TextPrimitive := Primitive;
+            if IsProjectionText(TextPrimitive.Text) then
+            begin
+                Primitive.Selected := True;
+                Result := Result + 1;
+            end;
+            Primitive := PrimitiveIterator.NextPCBObject;
+        end;
+    finally
+        Footprint.GroupIterator_Destroy(PrimitiveIterator);
+    end;
+end;
+
+function FindReferenceProjectionText(PcbLib: IPCB_Library; Board: IPCB_Board; ReferenceFootprintName: String; TextValue: String; var TemplateText: IPCB_Text; var LocalX, LocalY: TCoord): Boolean;
+var
+    FootprintIterator: IPCB_LibraryIterator;
+    ReferenceFootprint: IPCB_LibComponent;
+    ActiveFootprint: IPCB_LibComponent;
+    PrimitiveIterator: IPCB_GroupIterator;
+    Primitive: IPCB_Primitive;
+    TextPrimitive: IPCB_Text;
+begin
+    Result := False;
+    TemplateText := Nil;
+    LocalX := 0;
+    LocalY := 0;
+
+    ReferenceFootprint := Nil;
+    FootprintIterator := PcbLib.LibraryIterator_Create;
+    if FootprintIterator = Nil then
+        Exit;
+    try
+        FootprintIterator.SetState_FilterAll;
+        ReferenceFootprint := FootprintIterator.FirstPCBObject;
+        while ReferenceFootprint <> Nil do
+        begin
+            if UpperCase(ReferenceFootprint.Name) = UpperCase(ReferenceFootprintName) then
+                Break;
+            ReferenceFootprint := FootprintIterator.NextPCBObject;
+        end;
+    finally
+        PcbLib.LibraryIterator_Destroy(FootprintIterator);
+    end;
+
+    if ReferenceFootprint = Nil then
+        Exit;
+
+    PcbLib.CurrentComponent := ReferenceFootprint;
+    ActiveFootprint := PcbLib.CurrentComponent;
+    if Board <> Nil then
+        Board.ViewManager_FullUpdate;
+
+    if ActiveFootprint = Nil then
+        Exit;
+
+    PrimitiveIterator := ActiveFootprint.GroupIterator_Create;
+    if PrimitiveIterator = Nil then
+        Exit;
+
+    try
+        PrimitiveIterator.AddFilter_ObjectSet(MkSet(eTextObject));
+        PrimitiveIterator.AddFilter_LayerSet(AllLayers);
+
+        Primitive := PrimitiveIterator.FirstPCBObject;
+        while Primitive <> Nil do
+        begin
+            TextPrimitive := Primitive;
+            if UpperCase(Trim(TextPrimitive.Text)) = UpperCase(TextValue) then
+            begin
+                TemplateText := TextPrimitive.Replicate;
+                LocalX := PCBLibLocalX(Board, TextPrimitive.XLocation);
+                LocalY := PCBLibLocalY(Board, TextPrimitive.YLocation);
+                Result := TemplateText <> Nil;
+                Exit;
+            end;
+            Primitive := PrimitiveIterator.NextPCBObject;
+        end;
+    finally
+        ActiveFootprint.GroupIterator_Destroy(PrimitiveIterator);
+    end;
+end;
+
+function AddProjectionTextFromTemplate(Board: IPCB_Board; TemplateText: IPCB_Text; DestinationLayer: TLayer; TextValue: String; LocalX, LocalY: TCoord): Boolean;
+var
+    NewText: IPCB_Text;
+begin
+    Result := False;
+
+    if (Board = Nil) or (TemplateText = Nil) then
+        Exit;
+
+    NewText := TemplateText.Replicate;
+    if NewText = Nil then
+        Exit;
+
+    NewText.Layer := DestinationLayer;
+    NewText.Text := TextValue;
+    NewText.XLocation := Board.XOrigin + LocalX;
+    NewText.YLocation := Board.YOrigin + LocalY;
+    NewText.Selected := False;
+
+    PCBServer.SendMessageToRobots(NewText.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+    Board.AddPCBObject(NewText);
+    PCBServer.SendMessageToRobots(NewText.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+    Result := True;
+end;
+
+function AddProjectionTextBuiltIn(Board: IPCB_Board; DestinationLayer: TLayer; TextValue: String; LocalX, LocalY: TCoord): Boolean;
+var
+    NewText: IPCB_Text;
+begin
+    Result := False;
+
+    if Board = Nil then
+        Exit;
+
+    NewText := PCBServer.PCBObjectFactory(eTextObject, eNoDimension, eCreate_Default);
+    if NewText = Nil then
+        Exit;
+
+    NewText.Layer := DestinationLayer;
+    NewText.Text := TextValue;
+    NewText.XLocation := Board.XOrigin + LocalX;
+    NewText.YLocation := Board.YOrigin + LocalY;
+    NewText.Size := ProjectionTextHeight;
+    NewText.Width := ProjectionTextStrokeWidth;
+    NewText.UseTTFonts := True;
+    NewText.FontName := 'ARIAL';
+    NewText.Bold := False;
+    NewText.Italic := False;
+    NewText.Rotation := 0;
+    NewText.Selected := False;
+
+    PCBServer.SendMessageToRobots(NewText.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+    Board.AddPCBObject(NewText);
+    PCBServer.SendMessageToRobots(NewText.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+    Result := True;
+end;
+
 function FindPCBLibraryFootprintByName(PcbLib: IPCB_Library; FootprintName: String): IPCB_LibComponent;
 var
     FootprintIterator : IPCB_LibraryIterator;
@@ -2428,6 +3117,152 @@ begin
         end;
     finally
         PcbLib.LibraryIterator_Destroy(FootprintIterator);
+    end;
+end;
+
+function DumpPCBLibraryProjectionTextPlacement(DestinationLayerNumber: Integer; FootprintName: String): String;
+var
+    PcbLib              : IPCB_Library;
+    Board               : IPCB_Board;
+    Footprint           : IPCB_LibComponent;
+    DestinationLayer    : TLayer;
+    ProjectionLineWidth : TCoord;
+    TracksCount         : Integer;
+    Left, Bottom, Right, Top: TCoord;
+    LocalLeft, LocalBottom, LocalRight, LocalTop: TCoord;
+    CenterX, CenterY    : TCoord;
+    DesignatorLocalX    : TCoord;
+    DesignatorLocalY    : TCoord;
+    CommentLocalX       : TCoord;
+    CommentLocalY       : TCoord;
+    DesignatorAtCenter  : Boolean;
+    PrimitiveIterator   : IPCB_GroupIterator;
+    Primitive           : IPCB_Primitive;
+    TextPrimitive       : IPCB_Text;
+    TextLocalX          : TCoord;
+    TextLocalY          : TCoord;
+    ResultProps         : TStringList;
+    TextArray           : TStringList;
+    TextProps           : TStringList;
+    GeneratedProps      : TStringList;
+    OutputLines         : TStringList;
+begin
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    if PcbLib = Nil then
+    begin
+        Result := '{"success": false, "error": "No PCB library document is currently active. Open a .PcbLib file first."}';
+        Exit;
+    end;
+
+    if (DestinationLayerNumber < 1) or (DestinationLayerNumber > 32) then
+    begin
+        Result := '{"success": false, "error": "Mechanical layer number must be between 1 and 32."}';
+        Exit;
+    end;
+
+    Board := PcbLib.Board;
+    DestinationLayer := ILayer.MechanicalLayer(DestinationLayerNumber);
+    ProjectionLineWidth := MMsToCoord(0.1);
+    Footprint := FindPCBLibraryFootprintByName(PcbLib, FootprintName);
+    if Footprint = Nil then
+    begin
+        Result := '{"success": false, "error": "Footprint not found."}';
+        Exit;
+    end;
+
+    PcbLib.CurrentComponent := Footprint;
+    Footprint := PcbLib.CurrentComponent;
+
+    ResultProps := TStringList.Create;
+    TextArray := TStringList.Create;
+    GeneratedProps := TStringList.Create;
+    try
+        TracksCount := MeasureProjectionTracks(Footprint, DestinationLayer, ProjectionLineWidth, Left, Bottom, Right, Top);
+        LocalLeft := PCBLibLocalX(Board, Left);
+        LocalRight := PCBLibLocalX(Board, Right);
+        LocalBottom := PCBLibLocalY(Board, Bottom);
+        LocalTop := PCBLibLocalY(Board, Top);
+        CenterX := (LocalLeft + LocalRight) div 2;
+        CenterY := (LocalBottom + LocalTop) div 2;
+
+        ChooseProjectionTextLocations(
+            Board,
+            Footprint,
+            DestinationLayer,
+            ProjectionLineWidth,
+            DesignatorLocalX,
+            DesignatorLocalY,
+            CommentLocalX,
+            CommentLocalY,
+            DesignatorAtCenter
+        );
+
+        PrimitiveIterator := Footprint.GroupIterator_Create;
+        if PrimitiveIterator <> Nil then
+        begin
+            try
+                PrimitiveIterator.AddFilter_ObjectSet(MkSet(eTextObject));
+                PrimitiveIterator.AddFilter_LayerSet(MkSet(DestinationLayer));
+
+                Primitive := PrimitiveIterator.FirstPCBObject;
+                while Primitive <> Nil do
+                begin
+                    TextPrimitive := Primitive;
+                    if IsProjectionText(TextPrimitive.Text) then
+                    begin
+                        TextLocalX := PCBLibLocalX(Board, TextPrimitive.XLocation);
+                        TextLocalY := PCBLibLocalY(Board, TextPrimitive.YLocation);
+                        TextProps := TStringList.Create;
+                        try
+                            AddJSONProperty(TextProps, 'text', TextPrimitive.Text);
+                            AddJSONNumber(TextProps, 'x_mm', CoordToMMs(TextLocalX));
+                            AddJSONNumber(TextProps, 'y_mm', CoordToMMs(TextLocalY));
+                            AddJSONNumber(TextProps, 'x_from_center_mm', CoordToMMs(TextLocalX - CenterX));
+                            AddJSONNumber(TextProps, 'y_from_bottom_mm', CoordToMMs(TextLocalY - LocalBottom));
+                            AddJSONNumber(TextProps, 'y_from_top_mm', CoordToMMs(TextLocalY - LocalTop));
+                            TextArray.Add(BuildJSONObject(TextProps, 1));
+                        finally
+                            TextProps.Free;
+                        end;
+                    end;
+                    Primitive := PrimitiveIterator.NextPCBObject;
+                end;
+            finally
+                Footprint.GroupIterator_Destroy(PrimitiveIterator);
+            end;
+        end;
+
+        AddJSONNumber(GeneratedProps, 'designator_x_mm', CoordToMMs(DesignatorLocalX));
+        AddJSONNumber(GeneratedProps, 'designator_y_mm', CoordToMMs(DesignatorLocalY));
+        AddJSONNumber(GeneratedProps, 'comment_x_mm', CoordToMMs(CommentLocalX));
+        AddJSONNumber(GeneratedProps, 'comment_y_mm', CoordToMMs(CommentLocalY));
+        AddJSONBoolean(GeneratedProps, 'designator_at_center', DesignatorAtCenter);
+
+        AddJSONBoolean(ResultProps, 'success', True);
+        AddJSONProperty(ResultProps, 'footprint', FootprintName);
+        AddJSONInteger(ResultProps, 'mechanical_layer', DestinationLayerNumber);
+        AddJSONNumber(ResultProps, 'projection_line_width_mm', CoordToMMs(ProjectionLineWidth));
+        AddJSONInteger(ResultProps, 'projection_track_count', TracksCount);
+        AddJSONNumber(ResultProps, 'projection_left_mm', CoordToMMs(LocalLeft));
+        AddJSONNumber(ResultProps, 'projection_bottom_mm', CoordToMMs(LocalBottom));
+        AddJSONNumber(ResultProps, 'projection_right_mm', CoordToMMs(LocalRight));
+        AddJSONNumber(ResultProps, 'projection_top_mm', CoordToMMs(LocalTop));
+        AddJSONNumber(ResultProps, 'projection_center_x_mm', CoordToMMs(CenterX));
+        AddJSONNumber(ResultProps, 'projection_center_y_mm', CoordToMMs(CenterY));
+        ResultProps.Add(JSONPairStr('generated_positions', BuildJSONObject(GeneratedProps, 1), False));
+        ResultProps.Add(BuildJSONArray(TextArray, 'current_texts'));
+
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := OutputLines.Text;
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        ResultProps.Free;
+        TextArray.Free;
+        GeneratedProps.Free;
     end;
 end;
 
@@ -2729,6 +3564,192 @@ begin
         FootprintNames.Free;
         ResultProps.Free;
         SelectedArray.Free;
+        SkippedFootprints.Free;
+    end;
+end;
+
+function AddPCBLibraryProjectionTexts(ExcludeFootprints: TStringList; DestinationLayerNumber: Integer; ReferenceFootprintName: String): String;
+var
+    PcbLib              : IPCB_Library;
+    Board               : IPCB_Board;
+    FootprintIterator   : IPCB_LibraryIterator;
+    Footprint           : IPCB_LibComponent;
+    DestinationLayer    : TLayer;
+    FootprintNames      : TStringList;
+    ResultProps         : TStringList;
+    ModifiedFootprints  : TStringList;
+    SkippedFootprints   : TStringList;
+    OutputLines         : TStringList;
+    FootprintName       : String;
+    DesignatorLocalX    : TCoord;
+    DesignatorLocalY    : TCoord;
+    CommentLocalX       : TCoord;
+    CommentLocalY       : TCoord;
+    ProjectionLineWidth : TCoord;
+    DesignatorAtCenter  : Boolean;
+    DesignatorsCentered : Integer;
+    FootprintsSeen      : Integer;
+    FootprintsProcessed : Integer;
+    FootprintsModified  : Integer;
+    TextsDeleted        : Integer;
+    TextsCreated        : Integer;
+    FootprintTextsDeleted : Integer;
+    FootprintTextsCreated : Integer;
+    i                   : Integer;
+begin
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    if PcbLib = Nil then
+    begin
+        Result := '{"success": false, "error": "No PCB library document is currently active. Open a .PcbLib file first."}';
+        Exit;
+    end;
+
+    if (DestinationLayerNumber < 1) or (DestinationLayerNumber > 32) then
+    begin
+        Result := '{"success": false, "error": "Mechanical layer number must be between 1 and 32."}';
+        Exit;
+    end;
+
+    Board := PcbLib.Board;
+    DestinationLayer := ILayer.MechanicalLayer(DestinationLayerNumber);
+    ProjectionLineWidth := MMsToCoord(0.1);
+
+    FootprintNames := TStringList.Create;
+    ResultProps := TStringList.Create;
+    ModifiedFootprints := TStringList.Create;
+    SkippedFootprints := TStringList.Create;
+    FootprintsSeen := 0;
+    FootprintsProcessed := 0;
+    FootprintsModified := 0;
+    TextsDeleted := 0;
+    TextsCreated := 0;
+    DesignatorsCentered := 0;
+
+    try
+        EnsureMechanicalLayerEnabled(Board, DestinationLayerNumber);
+
+        FootprintIterator := PcbLib.LibraryIterator_Create;
+        if FootprintIterator = Nil then
+        begin
+            Result := '{"success": false, "error": "Failed to create PCB library footprint iterator."}';
+            Exit;
+        end;
+
+        FootprintIterator.SetState_FilterAll;
+        try
+            Footprint := FootprintIterator.FirstPCBObject;
+            while Footprint <> Nil do
+            begin
+                FootprintsSeen := FootprintsSeen + 1;
+                FootprintName := Footprint.Name;
+
+                if StringListContainsText(ExcludeFootprints, FootprintName) then
+                begin
+                    SkippedFootprints.Add('"' + JSONEscapeString(FootprintName) + '"');
+                end
+                else
+                begin
+                    FootprintsProcessed := FootprintsProcessed + 1;
+                    FootprintNames.Add(FootprintName);
+                end;
+
+                Footprint := FootprintIterator.NextPCBObject;
+            end;
+        finally
+            PcbLib.LibraryIterator_Destroy(FootprintIterator);
+        end;
+
+        for i := 0 to FootprintNames.Count - 1 do
+        begin
+            FootprintName := FootprintNames[i];
+            Footprint := FindPCBLibraryFootprintByName(PcbLib, FootprintName);
+            if Footprint <> Nil then
+            begin
+                PcbLib.CurrentComponent := Footprint;
+                Footprint := PcbLib.CurrentComponent;
+                if Board <> Nil then
+                    Board.ViewManager_FullUpdate;
+
+                if Footprint <> Nil then
+                begin
+                    Client.SendMessage('PCB:DeSelect', 'Scope=All', 255, Client.CurrentView);
+                    FootprintTextsDeleted := SelectProjectionTexts(Footprint, DestinationLayer);
+                    if FootprintTextsDeleted > 0 then
+                    begin
+                        Client.SendMessage('PCB:DeleteObjects', 'Object=FOCUSED', 255, Client.CurrentView);
+                        TextsDeleted := TextsDeleted + FootprintTextsDeleted;
+                    end;
+
+                    ChooseProjectionTextLocations(
+                        Board,
+                        Footprint,
+                        DestinationLayer,
+                        ProjectionLineWidth,
+                        DesignatorLocalX,
+                        DesignatorLocalY,
+                        CommentLocalX,
+                        CommentLocalY,
+                        DesignatorAtCenter
+                    );
+
+                    FootprintTextsCreated := 0;
+                    PCBServer.PreProcess;
+                    try
+                        if AddProjectionTextBuiltIn(Board, DestinationLayer, '.Designator', DesignatorLocalX, DesignatorLocalY) then
+                            FootprintTextsCreated := FootprintTextsCreated + 1;
+                        if AddProjectionTextBuiltIn(Board, DestinationLayer, '.Comment', CommentLocalX, CommentLocalY) then
+                            FootprintTextsCreated := FootprintTextsCreated + 1;
+                    finally
+                        PCBServer.PostProcess;
+                    end;
+
+                    if FootprintTextsCreated > 0 then
+                    begin
+                        TextsCreated := TextsCreated + FootprintTextsCreated;
+                        FootprintsModified := FootprintsModified + 1;
+                        ModifiedFootprints.Add('"' + JSONEscapeString(FootprintName) + '"');
+                        if DesignatorAtCenter then
+                            DesignatorsCentered := DesignatorsCentered + 1;
+                    end;
+
+                    if Board <> Nil then
+                        Board.ViewManager_FullUpdate;
+                end;
+            end;
+        end;
+
+        Client.SendMessage('PCB:DeSelect', 'Scope=All', 255, Client.CurrentView);
+        if Board <> Nil then
+            Board.ViewManager_FullUpdate;
+        Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
+
+        AddJSONBoolean(ResultProps, 'success', True);
+        AddJSONProperty(ResultProps, 'text_style_source', 'built-in');
+        AddJSONNumber(ResultProps, 'text_height_mm', CoordToMMs(ProjectionTextHeight));
+        AddJSONNumber(ResultProps, 'text_stroke_width_mm', CoordToMMs(ProjectionTextStrokeWidth));
+        AddJSONNumber(ResultProps, 'comment_gap_mm', CoordToMMs(ProjectionCommentGap));
+        AddJSONNumber(ResultProps, 'projection_line_width_mm', CoordToMMs(ProjectionLineWidth));
+        AddJSONInteger(ResultProps, 'mechanical_layer', DestinationLayerNumber);
+        AddJSONInteger(ResultProps, 'footprints_seen', FootprintsSeen);
+        AddJSONInteger(ResultProps, 'footprints_processed', FootprintsProcessed);
+        AddJSONInteger(ResultProps, 'footprints_modified', FootprintsModified);
+        AddJSONInteger(ResultProps, 'texts_deleted', TextsDeleted);
+        AddJSONInteger(ResultProps, 'texts_created', TextsCreated);
+        AddJSONInteger(ResultProps, 'designators_centered', DesignatorsCentered);
+        ResultProps.Add(BuildJSONArray(SkippedFootprints, 'skipped_footprints'));
+        ResultProps.Add(BuildJSONArray(ModifiedFootprints, 'modified_footprints'));
+
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := OutputLines.Text;
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        FootprintNames.Free;
+        ResultProps.Free;
+        ModifiedFootprints.Free;
         SkippedFootprints.Free;
     end;
 end;
@@ -3260,6 +4281,8 @@ var
     ProjectionLayerNumber : Integer;
     ProjectionLineWidthMM : Double;
     RemoveExistingProjection : Boolean;
+    ReferenceFootprintName : String;
+    TextDumpFootprintName : String;
 begin
     if Find3DBodyDumpCommand(LayerMoves) then
     begin
@@ -3294,6 +4317,18 @@ begin
     if Find3DBodyTrackSelectCommand(LayerMoves, ProjectionLayerNumber, ProjectionLineWidthMM) then
     begin
         Result := SelectPCBLibraryProjectionTracksForEditor(ExcludeFootprints, ProjectionLayerNumber, ProjectionLineWidthMM);
+        Exit;
+    end;
+
+    if Find3DBodyTextDumpCommand(LayerMoves, ProjectionLayerNumber, TextDumpFootprintName) then
+    begin
+        Result := DumpPCBLibraryProjectionTextPlacement(ProjectionLayerNumber, TextDumpFootprintName);
+        Exit;
+    end;
+
+    if Find3DBodyTextCommand(LayerMoves, ProjectionLayerNumber, ReferenceFootprintName) then
+    begin
+        Result := AddPCBLibraryProjectionTexts(ExcludeFootprints, ProjectionLayerNumber, ReferenceFootprintName);
         Exit;
     end;
 

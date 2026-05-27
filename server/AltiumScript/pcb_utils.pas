@@ -1305,6 +1305,97 @@ begin
     end;
 end;
 
+function TryParsePositiveInteger(Text: String; var Value: Integer): Boolean;
+var
+    i: Integer;
+begin
+    Result := False;
+    Value := 0;
+    Text := Trim(Text);
+
+    if Text = '' then
+        Exit;
+
+    for i := 1 to Length(Text) do
+    begin
+        if (Text[i] < '0') or (Text[i] > '9') then
+            Exit;
+    end;
+
+    Value := StrToInt(Text);
+    Result := True;
+end;
+
+function ParseMechanicalLayerMove(MoveText: String; var SourceNumber: Integer; var DestinationNumber: Integer): Boolean;
+var
+    SeparatorPos: Integer;
+    SourceText: String;
+    DestinationText: String;
+begin
+    Result := False;
+    SourceNumber := 0;
+    DestinationNumber := 0;
+    MoveText := Trim(MoveText);
+
+    SeparatorPos := Pos('|', MoveText);
+    if SeparatorPos <= 1 then
+        Exit;
+
+    SourceText := Copy(MoveText, 1, SeparatorPos - 1);
+    DestinationText := Copy(MoveText, SeparatorPos + 1, Length(MoveText) - SeparatorPos);
+
+    if not TryParsePositiveInteger(SourceText, SourceNumber) then
+        Exit;
+
+    if not TryParsePositiveInteger(DestinationText, DestinationNumber) then
+        Exit;
+
+    Result := (SourceNumber >= 1) and (SourceNumber <= 32) and
+              (DestinationNumber >= 1) and (DestinationNumber <= 32);
+end;
+
+function FindMechanicalLayerMove(CurrentLayer: TLayer; LayerMoves: TStringList; var SourceNumber: Integer; var DestinationNumber: Integer): Boolean;
+var
+    i: Integer;
+    ParsedSource: Integer;
+    ParsedDestination: Integer;
+begin
+    Result := False;
+    SourceNumber := 0;
+    DestinationNumber := 0;
+
+    for i := 0 to LayerMoves.Count - 1 do
+    begin
+        if ParseMechanicalLayerMove(LayerMoves[i], ParsedSource, ParsedDestination) then
+        begin
+            if CurrentLayer = ILayer.MechanicalLayer(ParsedSource) then
+            begin
+                SourceNumber := ParsedSource;
+                DestinationNumber := ParsedDestination;
+                Result := True;
+                Exit;
+            end;
+        end;
+    end;
+end;
+
+procedure EnsureMechanicalLayerEnabled(Board: IPCB_Board; LayerNumber: Integer);
+var
+    LayerStack: IPCB_LayerStack_V7;
+    MechLayer: IPCB_MechanicalLayer;
+begin
+    if Board = Nil then
+        Exit;
+
+    LayerStack := Board.LayerStack_V7;
+    if LayerStack = Nil then
+        Exit;
+
+    MechLayer := LayerStack.LayerObject_V7[ILayer.MechanicalLayer(LayerNumber)];
+    if MechLayer <> Nil then
+        MechLayer.MechanicalLayerEnabled := True;
+end;
+
 function SetPCBLibraryPadShapes(ExcludeFootprints: TStringList; NewShape: TShape): String;
 var
     PcbLib              : IPCB_Library;
@@ -1434,6 +1525,202 @@ begin
         ResultProps.Free;
         ModifiedFootprints.Free;
         SkippedFootprints.Free;
+    end;
+end;
+
+function MovePCBLibraryMechanicalLayers(ExcludeFootprints: TStringList; LayerMoves: TStringList): String;
+var
+    PcbLib              : IPCB_Library;
+    Board               : IPCB_Board;
+    FootprintIterator   : IPCB_LibraryIterator;
+    Footprint           : IPCB_LibComponent;
+    PrimitiveIterator   : IPCB_GroupIterator;
+    Primitive           : IPCB_Primitive;
+    ResultProps         : TStringList;
+    MoveResultArray     : TStringList;
+    ModifiedFootprints  : TStringList;
+    SkippedFootprints   : TStringList;
+    InvalidMoves        : TStringList;
+    ParsedMoves         : TStringList;
+    MoveCounts          : TStringList;
+    MoveProps           : TStringList;
+    OutputLines         : TStringList;
+    FootprintName       : String;
+    NormalizedMove      : String;
+    FootprintsSeen      : Integer;
+    FootprintsProcessed : Integer;
+    FootprintsModified  : Integer;
+    PrimitivesSeen      : Integer;
+    PrimitivesMoved     : Integer;
+    FootprintPrimitivesMoved : Integer;
+    SourceLayerNumber   : Integer;
+    DestinationLayerNumber : Integer;
+    MoveIndex           : Integer;
+    i                   : Integer;
+begin
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    if PcbLib = Nil then
+    begin
+        Result := '{"success": false, "error": "No PCB library document is currently active. Open a .PcbLib file first."}';
+        Exit;
+    end;
+
+    Board := PcbLib.Board;
+    ResultProps := TStringList.Create;
+    MoveResultArray := TStringList.Create;
+    ModifiedFootprints := TStringList.Create;
+    SkippedFootprints := TStringList.Create;
+    InvalidMoves := TStringList.Create;
+    ParsedMoves := TStringList.Create;
+    MoveCounts := TStringList.Create;
+    FootprintsSeen := 0;
+    FootprintsProcessed := 0;
+    FootprintsModified := 0;
+    PrimitivesSeen := 0;
+    PrimitivesMoved := 0;
+
+    try
+        for i := 0 to LayerMoves.Count - 1 do
+        begin
+            if ParseMechanicalLayerMove(LayerMoves[i], SourceLayerNumber, DestinationLayerNumber) then
+            begin
+                NormalizedMove := IntToStr(SourceLayerNumber) + '|' + IntToStr(DestinationLayerNumber);
+                if ParsedMoves.IndexOf(NormalizedMove) < 0 then
+                begin
+                    ParsedMoves.Add(NormalizedMove);
+                    MoveCounts.Add('0');
+                    EnsureMechanicalLayerEnabled(Board, DestinationLayerNumber);
+                end;
+            end
+            else
+            begin
+                InvalidMoves.Add('"' + JSONEscapeString(LayerMoves[i]) + '"');
+            end;
+        end;
+
+        if ParsedMoves.Count = 0 then
+        begin
+            Result := '{"success": false, "error": "No valid mechanical layer moves provided. Use source|destination, for example 13|1."}';
+            Exit;
+        end;
+
+        FootprintIterator := PcbLib.LibraryIterator_Create;
+        if FootprintIterator = Nil then
+        begin
+            Result := '{"success": false, "error": "Failed to create PCB library footprint iterator."}';
+            Exit;
+        end;
+
+        FootprintIterator.SetState_FilterAll;
+
+        PCBServer.PreProcess;
+        try
+            Footprint := FootprintIterator.FirstPCBObject;
+            while Footprint <> Nil do
+            begin
+                FootprintsSeen := FootprintsSeen + 1;
+                FootprintName := Footprint.Name;
+
+                if StringListContainsText(ExcludeFootprints, FootprintName) then
+                begin
+                    SkippedFootprints.Add('"' + JSONEscapeString(FootprintName) + '"');
+                end
+                else
+                begin
+                    FootprintsProcessed := FootprintsProcessed + 1;
+                    FootprintPrimitivesMoved := 0;
+
+                    PrimitiveIterator := Footprint.GroupIterator_Create;
+                    if PrimitiveIterator <> Nil then
+                    begin
+                        try
+                            PrimitiveIterator.SetState_FilterAll;
+
+                            Primitive := PrimitiveIterator.FirstPCBObject;
+                            while Primitive <> Nil do
+                            begin
+                                PrimitivesSeen := PrimitivesSeen + 1;
+
+                                if FindMechanicalLayerMove(Primitive.Layer, ParsedMoves, SourceLayerNumber, DestinationLayerNumber) then
+                                begin
+                                    PCBServer.SendMessageToRobots(Primitive.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+                                    Primitive.Layer := ILayer.MechanicalLayer(DestinationLayerNumber);
+                                    PCBServer.SendMessageToRobots(Primitive.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+
+                                    PrimitivesMoved := PrimitivesMoved + 1;
+                                    FootprintPrimitivesMoved := FootprintPrimitivesMoved + 1;
+
+                                    NormalizedMove := IntToStr(SourceLayerNumber) + '|' + IntToStr(DestinationLayerNumber);
+                                    MoveIndex := ParsedMoves.IndexOf(NormalizedMove);
+                                    if MoveIndex >= 0 then
+                                        MoveCounts[MoveIndex] := IntToStr(StrToInt(MoveCounts[MoveIndex]) + 1);
+                                end;
+
+                                Primitive := PrimitiveIterator.NextPCBObject;
+                            end;
+                        finally
+                            Footprint.GroupIterator_Destroy(PrimitiveIterator);
+                        end;
+                    end;
+
+                    if FootprintPrimitivesMoved > 0 then
+                    begin
+                        FootprintsModified := FootprintsModified + 1;
+                        ModifiedFootprints.Add('"' + JSONEscapeString(FootprintName) + '"');
+                    end;
+                end;
+
+                Footprint := FootprintIterator.NextPCBObject;
+            end;
+        finally
+            PCBServer.PostProcess;
+            PcbLib.LibraryIterator_Destroy(FootprintIterator);
+        end;
+
+        if Board <> Nil then
+            Board.ViewManager_FullUpdate;
+        Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
+
+        for i := 0 to ParsedMoves.Count - 1 do
+        begin
+            ParseMechanicalLayerMove(ParsedMoves[i], SourceLayerNumber, DestinationLayerNumber);
+            MoveProps := TStringList.Create;
+            try
+                AddJSONInteger(MoveProps, 'from_mechanical_layer', SourceLayerNumber);
+                AddJSONInteger(MoveProps, 'to_mechanical_layer', DestinationLayerNumber);
+                AddJSONInteger(MoveProps, 'primitives_moved', StrToInt(MoveCounts[i]));
+                MoveResultArray.Add(BuildJSONObject(MoveProps, 1));
+            finally
+                MoveProps.Free;
+            end;
+        end;
+
+        AddJSONBoolean(ResultProps, 'success', True);
+        AddJSONInteger(ResultProps, 'footprints_seen', FootprintsSeen);
+        AddJSONInteger(ResultProps, 'footprints_processed', FootprintsProcessed);
+        AddJSONInteger(ResultProps, 'footprints_modified', FootprintsModified);
+        AddJSONInteger(ResultProps, 'primitives_seen', PrimitivesSeen);
+        AddJSONInteger(ResultProps, 'primitives_moved', PrimitivesMoved);
+        ResultProps.Add(BuildJSONArray(MoveResultArray, 'moves'));
+        ResultProps.Add(BuildJSONArray(SkippedFootprints, 'skipped_footprints'));
+        ResultProps.Add(BuildJSONArray(ModifiedFootprints, 'modified_footprints'));
+        ResultProps.Add(BuildJSONArray(InvalidMoves, 'invalid_moves'));
+
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := OutputLines.Text;
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        ResultProps.Free;
+        MoveResultArray.Free;
+        ModifiedFootprints.Free;
+        SkippedFootprints.Free;
+        InvalidMoves.Free;
+        ParsedMoves.Free;
+        MoveCounts.Free;
     end;
 end;
 

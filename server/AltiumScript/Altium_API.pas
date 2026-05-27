@@ -791,6 +791,56 @@ begin
     end;
 end;
 
+function ExecuteMovePCBLibraryMechanicalLayers(RequestData: TStringList): String;
+var
+    ParamValue: String;
+    i: Integer;
+    ExcludeFootprints: TStringList;
+    LayerMoves: TStringList;
+begin
+    ExcludeFootprints := TStringList.Create;
+    LayerMoves := TStringList.Create;
+
+    try
+        for i := 0 to RequestData.Count - 1 do
+        begin
+            if (Pos('"exclude_footprint_names"', RequestData[i]) > 0) then
+            begin
+                i := i + 1;
+                while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
+                begin
+                    ParamValue := RequestData[i];
+                    ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
+                    ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
+                    ParamValue := JSONUnescapeString(Trim(ParamValue));
+                    if (ParamValue <> '') and (ParamValue <> '[') then
+                        ExcludeFootprints.Add(ParamValue);
+                    i := i + 1;
+                end;
+            end
+            else if (Pos('"layer_moves"', RequestData[i]) > 0) then
+            begin
+                i := i + 1;
+                while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
+                begin
+                    ParamValue := RequestData[i];
+                    ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
+                    ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
+                    ParamValue := JSONUnescapeString(Trim(ParamValue));
+                    if (ParamValue <> '') and (ParamValue <> '[') then
+                        LayerMoves.Add(ParamValue);
+                    i := i + 1;
+                end;
+            end;
+        end;
+
+        Result := MovePCBLibraryMechanicalLayers(ExcludeFootprints, LayerMoves);
+    finally
+        ExcludeFootprints.Free;
+        LayerMoves.Free;
+    end;
+end;
+
 // Extract the search library symbol logic
 function ExecuteSearchLibrarySymbol(RequestData: TStringList): String;
 var
@@ -889,6 +939,8 @@ begin
             Result := ExecuteCreatePCBFootprint(RequestData);
         'set_pcb_library_pad_shapes':
             Result := ExecuteSetPCBLibraryPadShapes(RequestData);
+        'move_pcb_library_mechanical_layers':
+            Result := ExecuteMovePCBLibraryMechanicalLayers(RequestData);
     else
         ShowMessage('Error: Unknown command: ' + CommandName);
     end;

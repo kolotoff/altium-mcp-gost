@@ -1637,6 +1637,42 @@ async def set_pcb_library_pad_shapes(ctx: Context, exclude_footprint_names: list
     return json_dumps(result, indent=2)
 
 @mcp.tool()
+async def move_pcb_library_mechanical_layers(ctx: Context, exclude_footprint_names: list, layer_moves: list) -> str:
+    """
+    Move primitives between mechanical layers across the currently active PCB library,
+    except footprints whose names are listed in exclude_footprint_names.
+
+    The PcbLib must be the focused document in Altium.
+
+    Args:
+        exclude_footprint_names (list): Footprint names to skip, e.g. ["53398-0271"]
+        layer_moves (list): Mechanical layer moves as "source|destination", e.g. ["13|1", "15|3"]
+
+    Returns:
+        str: JSON object with result
+    """
+    logger.info(
+        f"Moving PCB library mechanical layers {layer_moves}, excluding {exclude_footprint_names}"
+    )
+
+    response = await altium_bridge.execute_command(
+        "move_pcb_library_mechanical_layers",
+        {
+            "exclude_footprint_names": exclude_footprint_names,
+            "layer_moves": layer_moves,
+        }
+    )
+
+    if not response.get("success", False):
+        error_msg = response.get("error", "Unknown error")
+        logger.error(f"Error moving PCB library mechanical layers: {error_msg}")
+        return json_dumps({"success": False, "error": f"Failed to move PCB library mechanical layers: {error_msg}"})
+
+    result = response.get("result", {})
+    logger.info("PCB library mechanical layers updated successfully")
+    return json_dumps(result, indent=2)
+
+@mcp.tool()
 async def get_server_status(ctx: Context) -> str:
     """Get the current status of the Altium MCP server"""
     status = {

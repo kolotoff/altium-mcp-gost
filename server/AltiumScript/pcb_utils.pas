@@ -1354,6 +1354,282 @@ begin
               (DestinationNumber >= 1) and (DestinationNumber <= 32);
 end;
 
+function Parse3DBodyProjectionCommand(MoveText: String; var DestinationNumber: Integer; var LineWidthMM: Double): Boolean;
+var
+    FirstSeparatorPos: Integer;
+    SecondSeparatorPos: Integer;
+    CommandName: String;
+    RemainderText: String;
+    DestinationText: String;
+    LineWidthText: String;
+begin
+    Result := False;
+    DestinationNumber := 0;
+    LineWidthMM := 0;
+    MoveText := Trim(MoveText);
+
+    FirstSeparatorPos := Pos('|', MoveText);
+    if FirstSeparatorPos <= 1 then
+        Exit;
+
+    CommandName := UpperCase(Trim(Copy(MoveText, 1, FirstSeparatorPos - 1)));
+    if CommandName <> '3D_BODY_PROJECTION' then
+        Exit;
+
+    RemainderText := Copy(MoveText, FirstSeparatorPos + 1, Length(MoveText) - FirstSeparatorPos);
+    SecondSeparatorPos := Pos('|', RemainderText);
+    if SecondSeparatorPos <= 1 then
+        Exit;
+
+    DestinationText := Copy(RemainderText, 1, SecondSeparatorPos - 1);
+    LineWidthText := Copy(RemainderText, SecondSeparatorPos + 1, Length(RemainderText) - SecondSeparatorPos);
+
+    if not TryParsePositiveInteger(DestinationText, DestinationNumber) then
+        Exit;
+
+    if (DestinationNumber < 1) or (DestinationNumber > 32) then
+        Exit;
+
+    LineWidthMM := SafeStrToFloat(LineWidthText);
+    Result := LineWidthMM > 0;
+end;
+
+function Find3DBodyProjectionCommand(LayerMoves: TStringList; var DestinationNumber: Integer; var LineWidthMM: Double): Boolean;
+var
+    i: Integer;
+begin
+    Result := False;
+    DestinationNumber := 0;
+    LineWidthMM := 0;
+
+    for i := 0 to LayerMoves.Count - 1 do
+    begin
+        if Parse3DBodyProjectionCommand(LayerMoves[i], DestinationNumber, LineWidthMM) then
+        begin
+            Result := True;
+            Exit;
+        end;
+    end;
+end;
+
+function Find3DBodyStepSilhouetteCommand(LayerMoves: TStringList; var DestinationNumber: Integer; var LineWidthMM: Double; var RemoveExisting: Boolean): Boolean;
+var
+    i: Integer;
+    MoveText: String;
+    FirstSeparatorPos: Integer;
+    SecondSeparatorPos: Integer;
+    CommandName: String;
+    RemainderText: String;
+    DestinationText: String;
+    LineWidthText: String;
+begin
+    Result := False;
+    DestinationNumber := 0;
+    LineWidthMM := 0;
+    RemoveExisting := True;
+
+    for i := 0 to LayerMoves.Count - 1 do
+    begin
+        MoveText := Trim(LayerMoves[i]);
+        FirstSeparatorPos := Pos('|', MoveText);
+        if FirstSeparatorPos <= 1 then
+            Continue;
+
+        CommandName := UpperCase(Trim(Copy(MoveText, 1, FirstSeparatorPos - 1)));
+        if (CommandName <> '3D_BODY_STEP_SILHOUETTE') and
+           (CommandName <> '3D_BODY_SILHOUETTE') and
+           (CommandName <> '3D_BODY_SILHOUETTE_APPEND') then
+            Continue;
+
+        RemoveExisting := CommandName <> '3D_BODY_SILHOUETTE_APPEND';
+
+        RemainderText := Copy(MoveText, FirstSeparatorPos + 1, Length(MoveText) - FirstSeparatorPos);
+        SecondSeparatorPos := Pos('|', RemainderText);
+        if SecondSeparatorPos <= 1 then
+            Continue;
+
+        DestinationText := Copy(RemainderText, 1, SecondSeparatorPos - 1);
+        LineWidthText := Copy(RemainderText, SecondSeparatorPos + 1, Length(RemainderText) - SecondSeparatorPos);
+
+        if not TryParsePositiveInteger(DestinationText, DestinationNumber) then
+            Continue;
+
+        if (DestinationNumber < 1) or (DestinationNumber > 32) then
+            Continue;
+
+        LineWidthMM := SafeStrToFloat(LineWidthText);
+        if LineWidthMM > 0 then
+        begin
+            Result := True;
+            Exit;
+        end;
+    end;
+end;
+
+function Find3DBodyDumpCommand(LayerMoves: TStringList): Boolean;
+var
+    i: Integer;
+begin
+    Result := False;
+
+    for i := 0 to LayerMoves.Count - 1 do
+    begin
+        if UpperCase(Trim(LayerMoves[i])) = '3D_BODY_DUMP' then
+        begin
+            Result := True;
+            Exit;
+        end;
+    end;
+end;
+
+function Parse3DBodyTrackCountCommand(MoveText: String; var DestinationNumber: Integer; var LineWidthMM: Double): Boolean;
+var
+    FirstSeparatorPos: Integer;
+    SecondSeparatorPos: Integer;
+    CommandName: String;
+    RemainderText: String;
+    DestinationText: String;
+    LineWidthText: String;
+begin
+    Result := False;
+    DestinationNumber := 0;
+    LineWidthMM := 0;
+    MoveText := Trim(MoveText);
+
+    FirstSeparatorPos := Pos('|', MoveText);
+    if FirstSeparatorPos <= 1 then
+        Exit;
+
+    CommandName := UpperCase(Trim(Copy(MoveText, 1, FirstSeparatorPos - 1)));
+    if CommandName <> '3D_BODY_TRACK_COUNT' then
+        Exit;
+
+    RemainderText := Copy(MoveText, FirstSeparatorPos + 1, Length(MoveText) - FirstSeparatorPos);
+    SecondSeparatorPos := Pos('|', RemainderText);
+    if SecondSeparatorPos <= 1 then
+        Exit;
+
+    DestinationText := Copy(RemainderText, 1, SecondSeparatorPos - 1);
+    LineWidthText := Copy(RemainderText, SecondSeparatorPos + 1, Length(RemainderText) - SecondSeparatorPos);
+
+    if not TryParsePositiveInteger(DestinationText, DestinationNumber) then
+        Exit;
+
+    if (DestinationNumber < 1) or (DestinationNumber > 32) then
+        Exit;
+
+    LineWidthMM := SafeStrToFloat(LineWidthText);
+    Result := LineWidthMM > 0;
+end;
+
+function Find3DBodyTrackCountCommand(LayerMoves: TStringList; var DestinationNumber: Integer; var LineWidthMM: Double): Boolean;
+var
+    i: Integer;
+begin
+    Result := False;
+    DestinationNumber := 0;
+    LineWidthMM := 0;
+
+    for i := 0 to LayerMoves.Count - 1 do
+    begin
+        if Parse3DBodyTrackCountCommand(LayerMoves[i], DestinationNumber, LineWidthMM) then
+        begin
+            Result := True;
+            Exit;
+        end;
+    end;
+end;
+
+function FindPCBUndoCommand(LayerMoves: TStringList): Boolean;
+var
+    i: Integer;
+begin
+    Result := False;
+
+    for i := 0 to LayerMoves.Count - 1 do
+    begin
+        if UpperCase(Trim(LayerMoves[i])) = 'PCB_UNDO' then
+        begin
+            Result := True;
+            Exit;
+        end;
+    end;
+end;
+
+function FindSaveDocumentCommand(LayerMoves: TStringList): Boolean;
+var
+    i: Integer;
+begin
+    Result := False;
+
+    for i := 0 to LayerMoves.Count - 1 do
+    begin
+        if UpperCase(Trim(LayerMoves[i])) = 'SAVE_DOCUMENT' then
+        begin
+            Result := True;
+            Exit;
+        end;
+    end;
+end;
+
+function Parse3DBodyEditorCleanCommand(MoveText: String; var DestinationNumber: Integer; var LineWidthMM: Double): Boolean;
+var
+    FirstSeparatorPos: Integer;
+    SecondSeparatorPos: Integer;
+    CommandName: String;
+    RemainderText: String;
+    DestinationText: String;
+    LineWidthText: String;
+begin
+    Result := False;
+    DestinationNumber := 0;
+    LineWidthMM := 0;
+    MoveText := Trim(MoveText);
+
+    FirstSeparatorPos := Pos('|', MoveText);
+    if FirstSeparatorPos <= 1 then
+        Exit;
+
+    CommandName := UpperCase(Trim(Copy(MoveText, 1, FirstSeparatorPos - 1)));
+    if CommandName <> '3D_BODY_EDITOR_CLEAN' then
+        Exit;
+
+    RemainderText := Copy(MoveText, FirstSeparatorPos + 1, Length(MoveText) - FirstSeparatorPos);
+    SecondSeparatorPos := Pos('|', RemainderText);
+    if SecondSeparatorPos <= 1 then
+        Exit;
+
+    DestinationText := Copy(RemainderText, 1, SecondSeparatorPos - 1);
+    LineWidthText := Copy(RemainderText, SecondSeparatorPos + 1, Length(RemainderText) - SecondSeparatorPos);
+
+    if not TryParsePositiveInteger(DestinationText, DestinationNumber) then
+        Exit;
+
+    if (DestinationNumber < 1) or (DestinationNumber > 32) then
+        Exit;
+
+    LineWidthMM := SafeStrToFloat(LineWidthText);
+    Result := LineWidthMM > 0;
+end;
+
+function Find3DBodyEditorCleanCommand(LayerMoves: TStringList; var DestinationNumber: Integer; var LineWidthMM: Double): Boolean;
+var
+    i: Integer;
+begin
+    Result := False;
+    DestinationNumber := 0;
+    LineWidthMM := 0;
+
+    for i := 0 to LayerMoves.Count - 1 do
+    begin
+        if Parse3DBodyEditorCleanCommand(LayerMoves[i], DestinationNumber, LineWidthMM) then
+        begin
+            Result := True;
+            Exit;
+        end;
+    end;
+end;
+
 function FindMechanicalLayerMove(CurrentLayer: TLayer; LayerMoves: TStringList; var SourceNumber: Integer; var DestinationNumber: Integer): Boolean;
 var
     i: Integer;
@@ -1379,6 +1655,126 @@ begin
     end;
 end;
 
+function DumpPCBLibrary3DBodies(ExcludeFootprints: TStringList): String;
+var
+    PcbLib              : IPCB_Library;
+    Board               : IPCB_Board;
+    FootprintIterator   : IPCB_LibraryIterator;
+    Footprint           : IPCB_LibComponent;
+    BodyIterator        : IPCB_GroupIterator;
+    Primitive           : IPCB_Primitive;
+    Body                : IPCB_ComponentBody;
+    Rect                : TCoordRect;
+    ResultProps         : TStringList;
+    BodyArray           : TStringList;
+    BodyProps           : TStringList;
+    OutputLines         : TStringList;
+    FootprintName       : String;
+    FootprintsSeen      : Integer;
+    FootprintsProcessed : Integer;
+    BodiesSeen          : Integer;
+begin
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    if PcbLib = Nil then
+    begin
+        Result := '{"success": false, "error": "No PCB library document is currently active. Open a .PcbLib file first."}';
+        Exit;
+    end;
+
+    ResultProps := TStringList.Create;
+    BodyArray := TStringList.Create;
+    Board := PcbLib.Board;
+    FootprintsSeen := 0;
+    FootprintsProcessed := 0;
+    BodiesSeen := 0;
+
+    try
+        FootprintIterator := PcbLib.LibraryIterator_Create;
+        if FootprintIterator = Nil then
+        begin
+            Result := '{"success": false, "error": "Failed to create PCB library footprint iterator."}';
+            Exit;
+        end;
+
+        FootprintIterator.SetState_FilterAll;
+
+        try
+            Footprint := FootprintIterator.FirstPCBObject;
+            while Footprint <> Nil do
+            begin
+                FootprintsSeen := FootprintsSeen + 1;
+                FootprintName := Footprint.Name;
+
+                if not StringListContainsText(ExcludeFootprints, FootprintName) then
+                begin
+                    FootprintsProcessed := FootprintsProcessed + 1;
+
+                    BodyIterator := Footprint.GroupIterator_Create;
+                    if BodyIterator <> Nil then
+                    begin
+                        try
+                            BodyIterator.AddFilter_ObjectSet(MkSet(eComponentBodyObject));
+                            BodyIterator.AddFilter_LayerSet(AllLayers);
+
+                            Primitive := BodyIterator.FirstPCBObject;
+                            while Primitive <> Nil do
+                            begin
+                                BodiesSeen := BodiesSeen + 1;
+                                Body := Primitive;
+                                Rect := Primitive.BoundingRectangle;
+
+                                BodyProps := TStringList.Create;
+                                try
+                                    AddJSONProperty(BodyProps, 'footprint', FootprintName);
+                                    AddJSONProperty(BodyProps, 'object_id', Primitive.ObjectIDString);
+                                    AddJSONProperty(BodyProps, 'layer', Layer2String(Primitive.Layer));
+                                    AddJSONNumber(BodyProps, 'left_mm', CoordToMMs(Rect.Left));
+                                    AddJSONNumber(BodyProps, 'bottom_mm', CoordToMMs(Rect.Bottom));
+                                    AddJSONNumber(BodyProps, 'right_mm', CoordToMMs(Rect.Right));
+                                    AddJSONNumber(BodyProps, 'top_mm', CoordToMMs(Rect.Top));
+                                    AddJSONNumber(BodyProps, 'standoff_height_mm', CoordToMMs(Body.StandoffHeight));
+                                    AddJSONNumber(BodyProps, 'overall_height_mm', CoordToMMs(Body.OverallHeight));
+                                    AddJSONInteger(BodyProps, 'body_projection', Body.BodyProjection);
+                                    BodyArray.Add(BuildJSONObject(BodyProps, 1));
+                                finally
+                                    BodyProps.Free;
+                                end;
+
+                                Primitive := BodyIterator.NextPCBObject;
+                            end;
+                        finally
+                            Footprint.GroupIterator_Destroy(BodyIterator);
+                        end;
+                    end;
+                end;
+
+                Footprint := FootprintIterator.NextPCBObject;
+            end;
+        finally
+            PcbLib.LibraryIterator_Destroy(FootprintIterator);
+        end;
+
+        AddJSONBoolean(ResultProps, 'success', True);
+        if Board <> Nil then
+            AddJSONProperty(ResultProps, 'library_path', Board.FileName);
+        AddJSONInteger(ResultProps, 'footprints_seen', FootprintsSeen);
+        AddJSONInteger(ResultProps, 'footprints_processed', FootprintsProcessed);
+        AddJSONInteger(ResultProps, 'component_bodies_seen', BodiesSeen);
+        ResultProps.Add(BuildJSONArray(BodyArray, 'bodies'));
+
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := OutputLines.Text;
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        ResultProps.Free;
+        BodyArray.Free;
+    end;
+end;
+
 procedure EnsureMechanicalLayerEnabled(Board: IPCB_Board; LayerNumber: Integer);
 var
     LayerStack: IPCB_LayerStack_V7;
@@ -1394,6 +1790,880 @@ begin
     MechLayer := LayerStack.LayerObject_V7[ILayer.MechanicalLayer(LayerNumber)];
     if MechLayer <> Nil then
         MechLayer.MechanicalLayerEnabled := True;
+end;
+
+function AddProjectionTrack(Footprint: IPCB_LibComponent; DestinationLayer: TLayer; X1, Y1, X2, Y2: TCoord; LineWidth: TCoord): Boolean;
+var
+    Track: IPCB_Track;
+begin
+    Result := False;
+
+    if Footprint = Nil then
+        Exit;
+
+    if (X1 = X2) and (Y1 = Y2) then
+        Exit;
+
+    Track := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
+    if Track = Nil then
+        Exit;
+
+    Track.Layer := DestinationLayer;
+    Track.x1 := X1;
+    Track.y1 := Y1;
+    Track.x2 := X2;
+    Track.y2 := Y2;
+    Track.Width := LineWidth;
+
+    Footprint.AddPCBObject(Track);
+    PCBServer.SendMessageToRobots(Track.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+    Result := True;
+end;
+
+function AddProjectionRectangle(Footprint: IPCB_LibComponent; DestinationLayer: TLayer; Rect: TCoordRect; LineWidth: TCoord): Integer;
+begin
+    Result := 0;
+
+    if (Rect.Left = Rect.Right) or (Rect.Top = Rect.Bottom) then
+        Exit;
+
+    if AddProjectionTrack(Footprint, DestinationLayer, Rect.Left, Rect.Bottom, Rect.Right, Rect.Bottom, LineWidth) then
+        Result := Result + 1;
+
+    if AddProjectionTrack(Footprint, DestinationLayer, Rect.Right, Rect.Bottom, Rect.Right, Rect.Top, LineWidth) then
+        Result := Result + 1;
+
+    if AddProjectionTrack(Footprint, DestinationLayer, Rect.Right, Rect.Top, Rect.Left, Rect.Top, LineWidth) then
+        Result := Result + 1;
+
+    if AddProjectionTrack(Footprint, DestinationLayer, Rect.Left, Rect.Top, Rect.Left, Rect.Bottom, LineWidth) then
+        Result := Result + 1;
+end;
+
+function ParseSilhouetteSegment(SegmentLine: String; var FootprintName: String; var X1MM, Y1MM, X2MM, Y2MM: Double): Boolean;
+var
+    FieldText: String;
+    SeparatorPos: Integer;
+begin
+    Result := False;
+    FootprintName := '';
+    SegmentLine := Trim(SegmentLine);
+
+    SeparatorPos := Pos('|', SegmentLine);
+    if SeparatorPos <= 1 then
+        Exit;
+    FootprintName := Trim(Copy(SegmentLine, 1, SeparatorPos - 1));
+    Delete(SegmentLine, 1, SeparatorPos);
+
+    SeparatorPos := Pos('|', SegmentLine);
+    if SeparatorPos <= 1 then
+        Exit;
+    FieldText := Trim(Copy(SegmentLine, 1, SeparatorPos - 1));
+    X1MM := SafeStrToFloat(FieldText);
+    Delete(SegmentLine, 1, SeparatorPos);
+
+    SeparatorPos := Pos('|', SegmentLine);
+    if SeparatorPos <= 1 then
+        Exit;
+    FieldText := Trim(Copy(SegmentLine, 1, SeparatorPos - 1));
+    Y1MM := SafeStrToFloat(FieldText);
+    Delete(SegmentLine, 1, SeparatorPos);
+
+    SeparatorPos := Pos('|', SegmentLine);
+    if SeparatorPos <= 1 then
+        Exit;
+    FieldText := Trim(Copy(SegmentLine, 1, SeparatorPos - 1));
+    X2MM := SafeStrToFloat(FieldText);
+    Delete(SegmentLine, 1, SeparatorPos);
+
+    Y2MM := SafeStrToFloat(Trim(SegmentLine));
+    Result := FootprintName <> '';
+end;
+
+function RemoveProjectionTracks(Footprint: IPCB_LibComponent; DestinationLayer: TLayer; LineWidth: TCoord): Integer;
+var
+    PrimitiveIterator: IPCB_GroupIterator;
+    Primitive: IPCB_Primitive;
+    Track: IPCB_Track;
+    TracksToRemove: TObjectList;
+begin
+    Result := 0;
+
+    if Footprint = Nil then
+        Exit;
+
+    TracksToRemove := TObjectList.Create;
+    TracksToRemove.OwnsObjects := False;
+    PrimitiveIterator := Footprint.GroupIterator_Create;
+    if PrimitiveIterator = Nil then
+    begin
+        TracksToRemove.Free;
+        Exit;
+    end;
+
+    try
+        PrimitiveIterator.AddFilter_ObjectSet(MkSet(eTrackObject));
+        PrimitiveIterator.AddFilter_LayerSet(MkSet(DestinationLayer));
+
+        Primitive := PrimitiveIterator.FirstPCBObject;
+        while Primitive <> Nil do
+        begin
+            Track := Primitive;
+
+            if Track.Width = LineWidth then
+                TracksToRemove.Add(Primitive);
+
+            Primitive := PrimitiveIterator.NextPCBObject;
+        end;
+    finally
+        Footprint.GroupIterator_Destroy(PrimitiveIterator);
+    end;
+
+    try
+        while TracksToRemove.Count > 0 do
+        begin
+            Primitive := TracksToRemove[0];
+            TracksToRemove.Delete(0);
+            if Primitive <> Nil then
+            begin
+                Footprint.RemovePCBObject(Primitive);
+                Primitive := Nil;
+                Result := Result + 1;
+            end;
+        end;
+
+        if Result > 0 then
+            PCBServer.SendMessageToRobots(Footprint.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+    finally
+        TracksToRemove.Free;
+    end;
+end;
+
+function CountPCBLibraryProjectionTracks(ExcludeFootprints: TStringList; DestinationLayerNumber: Integer; LineWidthMM: Double): String;
+var
+    PcbLib              : IPCB_Library;
+    FootprintIterator   : IPCB_LibraryIterator;
+    Footprint           : IPCB_LibComponent;
+    PrimitiveIterator   : IPCB_GroupIterator;
+    Primitive           : IPCB_Primitive;
+    Track               : IPCB_Track;
+    DestinationLayer    : TLayer;
+    LineWidth           : TCoord;
+    ResultProps         : TStringList;
+    CountArray          : TStringList;
+    CountProps          : TStringList;
+    OutputLines         : TStringList;
+    FootprintName       : String;
+    FootprintsSeen      : Integer;
+    FootprintsProcessed : Integer;
+    FootprintTrackCount : Integer;
+    TotalTrackCount     : Integer;
+begin
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    if PcbLib = Nil then
+    begin
+        Result := '{"success": false, "error": "No PCB library document is currently active. Open a .PcbLib file first."}';
+        Exit;
+    end;
+
+    if (DestinationLayerNumber < 1) or (DestinationLayerNumber > 32) then
+    begin
+        Result := '{"success": false, "error": "Mechanical layer number must be between 1 and 32."}';
+        Exit;
+    end;
+
+    if LineWidthMM <= 0 then
+    begin
+        Result := '{"success": false, "error": "Line width must be greater than zero."}';
+        Exit;
+    end;
+
+    DestinationLayer := ILayer.MechanicalLayer(DestinationLayerNumber);
+    LineWidth := MMsToCoord(LineWidthMM);
+    ResultProps := TStringList.Create;
+    CountArray := TStringList.Create;
+    FootprintsSeen := 0;
+    FootprintsProcessed := 0;
+    TotalTrackCount := 0;
+
+    try
+        FootprintIterator := PcbLib.LibraryIterator_Create;
+        if FootprintIterator = Nil then
+        begin
+            Result := '{"success": false, "error": "Failed to create PCB library footprint iterator."}';
+            Exit;
+        end;
+
+        FootprintIterator.SetState_FilterAll;
+        try
+            Footprint := FootprintIterator.FirstPCBObject;
+            while Footprint <> Nil do
+            begin
+                FootprintsSeen := FootprintsSeen + 1;
+                FootprintName := Footprint.Name;
+
+                if not StringListContainsText(ExcludeFootprints, FootprintName) then
+                begin
+                    FootprintsProcessed := FootprintsProcessed + 1;
+                    FootprintTrackCount := 0;
+
+                    PrimitiveIterator := Footprint.GroupIterator_Create;
+                    if PrimitiveIterator <> Nil then
+                    begin
+                        try
+                            PrimitiveIterator.AddFilter_ObjectSet(MkSet(eTrackObject));
+                            PrimitiveIterator.AddFilter_LayerSet(MkSet(DestinationLayer));
+
+                            Primitive := PrimitiveIterator.FirstPCBObject;
+                            while Primitive <> Nil do
+                            begin
+                                Track := Primitive;
+                                if Track.Width = LineWidth then
+                                    FootprintTrackCount := FootprintTrackCount + 1;
+                                Primitive := PrimitiveIterator.NextPCBObject;
+                            end;
+                        finally
+                            Footprint.GroupIterator_Destroy(PrimitiveIterator);
+                        end;
+                    end;
+
+                    TotalTrackCount := TotalTrackCount + FootprintTrackCount;
+                    CountProps := TStringList.Create;
+                    try
+                        AddJSONProperty(CountProps, 'footprint', FootprintName);
+                        AddJSONInteger(CountProps, 'tracks', FootprintTrackCount);
+                        CountArray.Add(BuildJSONObject(CountProps, 1));
+                    finally
+                        CountProps.Free;
+                    end;
+                end;
+
+                Footprint := FootprintIterator.NextPCBObject;
+            end;
+        finally
+            PcbLib.LibraryIterator_Destroy(FootprintIterator);
+        end;
+
+        AddJSONBoolean(ResultProps, 'success', True);
+        AddJSONInteger(ResultProps, 'mechanical_layer', DestinationLayerNumber);
+        AddJSONNumber(ResultProps, 'line_width_mm', LineWidthMM);
+        AddJSONInteger(ResultProps, 'footprints_seen', FootprintsSeen);
+        AddJSONInteger(ResultProps, 'footprints_processed', FootprintsProcessed);
+        AddJSONInteger(ResultProps, 'total_tracks', TotalTrackCount);
+        ResultProps.Add(BuildJSONArray(CountArray, 'footprint_counts'));
+
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := OutputLines.Text;
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        ResultProps.Free;
+        CountArray.Free;
+    end;
+end;
+
+function RunPCBUndoCommand: String;
+var
+    ResultProps : TStringList;
+    OutputLines : TStringList;
+begin
+    RunProcess('PCB:Undo');
+
+    ResultProps := TStringList.Create;
+    try
+        AddJSONBoolean(ResultProps, 'success', True);
+        AddJSONProperty(ResultProps, 'process', 'PCB:Undo');
+
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := OutputLines.Text;
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        ResultProps.Free;
+    end;
+end;
+
+function RunSaveDocumentCommand: String;
+var
+    PcbLib      : IPCB_Library;
+    Board       : IPCB_Board;
+    ResultProps : TStringList;
+    OutputLines : TStringList;
+begin
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    Board := Nil;
+    if PcbLib <> Nil then
+        Board := PcbLib.Board
+    else
+        Board := PCBServer.GetCurrentPCBBoard;
+
+    ResetParameters;
+    AddStringParameter('ObjectKind', 'Document');
+    AddStringParameter('SaveMode', 'Standard');
+    RunProcess('WorkspaceManager:SaveObject');
+    Client.SendMessage('WorkspaceManager:SaveObject', 'ObjectKind=Document|SaveMode=Standard', 255, Client.CurrentView);
+
+    ResultProps := TStringList.Create;
+    try
+        AddJSONBoolean(ResultProps, 'success', True);
+        AddJSONProperty(ResultProps, 'process', 'WorkspaceManager:SaveObject');
+        if Board <> Nil then
+            AddJSONProperty(ResultProps, 'board_file_name', Board.FileName);
+
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := OutputLines.Text;
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        ResultProps.Free;
+    end;
+end;
+
+function SelectProjectionTracks(Footprint: IPCB_LibComponent; DestinationLayer: TLayer; LineWidth: TCoord): Integer;
+var
+    PrimitiveIterator: IPCB_GroupIterator;
+    Primitive: IPCB_Primitive;
+    Track: IPCB_Track;
+begin
+    Result := 0;
+
+    if Footprint = Nil then
+        Exit;
+
+    PrimitiveIterator := Footprint.GroupIterator_Create;
+    if PrimitiveIterator = Nil then
+        Exit;
+
+    try
+        PrimitiveIterator.AddFilter_ObjectSet(MkSet(eTrackObject));
+        PrimitiveIterator.AddFilter_LayerSet(MkSet(DestinationLayer));
+
+        Primitive := PrimitiveIterator.FirstPCBObject;
+        while Primitive <> Nil do
+        begin
+            Track := Primitive;
+            if Track.Width = LineWidth then
+            begin
+                Primitive.Selected := True;
+                Result := Result + 1;
+            end;
+            Primitive := PrimitiveIterator.NextPCBObject;
+        end;
+    finally
+        Footprint.GroupIterator_Destroy(PrimitiveIterator);
+    end;
+end;
+
+function FindPCBLibraryFootprintByName(PcbLib: IPCB_Library; FootprintName: String): IPCB_LibComponent;
+var
+    FootprintIterator : IPCB_LibraryIterator;
+    Footprint         : IPCB_LibComponent;
+begin
+    Result := Nil;
+
+    if PcbLib = Nil then
+        Exit;
+
+    FootprintIterator := PcbLib.LibraryIterator_Create;
+    if FootprintIterator = Nil then
+        Exit;
+
+    try
+        FootprintIterator.SetState_FilterAll;
+        Footprint := FootprintIterator.FirstPCBObject;
+        while Footprint <> Nil do
+        begin
+            if UpperCase(Footprint.Name) = UpperCase(FootprintName) then
+            begin
+                Result := Footprint;
+                Exit;
+            end;
+            Footprint := FootprintIterator.NextPCBObject;
+        end;
+    finally
+        PcbLib.LibraryIterator_Destroy(FootprintIterator);
+    end;
+end;
+
+function CleanPCBLibraryProjectionTracksWithEditor(ExcludeFootprints: TStringList; DestinationLayerNumber: Integer; LineWidthMM: Double): String;
+var
+    PcbLib              : IPCB_Library;
+    Board               : IPCB_Board;
+    FootprintIterator   : IPCB_LibraryIterator;
+    Footprint           : IPCB_LibComponent;
+    DestinationLayer    : TLayer;
+    LineWidth           : TCoord;
+    FootprintNames      : TStringList;
+    ResultProps         : TStringList;
+    ModifiedFootprints  : TStringList;
+    SkippedFootprints   : TStringList;
+    OutputLines         : TStringList;
+    FootprintName       : String;
+    FootprintsSeen      : Integer;
+    FootprintsProcessed : Integer;
+    FootprintsModified  : Integer;
+    TracksSelected      : Integer;
+    FootprintTracksSelected : Integer;
+    i                   : Integer;
+begin
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    if PcbLib = Nil then
+    begin
+        Result := '{"success": false, "error": "No PCB library document is currently active. Open a .PcbLib file first."}';
+        Exit;
+    end;
+
+    if (DestinationLayerNumber < 1) or (DestinationLayerNumber > 32) then
+    begin
+        Result := '{"success": false, "error": "Mechanical layer number must be between 1 and 32."}';
+        Exit;
+    end;
+
+    if LineWidthMM <= 0 then
+    begin
+        Result := '{"success": false, "error": "Line width must be greater than zero."}';
+        Exit;
+    end;
+
+    Board := PcbLib.Board;
+    DestinationLayer := ILayer.MechanicalLayer(DestinationLayerNumber);
+    LineWidth := MMsToCoord(LineWidthMM);
+    FootprintNames := TStringList.Create;
+    ResultProps := TStringList.Create;
+    ModifiedFootprints := TStringList.Create;
+    SkippedFootprints := TStringList.Create;
+    FootprintsSeen := 0;
+    FootprintsProcessed := 0;
+    FootprintsModified := 0;
+    TracksSelected := 0;
+
+    try
+        FootprintIterator := PcbLib.LibraryIterator_Create;
+        if FootprintIterator = Nil then
+        begin
+            Result := '{"success": false, "error": "Failed to create PCB library footprint iterator."}';
+            Exit;
+        end;
+
+        FootprintIterator.SetState_FilterAll;
+        try
+            Footprint := FootprintIterator.FirstPCBObject;
+            while Footprint <> Nil do
+            begin
+                FootprintsSeen := FootprintsSeen + 1;
+                FootprintName := Footprint.Name;
+
+                if StringListContainsText(ExcludeFootprints, FootprintName) then
+                begin
+                    SkippedFootprints.Add('"' + JSONEscapeString(FootprintName) + '"');
+                end
+                else
+                begin
+                    FootprintsProcessed := FootprintsProcessed + 1;
+                    FootprintNames.Add(FootprintName);
+                end;
+
+                Footprint := FootprintIterator.NextPCBObject;
+            end;
+        finally
+            PcbLib.LibraryIterator_Destroy(FootprintIterator);
+        end;
+
+        for i := 0 to FootprintNames.Count - 1 do
+        begin
+            FootprintName := FootprintNames[i];
+            Footprint := FindPCBLibraryFootprintByName(PcbLib, FootprintName);
+            if Footprint <> Nil then
+            begin
+                Client.SendMessage('PCB:DeSelect', 'Scope=All', 255, Client.CurrentView);
+                PcbLib.CurrentComponent := Footprint;
+                if Board <> Nil then
+                    Board.ViewManager_FullUpdate;
+
+                FootprintTracksSelected := SelectProjectionTracks(Footprint, DestinationLayer, LineWidth);
+                if FootprintTracksSelected > 0 then
+                begin
+                    TracksSelected := TracksSelected + FootprintTracksSelected;
+                    Client.SendMessage('PCB:DeleteObjects', 'Object=FOCUSED', 255, Client.CurrentView);
+                    FootprintsModified := FootprintsModified + 1;
+                    ModifiedFootprints.Add('"' + JSONEscapeString(FootprintName) + '"');
+                end;
+            end;
+        end;
+
+        Client.SendMessage('PCB:DeSelect', 'Scope=All', 255, Client.CurrentView);
+        if Board <> Nil then
+            Board.ViewManager_FullUpdate;
+        Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
+
+        AddJSONBoolean(ResultProps, 'success', True);
+        AddJSONProperty(ResultProps, 'cleanup_source', 'PCB editor DeleteObjects process');
+        AddJSONInteger(ResultProps, 'mechanical_layer', DestinationLayerNumber);
+        AddJSONNumber(ResultProps, 'line_width_mm', LineWidthMM);
+        AddJSONInteger(ResultProps, 'footprints_seen', FootprintsSeen);
+        AddJSONInteger(ResultProps, 'footprints_processed', FootprintsProcessed);
+        AddJSONInteger(ResultProps, 'footprints_modified', FootprintsModified);
+        AddJSONInteger(ResultProps, 'tracks_selected_for_delete', TracksSelected);
+        ResultProps.Add(BuildJSONArray(SkippedFootprints, 'skipped_footprints'));
+        ResultProps.Add(BuildJSONArray(ModifiedFootprints, 'modified_footprints'));
+
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := OutputLines.Text;
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        FootprintNames.Free;
+        ResultProps.Free;
+        ModifiedFootprints.Free;
+        SkippedFootprints.Free;
+    end;
+end;
+
+function ProjectPCBLibraryStepSilhouettes(ExcludeFootprints: TStringList; DestinationLayerNumber: Integer; LineWidthMM: Double; RemoveExisting: Boolean): String;
+var
+    PcbLib              : IPCB_Library;
+    Board               : IPCB_Board;
+    FootprintIterator   : IPCB_LibraryIterator;
+    Footprint           : IPCB_LibComponent;
+    DestinationLayer    : TLayer;
+    LineWidth           : TCoord;
+    SegmentLines        : TStringList;
+    ResultProps         : TStringList;
+    ModifiedFootprints  : TStringList;
+    SkippedFootprints   : TStringList;
+    OutputLines         : TStringList;
+    DataFileName        : String;
+    FootprintName       : String;
+    SegmentFootprint    : String;
+    FootprintsSeen      : Integer;
+    FootprintsProcessed : Integer;
+    FootprintsModified  : Integer;
+    SegmentsLoaded      : Integer;
+    SegmentsMatched     : Integer;
+    TracksCreated       : Integer;
+    TracksRemoved       : Integer;
+    FootprintTracksCreated : Integer;
+    X1MM, Y1MM, X2MM, Y2MM : Double;
+    i                   : Integer;
+begin
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    if PcbLib = Nil then
+    begin
+        Result := '{"success": false, "error": "No PCB library document is currently active. Open a .PcbLib file first."}';
+        Exit;
+    end;
+
+    if (DestinationLayerNumber < 1) or (DestinationLayerNumber > 32) then
+    begin
+        Result := '{"success": false, "error": "Mechanical layer number must be between 1 and 32."}';
+        Exit;
+    end;
+
+    if LineWidthMM <= 0 then
+    begin
+        Result := '{"success": false, "error": "Line width must be greater than zero."}';
+        Exit;
+    end;
+
+    DataFileName := ROOT_DIR + '3d_body_silhouette.txt';
+    if not FileExists(DataFileName) then
+    begin
+        Result := '{"success": false, "error": "Silhouette segment file not found: C:\\Users\\Public\\altium_mcp\\3d_body_silhouette.txt"}';
+        Exit;
+    end;
+
+    Board := PcbLib.Board;
+    DestinationLayer := ILayer.MechanicalLayer(DestinationLayerNumber);
+    LineWidth := MMsToCoord(LineWidthMM);
+
+    SegmentLines := TStringList.Create;
+    ResultProps := TStringList.Create;
+    ModifiedFootprints := TStringList.Create;
+    SkippedFootprints := TStringList.Create;
+    FootprintsSeen := 0;
+    FootprintsProcessed := 0;
+    FootprintsModified := 0;
+    SegmentsMatched := 0;
+    TracksCreated := 0;
+    TracksRemoved := 0;
+
+    try
+        SegmentLines.LoadFromFile(DataFileName);
+        SegmentsLoaded := SegmentLines.Count;
+        EnsureMechanicalLayerEnabled(Board, DestinationLayerNumber);
+
+        FootprintIterator := PcbLib.LibraryIterator_Create;
+        if FootprintIterator = Nil then
+        begin
+            Result := '{"success": false, "error": "Failed to create PCB library footprint iterator."}';
+            Exit;
+        end;
+
+        FootprintIterator.SetState_FilterAll;
+
+        PCBServer.PreProcess;
+        try
+            Footprint := FootprintIterator.FirstPCBObject;
+            while Footprint <> Nil do
+            begin
+                FootprintsSeen := FootprintsSeen + 1;
+                FootprintName := Footprint.Name;
+
+                if StringListContainsText(ExcludeFootprints, FootprintName) then
+                begin
+                    SkippedFootprints.Add('"' + JSONEscapeString(FootprintName) + '"');
+                end
+                else
+                begin
+                    FootprintsProcessed := FootprintsProcessed + 1;
+                    FootprintTracksCreated := 0;
+
+                    if RemoveExisting then
+                        TracksRemoved := TracksRemoved + RemoveProjectionTracks(Footprint, DestinationLayer, LineWidth);
+
+                    for i := 0 to SegmentLines.Count - 1 do
+                    begin
+                        if ParseSilhouetteSegment(SegmentLines[i], SegmentFootprint, X1MM, Y1MM, X2MM, Y2MM) then
+                        begin
+                            if UpperCase(SegmentFootprint) = UpperCase(FootprintName) then
+                            begin
+                                if AddProjectionTrack(
+                                    Footprint,
+                                    DestinationLayer,
+                                    MMsToCoord(X1MM),
+                                    MMsToCoord(Y1MM),
+                                    MMsToCoord(X2MM),
+                                    MMsToCoord(Y2MM),
+                                    LineWidth
+                                ) then
+                                begin
+                                    FootprintTracksCreated := FootprintTracksCreated + 1;
+                                    TracksCreated := TracksCreated + 1;
+                                    SegmentsMatched := SegmentsMatched + 1;
+                                end;
+                            end;
+                        end;
+                    end;
+
+                    if FootprintTracksCreated > 0 then
+                    begin
+                        FootprintsModified := FootprintsModified + 1;
+                        ModifiedFootprints.Add('"' + JSONEscapeString(FootprintName) + '"');
+                    end;
+                end;
+
+                Footprint := FootprintIterator.NextPCBObject;
+            end;
+        finally
+            PCBServer.PostProcess;
+            PcbLib.LibraryIterator_Destroy(FootprintIterator);
+        end;
+
+        if Board <> Nil then
+            Board.ViewManager_FullUpdate;
+        Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
+
+        AddJSONBoolean(ResultProps, 'success', True);
+        AddJSONProperty(ResultProps, 'projection_source', 'STEP edge projection');
+        AddJSONProperty(ResultProps, 'silhouette_file', DataFileName);
+        AddJSONBoolean(ResultProps, 'remove_existing', RemoveExisting);
+        AddJSONInteger(ResultProps, 'mechanical_layer', DestinationLayerNumber);
+        AddJSONNumber(ResultProps, 'line_width_mm', LineWidthMM);
+        AddJSONInteger(ResultProps, 'segments_loaded', SegmentsLoaded);
+        AddJSONInteger(ResultProps, 'segments_matched', SegmentsMatched);
+        AddJSONInteger(ResultProps, 'footprints_seen', FootprintsSeen);
+        AddJSONInteger(ResultProps, 'footprints_processed', FootprintsProcessed);
+        AddJSONInteger(ResultProps, 'footprints_modified', FootprintsModified);
+        AddJSONInteger(ResultProps, 'tracks_removed', TracksRemoved);
+        AddJSONInteger(ResultProps, 'tracks_created', TracksCreated);
+        ResultProps.Add(BuildJSONArray(SkippedFootprints, 'skipped_footprints'));
+        ResultProps.Add(BuildJSONArray(ModifiedFootprints, 'modified_footprints'));
+
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := OutputLines.Text;
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        SegmentLines.Free;
+        ResultProps.Free;
+        ModifiedFootprints.Free;
+        SkippedFootprints.Free;
+    end;
+end;
+
+function ProjectPCBLibrary3DBodyOutlines(ExcludeFootprints: TStringList; DestinationLayerNumber: Integer; LineWidthMM: Double): String;
+var
+    PcbLib              : IPCB_Library;
+    Board               : IPCB_Board;
+    FootprintIterator   : IPCB_LibraryIterator;
+    Footprint           : IPCB_LibComponent;
+    BodyIterator        : IPCB_GroupIterator;
+    Primitive           : IPCB_Primitive;
+    BodyRect            : TCoordRect;
+    DestinationLayer    : TLayer;
+    LineWidth           : TCoord;
+    ResultProps         : TStringList;
+    ModifiedFootprints  : TStringList;
+    SkippedFootprints   : TStringList;
+    OutputLines         : TStringList;
+    FootprintName       : String;
+    FootprintsSeen      : Integer;
+    FootprintsProcessed : Integer;
+    FootprintsModified  : Integer;
+    FootprintsWithBodies : Integer;
+    BodiesSeen          : Integer;
+    TracksCreated       : Integer;
+    FootprintBodiesSeen : Integer;
+    FootprintTracksCreated : Integer;
+begin
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    if PcbLib = Nil then
+    begin
+        Result := '{"success": false, "error": "No PCB library document is currently active. Open a .PcbLib file first."}';
+        Exit;
+    end;
+
+    if (DestinationLayerNumber < 1) or (DestinationLayerNumber > 32) then
+    begin
+        Result := '{"success": false, "error": "Mechanical layer number must be between 1 and 32."}';
+        Exit;
+    end;
+
+    if LineWidthMM <= 0 then
+    begin
+        Result := '{"success": false, "error": "Line width must be greater than zero."}';
+        Exit;
+    end;
+
+    Board := PcbLib.Board;
+    DestinationLayer := ILayer.MechanicalLayer(DestinationLayerNumber);
+    LineWidth := MMsToCoord(LineWidthMM);
+
+    ResultProps := TStringList.Create;
+    ModifiedFootprints := TStringList.Create;
+    SkippedFootprints := TStringList.Create;
+    FootprintsSeen := 0;
+    FootprintsProcessed := 0;
+    FootprintsModified := 0;
+    FootprintsWithBodies := 0;
+    BodiesSeen := 0;
+    TracksCreated := 0;
+
+    try
+        EnsureMechanicalLayerEnabled(Board, DestinationLayerNumber);
+
+        FootprintIterator := PcbLib.LibraryIterator_Create;
+        if FootprintIterator = Nil then
+        begin
+            Result := '{"success": false, "error": "Failed to create PCB library footprint iterator."}';
+            Exit;
+        end;
+
+        FootprintIterator.SetState_FilterAll;
+
+        PCBServer.PreProcess;
+        try
+            Footprint := FootprintIterator.FirstPCBObject;
+            while Footprint <> Nil do
+            begin
+                FootprintsSeen := FootprintsSeen + 1;
+                FootprintName := Footprint.Name;
+
+                if StringListContainsText(ExcludeFootprints, FootprintName) then
+                begin
+                    SkippedFootprints.Add('"' + JSONEscapeString(FootprintName) + '"');
+                end
+                else
+                begin
+                    FootprintsProcessed := FootprintsProcessed + 1;
+                    FootprintBodiesSeen := 0;
+                    FootprintTracksCreated := 0;
+
+                    BodyIterator := Footprint.GroupIterator_Create;
+                    if BodyIterator <> Nil then
+                    begin
+                        try
+                            BodyIterator.AddFilter_ObjectSet(MkSet(eComponentBodyObject));
+                            BodyIterator.AddFilter_LayerSet(AllLayers);
+
+                            Primitive := BodyIterator.FirstPCBObject;
+                            while Primitive <> Nil do
+                            begin
+                                BodiesSeen := BodiesSeen + 1;
+                                FootprintBodiesSeen := FootprintBodiesSeen + 1;
+
+                                BodyRect := Primitive.BoundingRectangle;
+                                FootprintTracksCreated := FootprintTracksCreated + AddProjectionRectangle(Footprint, DestinationLayer, BodyRect, LineWidth);
+
+                                Primitive := BodyIterator.NextPCBObject;
+                            end;
+                        finally
+                            Footprint.GroupIterator_Destroy(BodyIterator);
+                        end;
+                    end;
+
+                    if FootprintBodiesSeen > 0 then
+                        FootprintsWithBodies := FootprintsWithBodies + 1;
+
+                    if FootprintTracksCreated > 0 then
+                    begin
+                        TracksCreated := TracksCreated + FootprintTracksCreated;
+                        FootprintsModified := FootprintsModified + 1;
+                        ModifiedFootprints.Add('"' + JSONEscapeString(FootprintName) + '"');
+                    end;
+                end;
+
+                Footprint := FootprintIterator.NextPCBObject;
+            end;
+        finally
+            PCBServer.PostProcess;
+            PcbLib.LibraryIterator_Destroy(FootprintIterator);
+        end;
+
+        if Board <> Nil then
+            Board.ViewManager_FullUpdate;
+        Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
+
+        AddJSONBoolean(ResultProps, 'success', True);
+        AddJSONProperty(ResultProps, 'projection_source', '3D body bounding rectangle');
+        AddJSONInteger(ResultProps, 'mechanical_layer', DestinationLayerNumber);
+        AddJSONNumber(ResultProps, 'line_width_mm', LineWidthMM);
+        AddJSONInteger(ResultProps, 'footprints_seen', FootprintsSeen);
+        AddJSONInteger(ResultProps, 'footprints_processed', FootprintsProcessed);
+        AddJSONInteger(ResultProps, 'footprints_with_3d_bodies', FootprintsWithBodies);
+        AddJSONInteger(ResultProps, 'footprints_modified', FootprintsModified);
+        AddJSONInteger(ResultProps, 'component_bodies_seen', BodiesSeen);
+        AddJSONInteger(ResultProps, 'tracks_created', TracksCreated);
+        ResultProps.Add(BuildJSONArray(SkippedFootprints, 'skipped_footprints'));
+        ResultProps.Add(BuildJSONArray(ModifiedFootprints, 'modified_footprints'));
+
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := OutputLines.Text;
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        ResultProps.Free;
+        ModifiedFootprints.Free;
+        SkippedFootprints.Free;
+    end;
 end;
 
 function SetPCBLibraryPadShapes(ExcludeFootprints: TStringList; NewShape: TShape): String;
@@ -1557,7 +2827,52 @@ var
     DestinationLayerNumber : Integer;
     MoveIndex           : Integer;
     i                   : Integer;
+    ProjectionLayerNumber : Integer;
+    ProjectionLineWidthMM : Double;
+    RemoveExistingProjection : Boolean;
 begin
+    if Find3DBodyDumpCommand(LayerMoves) then
+    begin
+        Result := DumpPCBLibrary3DBodies(ExcludeFootprints);
+        Exit;
+    end;
+
+    if FindPCBUndoCommand(LayerMoves) then
+    begin
+        Result := RunPCBUndoCommand;
+        Exit;
+    end;
+
+    if FindSaveDocumentCommand(LayerMoves) then
+    begin
+        Result := RunSaveDocumentCommand;
+        Exit;
+    end;
+
+    if Find3DBodyTrackCountCommand(LayerMoves, ProjectionLayerNumber, ProjectionLineWidthMM) then
+    begin
+        Result := CountPCBLibraryProjectionTracks(ExcludeFootprints, ProjectionLayerNumber, ProjectionLineWidthMM);
+        Exit;
+    end;
+
+    if Find3DBodyEditorCleanCommand(LayerMoves, ProjectionLayerNumber, ProjectionLineWidthMM) then
+    begin
+        Result := CleanPCBLibraryProjectionTracksWithEditor(ExcludeFootprints, ProjectionLayerNumber, ProjectionLineWidthMM);
+        Exit;
+    end;
+
+    if Find3DBodyStepSilhouetteCommand(LayerMoves, ProjectionLayerNumber, ProjectionLineWidthMM, RemoveExistingProjection) then
+    begin
+        Result := ProjectPCBLibraryStepSilhouettes(ExcludeFootprints, ProjectionLayerNumber, ProjectionLineWidthMM, RemoveExistingProjection);
+        Exit;
+    end;
+
+    if Find3DBodyProjectionCommand(LayerMoves, ProjectionLayerNumber, ProjectionLineWidthMM) then
+    begin
+        Result := ProjectPCBLibrary3DBodyOutlines(ExcludeFootprints, ProjectionLayerNumber, ProjectionLineWidthMM);
+        Exit;
+    end;
+
     PcbLib := PCBServer.GetCurrentPCBLibrary;
     if PcbLib = Nil then
     begin

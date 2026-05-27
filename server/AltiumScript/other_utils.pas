@@ -131,7 +131,8 @@ begin
     begin
         DocumentKind := 'SCHLIB';
     end
-    else if (CommandName = 'create_pcb_footprint') then
+    else if (CommandName = 'create_pcb_footprint') or
+            (CommandName = 'set_pcb_library_pad_shapes') then
     begin
         DocumentKind := 'PCBLIB';
     end

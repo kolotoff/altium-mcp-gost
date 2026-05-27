@@ -750,6 +750,47 @@ begin
     end;
 end;
 
+// Extract the PCB library pad shape update logic
+function ExecuteSetPCBLibraryPadShapes(RequestData: TStringList): String;
+var
+    ParamValue: String;
+    i, ValueStart: Integer;
+    ExcludeFootprints: TStringList;
+begin
+    ExcludeFootprints := TStringList.Create;
+
+    try
+        for i := 0 to RequestData.Count - 1 do
+        begin
+            if (Pos('"exclude_footprint_names"', RequestData[i]) > 0) then
+            begin
+                i := i + 1;
+                while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
+                begin
+                    ParamValue := RequestData[i];
+                    ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
+                    ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
+                    ParamValue := JSONUnescapeString(Trim(ParamValue));
+                    if (ParamValue <> '') and (ParamValue <> '[') then
+                        ExcludeFootprints.Add(ParamValue);
+                    i := i + 1;
+                end;
+            end
+            else if (Pos('"exclude_footprint_name"', RequestData[i]) > 0) then
+            begin
+                ValueStart := Pos(':', RequestData[i]) + 1;
+                ParamValue := TrimJSON(Copy(RequestData[i], ValueStart, Length(RequestData[i])));
+                if ParamValue <> '' then
+                    ExcludeFootprints.Add(ParamValue);
+            end;
+        end;
+
+        Result := SetPCBLibraryPadShapes(ExcludeFootprints, eRoundedRectangular);
+    finally
+        ExcludeFootprints.Free;
+    end;
+end;
+
 // Extract the search library symbol logic
 function ExecuteSearchLibrarySymbol(RequestData: TStringList): String;
 var
@@ -846,6 +887,8 @@ begin
             Result := ExecuteSearchLibrarySymbol(RequestData);
         'create_pcb_footprint':
             Result := ExecuteCreatePCBFootprint(RequestData);
+        'set_pcb_library_pad_shapes':
+            Result := ExecuteSetPCBLibraryPadShapes(RequestData);
     else
         ShowMessage('Error: Unknown command: ' + CommandName);
     end;

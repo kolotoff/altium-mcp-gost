@@ -1228,6 +1228,215 @@ begin
     end;
 end;
 
+function StringListContainsText(Items: TStringList; Value: String): Boolean;
+var
+    i: Integer;
+begin
+    Result := False;
+
+    for i := 0 to Items.Count - 1 do
+    begin
+        if UpperCase(Trim(Items[i])) = UpperCase(Trim(Value)) then
+        begin
+            Result := True;
+            Exit;
+        end;
+    end;
+end;
+
+function SetPadCopperShape(Pad: IPCB_Pad; Board: IPCB_Board; NewShape: TShape): Boolean;
+var
+    LayerStack: IPCB_LayerStack;
+    LayerObject: IPCB_LayerObject;
+begin
+    Result := False;
+
+    if Pad = Nil then
+        Exit;
+
+    if Pad.Mode = ePadMode_ExternalStack then
+    begin
+        if Board = Nil then
+            Exit;
+
+        LayerStack := Board.LayerStack;
+        if LayerStack = Nil then
+            Exit;
+
+        LayerObject := LayerStack.FirstLayer;
+        while LayerObject <> Nil do
+        begin
+            if Pad.StackShapeOnLayer[LayerObject.LayerID] <> NewShape then
+            begin
+                Pad.StackShapeOnLayer[LayerObject.LayerID] := NewShape;
+                Result := True;
+            end;
+
+            LayerObject := LayerStack.NextLayer(LayerObject);
+        end;
+    end
+    else if Pad.Mode = ePadMode_LocalStack then
+    begin
+        if Pad.TopShape <> NewShape then
+        begin
+            Pad.TopShape := NewShape;
+            Result := True;
+        end;
+
+        if Pad.MidShape <> NewShape then
+        begin
+            Pad.MidShape := NewShape;
+            Result := True;
+        end;
+
+        if Pad.BotShape <> NewShape then
+        begin
+            Pad.BotShape := NewShape;
+            Result := True;
+        end;
+    end
+    else
+    begin
+        if Pad.TopShape <> NewShape then
+        begin
+            Pad.TopShape := NewShape;
+            Result := True;
+        end;
+    end;
+end;
+
+function SetPCBLibraryPadShapes(ExcludeFootprints: TStringList; NewShape: TShape): String;
+var
+    PcbLib              : IPCB_Library;
+    Board               : IPCB_Board;
+    FootprintIterator   : IPCB_LibraryIterator;
+    Footprint           : IPCB_LibComponent;
+    PadIterator         : IPCB_GroupIterator;
+    Pad                 : IPCB_Pad;
+    ResultProps         : TStringList;
+    ModifiedFootprints  : TStringList;
+    SkippedFootprints   : TStringList;
+    OutputLines         : TStringList;
+    FootprintName       : String;
+    FootprintsSeen      : Integer;
+    FootprintsProcessed : Integer;
+    FootprintsModified  : Integer;
+    PadsSeen            : Integer;
+    PadsModified        : Integer;
+    FootprintPadsModified : Integer;
+begin
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    if PcbLib = Nil then
+    begin
+        Result := '{"success": false, "error": "No PCB library document is currently active. Open a .PcbLib file first."}';
+        Exit;
+    end;
+
+    Board := PcbLib.Board;
+    ResultProps := TStringList.Create;
+    ModifiedFootprints := TStringList.Create;
+    SkippedFootprints := TStringList.Create;
+    FootprintsSeen := 0;
+    FootprintsProcessed := 0;
+    FootprintsModified := 0;
+    PadsSeen := 0;
+    PadsModified := 0;
+
+    try
+        FootprintIterator := PcbLib.LibraryIterator_Create;
+        if FootprintIterator = Nil then
+        begin
+            Result := '{"success": false, "error": "Failed to create PCB library footprint iterator."}';
+            Exit;
+        end;
+
+        FootprintIterator.SetState_FilterAll;
+
+        PCBServer.PreProcess;
+        try
+            Footprint := FootprintIterator.FirstPCBObject;
+            while Footprint <> Nil do
+            begin
+                FootprintsSeen := FootprintsSeen + 1;
+                FootprintName := Footprint.Name;
+
+                if StringListContainsText(ExcludeFootprints, FootprintName) then
+                begin
+                    SkippedFootprints.Add('"' + JSONEscapeString(FootprintName) + '"');
+                end
+                else
+                begin
+                    FootprintsProcessed := FootprintsProcessed + 1;
+                    FootprintPadsModified := 0;
+
+                    PadIterator := Footprint.GroupIterator_Create;
+                    if PadIterator <> Nil then
+                    begin
+                        try
+                            PadIterator.AddFilter_ObjectSet(MkSet(ePadObject));
+
+                            Pad := PadIterator.FirstPCBObject;
+                            while Pad <> Nil do
+                            begin
+                                PadsSeen := PadsSeen + 1;
+
+                                PCBServer.SendMessageToRobots(Pad.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+                                if SetPadCopperShape(Pad, Board, NewShape) then
+                                begin
+                                    PadsModified := PadsModified + 1;
+                                    FootprintPadsModified := FootprintPadsModified + 1;
+                                end;
+                                PCBServer.SendMessageToRobots(Pad.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+
+                                Pad := PadIterator.NextPCBObject;
+                            end;
+                        finally
+                            Footprint.GroupIterator_Destroy(PadIterator);
+                        end;
+                    end;
+
+                    if FootprintPadsModified > 0 then
+                    begin
+                        FootprintsModified := FootprintsModified + 1;
+                        ModifiedFootprints.Add('"' + JSONEscapeString(FootprintName) + '"');
+                    end;
+                end;
+
+                Footprint := FootprintIterator.NextPCBObject;
+            end;
+        finally
+            PCBServer.PostProcess;
+            PcbLib.LibraryIterator_Destroy(FootprintIterator);
+        end;
+
+        if Board <> Nil then
+            Board.ViewManager_FullUpdate;
+        Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
+
+        AddJSONBoolean(ResultProps, 'success', True);
+        AddJSONProperty(ResultProps, 'shape', 'Rounded Rectangle');
+        AddJSONInteger(ResultProps, 'footprints_seen', FootprintsSeen);
+        AddJSONInteger(ResultProps, 'footprints_processed', FootprintsProcessed);
+        AddJSONInteger(ResultProps, 'footprints_modified', FootprintsModified);
+        AddJSONInteger(ResultProps, 'pads_seen', PadsSeen);
+        AddJSONInteger(ResultProps, 'pads_modified', PadsModified);
+        ResultProps.Add(BuildJSONArray(SkippedFootprints, 'skipped_footprints'));
+        ResultProps.Add(BuildJSONArray(ModifiedFootprints, 'modified_footprints'));
+
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := OutputLines.Text;
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        ResultProps.Free;
+        ModifiedFootprints.Free;
+        SkippedFootprints.Free;
+    end;
+end;
+
 // Create a PCB footprint (SMD pads + silkscreen + courtyard) in the active PcbLib
 function CreatePCBFootprint(FootprintName: String; Description: String; PadsList: TStringList; CourtyardXMM: Double; CourtyardYMM: Double): String;
 var
@@ -1306,7 +1515,7 @@ begin
             if ShapeStr = 'Round' then
                 PadShape := eRounded
             else if ShapeStr = 'Oval' then
-                PadShape := eRoundedRectangle
+                PadShape := eRoundedRectangular
             else
                 PadShape := eRectangular;
 

@@ -764,16 +764,19 @@ begin
         begin
             if (Pos('"exclude_footprint_names"', RequestData[i]) > 0) then
             begin
-                i := i + 1;
-                while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
+                if Pos(']', RequestData[i]) = 0 then
                 begin
-                    ParamValue := RequestData[i];
-                    ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
-                    ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
-                    ParamValue := JSONUnescapeString(Trim(ParamValue));
-                    if (ParamValue <> '') and (ParamValue <> '[') then
-                        ExcludeFootprints.Add(ParamValue);
                     i := i + 1;
+                    while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
+                    begin
+                        ParamValue := RequestData[i];
+                        ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
+                        ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
+                        ParamValue := JSONUnescapeString(Trim(ParamValue));
+                        if (ParamValue <> '') and (ParamValue <> '[') then
+                            ExcludeFootprints.Add(ParamValue);
+                        i := i + 1;
+                    end;
                 end;
             end
             else if (Pos('"exclude_footprint_name"', RequestData[i]) > 0) then
@@ -806,30 +809,36 @@ begin
         begin
             if (Pos('"exclude_footprint_names"', RequestData[i]) > 0) then
             begin
-                i := i + 1;
-                while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
+                if Pos(']', RequestData[i]) = 0 then
                 begin
-                    ParamValue := RequestData[i];
-                    ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
-                    ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
-                    ParamValue := JSONUnescapeString(Trim(ParamValue));
-                    if (ParamValue <> '') and (ParamValue <> '[') then
-                        ExcludeFootprints.Add(ParamValue);
                     i := i + 1;
+                    while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
+                    begin
+                        ParamValue := RequestData[i];
+                        ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
+                        ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
+                        ParamValue := JSONUnescapeString(Trim(ParamValue));
+                        if (ParamValue <> '') and (ParamValue <> '[') then
+                            ExcludeFootprints.Add(ParamValue);
+                        i := i + 1;
+                    end;
                 end;
             end
             else if (Pos('"layer_moves"', RequestData[i]) > 0) then
             begin
-                i := i + 1;
-                while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
+                if Pos(']', RequestData[i]) = 0 then
                 begin
-                    ParamValue := RequestData[i];
-                    ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
-                    ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
-                    ParamValue := JSONUnescapeString(Trim(ParamValue));
-                    if (ParamValue <> '') and (ParamValue <> '[') then
-                        LayerMoves.Add(ParamValue);
                     i := i + 1;
+                    while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
+                    begin
+                        ParamValue := RequestData[i];
+                        ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
+                        ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
+                        ParamValue := JSONUnescapeString(Trim(ParamValue));
+                        if (ParamValue <> '') and (ParamValue <> '[') then
+                            LayerMoves.Add(ParamValue);
+                        i := i + 1;
+                    end;
                 end;
             end;
         end;

@@ -743,6 +743,17 @@ def model_state_for_body(states: list[dict], footprint: str, model_path: Path) -
     return None
 
 
+def model_state_for_footprint(states: list[dict], footprint: str) -> dict | None:
+    candidates = [
+        state
+        for state in states
+        if state.get("identifier") and footprint_name_matches(str(state["identifier"]), footprint)
+    ]
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
 def normalize_rotation_degrees(angle_deg: float) -> float:
     normalized = angle_deg % 360.0
     if abs(normalized) <= ROTATION_EPSILON_DEG or abs(normalized - 360.0) <= ROTATION_EPSILON_DEG:
@@ -798,18 +809,33 @@ def footprint_name_matches(stem: str, footprint: str) -> bool:
     if stem_upper == footprint_upper:
         return True
 
+    if footprint_upper.startswith(stem_upper + "-") or footprint_upper.startswith(stem_upper + "_"):
+        return True
+
     return re.search(rf"(^|[^A-Z0-9]){re.escape(footprint_upper)}($|[^A-Z0-9])", stem_upper) is not None
 
 
-def embedded_model_path(footprint: str, model_dir: Path) -> Path | None:
-    matches = [
+def embedded_model_path(footprint: str, model_dir: Path, model_name: str | None = None) -> Path | None:
+    if model_name:
+        model_name_key = normalize_model_name(model_name)
+        model_name_matches = [
+            path
+            for path in model_dir.rglob("*")
+            if path.is_file()
+            and path.suffix.lower() in STEP_EXTENSIONS
+            and normalize_model_name(path.name) == model_name_key
+        ]
+        if model_name_matches:
+            return sorted(model_name_matches, key=lambda path: (len(path.stem), str(path).upper()))[0]
+
+    footprint_matches = [
         path
         for path in model_dir.rglob("*")
         if path.is_file() and path.suffix.lower() in STEP_EXTENSIONS and footprint_name_matches(path.stem, footprint)
     ]
-    if not matches:
+    if not footprint_matches:
         return None
-    return sorted(matches, key=lambda path: (len(path.stem), str(path).upper()))[0]
+    return sorted(footprint_matches, key=lambda path: (len(path.stem), str(path).upper()))[0]
 
 
 def load_response_data(path: Path) -> dict:
@@ -845,7 +871,13 @@ def main() -> int:
 
     for body in bodies:
         footprint = str(body["footprint"])
-        model_path = embedded_model_path(footprint, model_dir)
+        footprint_model_state = model_state_for_footprint(model_states, footprint)
+        expected_model_name = (
+            str(footprint_model_state["model_name"])
+            if footprint_model_state is not None and footprint_model_state.get("model_name")
+            else None
+        )
+        model_path = embedded_model_path(footprint, model_dir, expected_model_name)
         if model_path is None:
             skipped[footprint] = f"exact embedded STEP model not found in {model_dir}"
             continue
@@ -866,7 +898,7 @@ def main() -> int:
                 "used": [round(value, 5) for value in normalized_bbox],
             }
 
-        model_state = model_state_for_body(model_states, footprint, model_path)
+        model_state = model_state_for_body(model_states, footprint, model_path) or footprint_model_state
         if model_state is None:
             missing_rotation_metadata.append(footprint)
 

@@ -20,6 +20,16 @@ FACE_VISIBLE_EPSILON = 1e-6
 COPLANAR_FACE_DOT = 0.9999
 OCCLUSION_EPSILON_MM = 0.01
 POINT_EPSILON_MM = 1e-5
+OUTPUT_COORD_DECIMALS = 3
+OUTPUT_MIN_LINE_LENGTH_MM = 0.03
+OPTIMIZE_POINT_GRID_MM = 0.001
+COLLINEAR_DISTANCE_TOLERANCE_MM = 0.01
+COLLINEAR_GAP_TOLERANCE_MM = 0.02
+ARC_RADIAL_TOLERANCE_MM = 0.025
+ARC_MIN_SWEEP_DEG = 3.0
+ARC_MAX_SWEEP_DEG = 355.0
+ARC_MERGE_ANGLE_TOLERANCE_DEG = 0.5
+ARC_BBOX_TOLERANCE_MM = 0.05
 
 
 NUM_RE = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][+-]?\d+)?"
@@ -803,6 +813,480 @@ def rotate_segments(
     return rotated
 
 
+def rounded_point(point: tuple[float, float]) -> tuple[float, float]:
+    return (round(point[0], OUTPUT_COORD_DECIMALS), round(point[1], OUTPUT_COORD_DECIMALS))
+
+
+def point_key(point: tuple[float, float]) -> tuple[int, int]:
+    return (
+        int(round(point[0] / OPTIMIZE_POINT_GRID_MM)),
+        int(round(point[1] / OPTIMIZE_POINT_GRID_MM)),
+    )
+
+
+def point_from_key(key: tuple[int, int]) -> tuple[float, float]:
+    return (key[0] * OPTIMIZE_POINT_GRID_MM, key[1] * OPTIMIZE_POINT_GRID_MM)
+
+
+def segment_length(segment: tuple[float, float, float, float]) -> float:
+    return math.hypot(segment[2] - segment[0], segment[3] - segment[1])
+
+
+def canonical_segment_key(segment: tuple[float, float, float, float]) -> tuple[tuple[int, int], tuple[int, int]]:
+    a = point_key((segment[0], segment[1]))
+    b = point_key((segment[2], segment[3]))
+    return tuple(sorted((a, b)))  # type: ignore[return-value]
+
+
+def dedupe_segments(
+    segments: list[tuple[float, float, float, float]],
+) -> list[tuple[float, float, float, float]]:
+    result: list[tuple[float, float, float, float]] = []
+    seen: set[tuple[tuple[int, int], tuple[int, int]]] = set()
+    for segment in segments:
+        if segment_length(segment) < OUTPUT_MIN_LINE_LENGTH_MM:
+            continue
+        key = canonical_segment_key(segment)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(segment)
+    return result
+
+
+def distance_point_to_line(
+    point: tuple[float, float],
+    start: tuple[float, float],
+    end: tuple[float, float],
+) -> float:
+    dx = end[0] - start[0]
+    dy = end[1] - start[1]
+    length = math.hypot(dx, dy)
+    if length <= 1e-12:
+        return math.hypot(point[0] - start[0], point[1] - start[1])
+    return abs((point[0] - start[0]) * dy - (point[1] - start[1]) * dx) / length
+
+
+def points_are_collinear(points: list[tuple[float, float]], tolerance: float = COLLINEAR_DISTANCE_TOLERANCE_MM) -> bool:
+    if len(points) <= 2:
+        return True
+    start = points[0]
+    end = points[-1]
+    if math.hypot(end[0] - start[0], end[1] - start[1]) < OUTPUT_MIN_LINE_LENGTH_MM:
+        return False
+    return all(distance_point_to_line(point, start, end) <= tolerance for point in points[1:-1])
+
+
+def circle_from_points(
+    a: tuple[float, float],
+    b: tuple[float, float],
+    c: tuple[float, float],
+) -> tuple[float, float, float] | None:
+    ax, ay = a
+    bx, by = b
+    cx, cy = c
+    determinant = 2.0 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
+    if abs(determinant) <= 1e-9:
+        return None
+
+    a_sq = ax * ax + ay * ay
+    b_sq = bx * bx + by * by
+    c_sq = cx * cx + cy * cy
+    center_x = (a_sq * (by - cy) + b_sq * (cy - ay) + c_sq * (ay - by)) / determinant
+    center_y = (a_sq * (cx - bx) + b_sq * (ax - cx) + c_sq * (bx - ax)) / determinant
+    radius = math.hypot(ax - center_x, ay - center_y)
+    if radius <= OUTPUT_MIN_LINE_LENGTH_MM:
+        return None
+    return (center_x, center_y, radius)
+
+
+def signed_angle_delta(start: float, end: float) -> float:
+    return (end - start + math.pi) % (2.0 * math.pi) - math.pi
+
+
+def fit_arc_to_points(points: list[tuple[float, float]]) -> dict | None:
+    if len(points) < 4:
+        return None
+    if points_are_collinear(points):
+        return None
+
+    middle = points[len(points) // 2]
+    circle = circle_from_points(points[0], middle, points[-1])
+    if circle is None:
+        return None
+
+    center_x, center_y, radius = circle
+    radial_errors = [
+        abs(math.hypot(point[0] - center_x, point[1] - center_y) - radius)
+        for point in points
+    ]
+    if max(radial_errors) > ARC_RADIAL_TOLERANCE_MM:
+        return None
+
+    angles = [math.atan2(point[1] - center_y, point[0] - center_x) for point in points]
+    deltas = [signed_angle_delta(angles[index], angles[index + 1]) for index in range(len(angles) - 1)]
+    nonzero_deltas = [delta for delta in deltas if abs(math.degrees(delta)) > 0.05]
+    if not nonzero_deltas:
+        return None
+
+    positive = sum(1 for delta in nonzero_deltas if delta > 0)
+    negative = sum(1 for delta in nonzero_deltas if delta < 0)
+    if positive and negative:
+        return None
+
+    sweep = sum(nonzero_deltas)
+    sweep_deg = abs(math.degrees(sweep))
+    if sweep_deg < ARC_MIN_SWEEP_DEG or sweep_deg > ARC_MAX_SWEEP_DEG:
+        return None
+
+    if sweep > 0:
+        start_angle = math.degrees(angles[0])
+        end_angle = start_angle + sweep_deg
+    else:
+        start_angle = math.degrees(angles[-1])
+        end_angle = start_angle + sweep_deg
+
+    while start_angle < 0:
+        start_angle += 360.0
+        end_angle += 360.0
+    while start_angle >= 360.0:
+        start_angle -= 360.0
+        end_angle -= 360.0
+
+    point_bbox = bbox_for_points(points)
+    arc_bbox = bbox_for_arc(center_x, center_y, radius, start_angle, end_angle)
+    if (
+        arc_bbox[0] < point_bbox[0] - ARC_BBOX_TOLERANCE_MM
+        or arc_bbox[1] < point_bbox[1] - ARC_BBOX_TOLERANCE_MM
+        or arc_bbox[2] > point_bbox[2] + ARC_BBOX_TOLERANCE_MM
+        or arc_bbox[3] > point_bbox[3] + ARC_BBOX_TOLERANCE_MM
+    ):
+        return None
+
+    return {
+        "kind": "ARC",
+        "cx": round(center_x, OUTPUT_COORD_DECIMALS),
+        "cy": round(center_y, OUTPUT_COORD_DECIMALS),
+        "r": round(radius, OUTPUT_COORD_DECIMALS),
+        "start": round(start_angle, OUTPUT_COORD_DECIMALS),
+        "end": round(end_angle, OUTPUT_COORD_DECIMALS),
+    }
+
+
+def bbox_for_points(points: list[tuple[float, float]]) -> tuple[float, float, float, float]:
+    xs = [point[0] for point in points]
+    ys = [point[1] for point in points]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def angle_in_arc_sweep(test_angle: float, start_angle: float, end_angle: float) -> bool:
+    while test_angle < start_angle:
+        test_angle += 360.0
+    return start_angle <= test_angle <= end_angle
+
+
+def bbox_for_arc(
+    center_x: float,
+    center_y: float,
+    radius: float,
+    start_angle: float,
+    end_angle: float,
+) -> tuple[float, float, float, float]:
+    angles = [start_angle, end_angle]
+    for cardinal_angle in (0.0, 90.0, 180.0, 270.0, 360.0, 450.0, 540.0, 630.0, 720.0):
+        if angle_in_arc_sweep(cardinal_angle, start_angle, end_angle):
+            angles.append(cardinal_angle)
+    points = [
+        (
+            center_x + radius * math.cos(math.radians(angle)),
+            center_y + radius * math.sin(math.radians(angle)),
+        )
+        for angle in angles
+    ]
+    return bbox_for_points(points)
+
+
+def trace_segment_paths(
+    segments: list[tuple[float, float, float, float]],
+) -> list[list[tuple[float, float]]]:
+    edge_keys: list[tuple[tuple[int, int], tuple[int, int]]] = []
+    graph: dict[tuple[int, int], list[int]] = {}
+    for segment in segments:
+        a = point_key((segment[0], segment[1]))
+        b = point_key((segment[2], segment[3]))
+        if a == b:
+            continue
+        edge_index = len(edge_keys)
+        edge_keys.append((a, b))
+        graph.setdefault(a, []).append(edge_index)
+        graph.setdefault(b, []).append(edge_index)
+
+    unvisited = set(range(len(edge_keys)))
+
+    def follow(start_edge: int, start_node: tuple[int, int]) -> list[tuple[float, float]]:
+        nodes = [start_node]
+        current_node = start_node
+        edge_index = start_edge
+        while edge_index in unvisited:
+            unvisited.remove(edge_index)
+            a, b = edge_keys[edge_index]
+            next_node = b if current_node == a else a
+            nodes.append(next_node)
+            candidates = [candidate for candidate in graph.get(next_node, []) if candidate in unvisited]
+            if len(candidates) != 1 or len(graph.get(next_node, [])) != 2:
+                break
+            current_node = next_node
+            edge_index = candidates[0]
+        return [rounded_point(point_from_key(node)) for node in nodes]
+
+    paths: list[list[tuple[float, float]]] = []
+    for edge_index, (a, b) in enumerate(edge_keys):
+        if edge_index not in unvisited:
+            continue
+        if len(graph.get(a, [])) != 2:
+            paths.append(follow(edge_index, a))
+        elif len(graph.get(b, [])) != 2:
+            paths.append(follow(edge_index, b))
+
+    while unvisited:
+        edge_index = next(iter(unvisited))
+        a, _b = edge_keys[edge_index]
+        paths.append(follow(edge_index, a))
+
+    return [path for path in paths if len(path) >= 2]
+
+
+def line_primitive(start: tuple[float, float], end: tuple[float, float]) -> dict | None:
+    if math.hypot(end[0] - start[0], end[1] - start[1]) < OUTPUT_MIN_LINE_LENGTH_MM:
+        return None
+    return {
+        "kind": "LINE",
+        "x1": round(start[0], OUTPUT_COORD_DECIMALS),
+        "y1": round(start[1], OUTPUT_COORD_DECIMALS),
+        "x2": round(end[0], OUTPUT_COORD_DECIMALS),
+        "y2": round(end[1], OUTPUT_COORD_DECIMALS),
+    }
+
+
+def rdp_simplify(points: list[tuple[float, float]], tolerance: float) -> list[tuple[float, float]]:
+    if len(points) <= 2:
+        return points
+    start = points[0]
+    end = points[-1]
+    max_distance = -1.0
+    split_index = 0
+    for index, point in enumerate(points[1:-1], start=1):
+        distance = distance_point_to_line(point, start, end)
+        if distance > max_distance:
+            max_distance = distance
+            split_index = index
+    if max_distance <= tolerance:
+        return [start, end]
+    left = rdp_simplify(points[: split_index + 1], tolerance)
+    right = rdp_simplify(points[split_index:], tolerance)
+    return left[:-1] + right
+
+
+def primitives_from_path(path: list[tuple[float, float]]) -> list[dict]:
+    if len(path) < 2:
+        return []
+    if points_are_collinear(path):
+        primitive = line_primitive(path[0], path[-1])
+        return [primitive] if primitive is not None else []
+
+    arc = fit_arc_to_points(path)
+    if arc is not None:
+        return [arc]
+
+    simplified = rdp_simplify(path, COLLINEAR_DISTANCE_TOLERANCE_MM)
+    result: list[dict] = []
+    for index in range(len(simplified) - 1):
+        primitive = line_primitive(simplified[index], simplified[index + 1])
+        if primitive is not None:
+            result.append(primitive)
+    return result
+
+
+def merge_line_primitives(primitives: list[dict]) -> list[dict]:
+    groups: dict[tuple[int, int], list[tuple[float, float, float, float, float, float]]] = {}
+    passthrough: list[dict] = []
+    for primitive in primitives:
+        if primitive.get("kind") != "LINE":
+            passthrough.append(primitive)
+            continue
+
+        x1 = float(primitive["x1"])
+        y1 = float(primitive["y1"])
+        x2 = float(primitive["x2"])
+        y2 = float(primitive["y2"])
+        dx = x2 - x1
+        dy = y2 - y1
+        length = math.hypot(dx, dy)
+        if length < OUTPUT_MIN_LINE_LENGTH_MM:
+            continue
+
+        ux = dx / length
+        uy = dy / length
+        if ux < -1e-12 or (abs(ux) <= 1e-12 and uy < 0):
+            ux = -ux
+            uy = -uy
+        normal_x = -uy
+        normal_y = ux
+        offset = normal_x * x1 + normal_y * y1
+        angle = math.atan2(uy, ux)
+        key = (int(round(angle / 0.001)), int(round(offset / COLLINEAR_DISTANCE_TOLERANCE_MM)))
+        t1 = ux * x1 + uy * y1
+        t2 = ux * x2 + uy * y2
+        groups.setdefault(key, []).append((min(t1, t2), max(t1, t2), ux, uy, normal_x, normal_y, offset))
+
+    merged: list[dict] = []
+    for intervals in groups.values():
+        intervals.sort(key=lambda item: item[0])
+        current_start, current_end, ux, uy, normal_x, normal_y, offset = intervals[0]
+        for start, end, *_rest in intervals[1:]:
+            if start <= current_end + COLLINEAR_GAP_TOLERANCE_MM:
+                current_end = max(current_end, end)
+                continue
+            primitive = line_primitive(
+                (ux * current_start + normal_x * offset, uy * current_start + normal_y * offset),
+                (ux * current_end + normal_x * offset, uy * current_end + normal_y * offset),
+            )
+            if primitive is not None:
+                merged.append(primitive)
+            current_start, current_end = start, end
+
+        primitive = line_primitive(
+            (ux * current_start + normal_x * offset, uy * current_start + normal_y * offset),
+            (ux * current_end + normal_x * offset, uy * current_end + normal_y * offset),
+        )
+        if primitive is not None:
+            merged.append(primitive)
+
+    return passthrough + merged
+
+
+def merge_arc_primitives(primitives: list[dict]) -> list[dict]:
+    groups: dict[tuple[int, int, int], list[tuple[float, float]]] = {}
+    passthrough: list[dict] = []
+    by_key_values: dict[tuple[int, int, int], tuple[float, float, float]] = {}
+    for primitive in primitives:
+        if primitive.get("kind") != "ARC":
+            passthrough.append(primitive)
+            continue
+        cx = float(primitive["cx"])
+        cy = float(primitive["cy"])
+        radius = float(primitive["r"])
+        start = float(primitive["start"])
+        end = float(primitive["end"])
+        if end < start:
+            end += 360.0
+        if end - start < ARC_MIN_SWEEP_DEG:
+            continue
+        key = (
+            int(round(cx / COLLINEAR_DISTANCE_TOLERANCE_MM)),
+            int(round(cy / COLLINEAR_DISTANCE_TOLERANCE_MM)),
+            int(round(radius / COLLINEAR_DISTANCE_TOLERANCE_MM)),
+        )
+        by_key_values.setdefault(key, (cx, cy, radius))
+        groups.setdefault(key, []).append((start, end))
+
+    merged: list[dict] = []
+    for key, intervals in groups.items():
+        cx, cy, radius = by_key_values[key]
+        intervals.sort(key=lambda item: item[0])
+        current_start, current_end = intervals[0]
+        for start, end in intervals[1:]:
+            if start <= current_end + ARC_MERGE_ANGLE_TOLERANCE_DEG:
+                current_end = max(current_end, end)
+                continue
+            merged.append(
+                {
+                    "kind": "ARC",
+                    "cx": round(cx, OUTPUT_COORD_DECIMALS),
+                    "cy": round(cy, OUTPUT_COORD_DECIMALS),
+                    "r": round(radius, OUTPUT_COORD_DECIMALS),
+                    "start": round(current_start, OUTPUT_COORD_DECIMALS),
+                    "end": round(current_end, OUTPUT_COORD_DECIMALS),
+                }
+            )
+            current_start, current_end = start, end
+
+        merged.append(
+            {
+                "kind": "ARC",
+                "cx": round(cx, OUTPUT_COORD_DECIMALS),
+                "cy": round(cy, OUTPUT_COORD_DECIMALS),
+                "r": round(radius, OUTPUT_COORD_DECIMALS),
+                "start": round(current_start, OUTPUT_COORD_DECIMALS),
+                "end": round(current_end, OUTPUT_COORD_DECIMALS),
+            }
+        )
+
+    return passthrough + merged
+
+
+def optimize_segments_to_primitives(
+    segments: list[tuple[float, float, float, float]],
+) -> tuple[list[dict], dict]:
+    deduped = dedupe_segments(segments)
+    paths = trace_segment_paths(deduped)
+    primitives: list[dict] = []
+    for path in paths:
+        primitives.extend(primitives_from_path(path))
+    primitives = merge_line_primitives(primitives)
+    primitives = merge_arc_primitives(primitives)
+
+    line_keys: set[tuple[tuple[int, int], tuple[int, int]]] = set()
+    arc_keys: set[tuple[int, int, int, int, int]] = set()
+    result: list[dict] = []
+    for primitive in primitives:
+        if primitive.get("kind") == "LINE":
+            key = canonical_segment_key(
+                (
+                    float(primitive["x1"]),
+                    float(primitive["y1"]),
+                    float(primitive["x2"]),
+                    float(primitive["y2"]),
+                )
+            )
+            if key in line_keys:
+                continue
+            line_keys.add(key)
+        elif primitive.get("kind") == "ARC":
+            key = (
+                int(round(float(primitive["cx"]) * 1000)),
+                int(round(float(primitive["cy"]) * 1000)),
+                int(round(float(primitive["r"]) * 1000)),
+                int(round(float(primitive["start"]) * 1000)),
+                int(round(float(primitive["end"]) * 1000)),
+            )
+            if key in arc_keys:
+                continue
+            arc_keys.add(key)
+        result.append(primitive)
+
+    return result, {
+        "input_segments": len(segments),
+        "deduped_segments": len(deduped),
+        "paths": len(paths),
+        "optimized_primitives": len(result),
+        "optimized_lines": sum(1 for primitive in result if primitive.get("kind") == "LINE"),
+        "optimized_arcs": sum(1 for primitive in result if primitive.get("kind") == "ARC"),
+    }
+
+
+def primitive_record(footprint: str, primitive: dict) -> str:
+    if primitive["kind"] == "ARC":
+        return (
+            f"{footprint}|ARC|{primitive['cx']:.3f}|{primitive['cy']:.3f}|"
+            f"{primitive['r']:.3f}|{primitive['start']:.3f}|{primitive['end']:.3f}"
+        )
+    return (
+        f"{footprint}|LINE|{primitive['x1']:.3f}|{primitive['y1']:.3f}|"
+        f"{primitive['x2']:.3f}|{primitive['y2']:.3f}"
+    )
+
+
 def footprint_name_matches(stem: str, footprint: str) -> bool:
     footprint_upper = footprint.upper()
     stem_upper = stem.upper()
@@ -868,6 +1352,7 @@ def main() -> int:
     model_rotation_metadata: dict[str, dict[str, float | str | None]] = {}
     missing_rotation_metadata: list[str] = []
     hidden_line_stats: dict[str, dict] = {}
+    optimization_stats: dict[str, dict] = {}
 
     for body in bodies:
         footprint = str(body["footprint"])
@@ -926,9 +1411,15 @@ def main() -> int:
             skipped[footprint] = "no scaled segments"
             continue
 
+        primitives, footprint_optimization_stats = optimize_segments_to_primitives(scaled)
+        optimization_stats[footprint] = footprint_optimization_stats
+        if not primitives:
+            skipped[footprint] = "no optimized primitives"
+            continue
+
         used_models[footprint] = str(model_path)
-        for x1, y1, x2, y2 in scaled:
-            lines.append(f"{footprint}|{x1:.3f}|{y1:.3f}|{x2:.3f}|{y2:.3f}")
+        for primitive in primitives:
+            lines.append(primitive_record(footprint, primitive))
 
     output_file.parent.mkdir(parents=True, exist_ok=True)
     output_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -945,6 +1436,7 @@ def main() -> int:
                 "library_path": str(library_path) if library_path is not None else None,
                 "model_rotation_metadata": model_rotation_metadata,
                 "hidden_line_stats": hidden_line_stats,
+                "optimization_stats": optimization_stats,
                 "missing_rotation_metadata": missing_rotation_metadata,
             },
             indent=2,

@@ -2065,6 +2065,36 @@ begin
     Result := True;
 end;
 
+function AddProjectionBoardArc(Board: IPCB_Board; DestinationLayer: TLayer; XCenter, YCenter, Radius: TCoord; StartAngle, EndAngle: Double; LineWidth: TCoord): Boolean;
+var
+    Arc: IPCB_Arc;
+begin
+    Result := False;
+
+    if Board = Nil then
+        Exit;
+
+    if Radius <= 0 then
+        Exit;
+
+    Arc := PCBServer.PCBObjectFactory(eArcObject, eNoDimension, eCreate_Default);
+    if Arc = Nil then
+        Exit;
+
+    Arc.Layer := DestinationLayer;
+    Arc.XCenter := XCenter;
+    Arc.YCenter := YCenter;
+    Arc.Radius := Radius;
+    Arc.StartAngle := StartAngle;
+    Arc.EndAngle := EndAngle;
+    Arc.LineWidth := LineWidth;
+
+    PCBServer.SendMessageToRobots(Arc.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+    Board.AddPCBObject(Arc);
+    PCBServer.SendMessageToRobots(Arc.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+    Result := True;
+end;
+
 function AddProjectionRectangle(Footprint: IPCB_LibComponent; DestinationLayer: TLayer; Rect: TCoordRect; LineWidth: TCoord): Integer;
 begin
     Result := 0;
@@ -2125,11 +2155,105 @@ begin
     Result := FootprintName <> '';
 end;
 
+function PopSilhouetteField(var Text: String; var FieldValue: String): Boolean;
+var
+    SeparatorPos: Integer;
+begin
+    Result := False;
+    Text := Trim(Text);
+    if Text = '' then
+        Exit;
+
+    SeparatorPos := Pos('|', Text);
+    if SeparatorPos > 0 then
+    begin
+        FieldValue := Trim(Copy(Text, 1, SeparatorPos - 1));
+        Delete(Text, 1, SeparatorPos);
+    end
+    else
+    begin
+        FieldValue := Trim(Text);
+        Text := '';
+    end;
+    Result := True;
+end;
+
+function ParseSilhouettePrimitive(PrimitiveLine: String; var FootprintName: String; var PrimitiveKind: String; var X1MM, Y1MM, X2MM, Y2MM, CenterXMM, CenterYMM, RadiusMM, StartAngle, EndAngle: Double): Boolean;
+var
+    FieldText: String;
+begin
+    Result := False;
+    FootprintName := '';
+    PrimitiveKind := '';
+    X1MM := 0;
+    Y1MM := 0;
+    X2MM := 0;
+    Y2MM := 0;
+    CenterXMM := 0;
+    CenterYMM := 0;
+    RadiusMM := 0;
+    StartAngle := 0;
+    EndAngle := 0;
+
+    if not PopSilhouetteField(PrimitiveLine, FootprintName) then
+        Exit;
+    if FootprintName = '' then
+        Exit;
+
+    if not PopSilhouetteField(PrimitiveLine, FieldText) then
+        Exit;
+
+    PrimitiveKind := UpperCase(FieldText);
+    if (PrimitiveKind <> 'LINE') and (PrimitiveKind <> 'ARC') then
+    begin
+        PrimitiveKind := 'LINE';
+        X1MM := SafeStrToFloat(FieldText);
+    end
+    else
+    begin
+        if not PopSilhouetteField(PrimitiveLine, FieldText) then
+            Exit;
+        X1MM := SafeStrToFloat(FieldText);
+    end;
+
+    if PrimitiveKind = 'LINE' then
+    begin
+        if not PopSilhouetteField(PrimitiveLine, FieldText) then
+            Exit;
+        Y1MM := SafeStrToFloat(FieldText);
+        if not PopSilhouetteField(PrimitiveLine, FieldText) then
+            Exit;
+        X2MM := SafeStrToFloat(FieldText);
+        if not PopSilhouetteField(PrimitiveLine, FieldText) then
+            Exit;
+        Y2MM := SafeStrToFloat(FieldText);
+        Result := True;
+    end
+    else if PrimitiveKind = 'ARC' then
+    begin
+        CenterXMM := X1MM;
+        if not PopSilhouetteField(PrimitiveLine, FieldText) then
+            Exit;
+        CenterYMM := SafeStrToFloat(FieldText);
+        if not PopSilhouetteField(PrimitiveLine, FieldText) then
+            Exit;
+        RadiusMM := SafeStrToFloat(FieldText);
+        if not PopSilhouetteField(PrimitiveLine, FieldText) then
+            Exit;
+        StartAngle := SafeStrToFloat(FieldText);
+        if not PopSilhouetteField(PrimitiveLine, FieldText) then
+            Exit;
+        EndAngle := SafeStrToFloat(FieldText);
+        Result := RadiusMM > 0;
+    end;
+end;
+
 function RemoveProjectionTracks(Footprint: IPCB_LibComponent; DestinationLayer: TLayer; LineWidth: TCoord): Integer;
 var
     PrimitiveIterator: IPCB_GroupIterator;
     Primitive: IPCB_Primitive;
     Track: IPCB_Track;
+    Arc: IPCB_Arc;
     TracksToRemove: TObjectList;
 begin
     Result := 0;
@@ -2147,16 +2271,24 @@ begin
     end;
 
     try
-        PrimitiveIterator.AddFilter_ObjectSet(MkSet(eTrackObject));
+        PrimitiveIterator.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject));
         PrimitiveIterator.AddFilter_LayerSet(MkSet(DestinationLayer));
 
         Primitive := PrimitiveIterator.FirstPCBObject;
         while Primitive <> Nil do
         begin
-            Track := Primitive;
-
-            if Track.Width = LineWidth then
-                TracksToRemove.Add(Primitive);
+            if Primitive.ObjectId = eTrackObject then
+            begin
+                Track := Primitive;
+                if Track.Width = LineWidth then
+                    TracksToRemove.Add(Primitive);
+            end
+            else if Primitive.ObjectId = eArcObject then
+            begin
+                Arc := Primitive;
+                if Arc.LineWidth = LineWidth then
+                    TracksToRemove.Add(Primitive);
+            end;
 
             Primitive := PrimitiveIterator.NextPCBObject;
         end;
@@ -2192,6 +2324,7 @@ var
     PrimitiveIterator   : IPCB_GroupIterator;
     Primitive           : IPCB_Primitive;
     Track               : IPCB_Track;
+    Arc                 : IPCB_Arc;
     DestinationLayer    : TLayer;
     LineWidth           : TCoord;
     ResultProps         : TStringList;
@@ -2202,7 +2335,9 @@ var
     FootprintsSeen      : Integer;
     FootprintsProcessed : Integer;
     FootprintTrackCount : Integer;
+    FootprintArcCount   : Integer;
     TotalTrackCount     : Integer;
+    TotalArcCount       : Integer;
 begin
     PcbLib := PCBServer.GetCurrentPCBLibrary;
     if PcbLib = Nil then
@@ -2230,6 +2365,7 @@ begin
     FootprintsSeen := 0;
     FootprintsProcessed := 0;
     TotalTrackCount := 0;
+    TotalArcCount := 0;
 
     try
         FootprintIterator := PcbLib.LibraryIterator_Create;
@@ -2251,20 +2387,30 @@ begin
                 begin
                     FootprintsProcessed := FootprintsProcessed + 1;
                     FootprintTrackCount := 0;
+                    FootprintArcCount := 0;
 
                     PrimitiveIterator := Footprint.GroupIterator_Create;
                     if PrimitiveIterator <> Nil then
                     begin
                         try
-                            PrimitiveIterator.AddFilter_ObjectSet(MkSet(eTrackObject));
+                            PrimitiveIterator.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject));
                             PrimitiveIterator.AddFilter_LayerSet(MkSet(DestinationLayer));
 
                             Primitive := PrimitiveIterator.FirstPCBObject;
                             while Primitive <> Nil do
                             begin
-                                Track := Primitive;
-                                if Track.Width = LineWidth then
-                                    FootprintTrackCount := FootprintTrackCount + 1;
+                                if Primitive.ObjectId = eTrackObject then
+                                begin
+                                    Track := Primitive;
+                                    if Track.Width = LineWidth then
+                                        FootprintTrackCount := FootprintTrackCount + 1;
+                                end
+                                else if Primitive.ObjectId = eArcObject then
+                                begin
+                                    Arc := Primitive;
+                                    if Arc.LineWidth = LineWidth then
+                                        FootprintArcCount := FootprintArcCount + 1;
+                                end;
                                 Primitive := PrimitiveIterator.NextPCBObject;
                             end;
                         finally
@@ -2273,10 +2419,13 @@ begin
                     end;
 
                     TotalTrackCount := TotalTrackCount + FootprintTrackCount;
+                    TotalArcCount := TotalArcCount + FootprintArcCount;
                     CountProps := TStringList.Create;
                     try
                         AddJSONProperty(CountProps, 'footprint', FootprintName);
                         AddJSONInteger(CountProps, 'tracks', FootprintTrackCount);
+                        AddJSONInteger(CountProps, 'arcs', FootprintArcCount);
+                        AddJSONInteger(CountProps, 'primitives', FootprintTrackCount + FootprintArcCount);
                         CountArray.Add(BuildJSONObject(CountProps, 1));
                     finally
                         CountProps.Free;
@@ -2295,6 +2444,8 @@ begin
         AddJSONInteger(ResultProps, 'footprints_seen', FootprintsSeen);
         AddJSONInteger(ResultProps, 'footprints_processed', FootprintsProcessed);
         AddJSONInteger(ResultProps, 'total_tracks', TotalTrackCount);
+        AddJSONInteger(ResultProps, 'total_arcs', TotalArcCount);
+        AddJSONInteger(ResultProps, 'total_primitives', TotalTrackCount + TotalArcCount);
         ResultProps.Add(BuildJSONArray(CountArray, 'footprint_counts'));
 
         OutputLines := TStringList.Create;
@@ -2406,6 +2557,7 @@ var
     PrimitiveIterator: IPCB_GroupIterator;
     Primitive: IPCB_Primitive;
     Track: IPCB_Track;
+    Arc: IPCB_Arc;
 begin
     Result := 0;
 
@@ -2417,17 +2569,29 @@ begin
         Exit;
 
     try
-        PrimitiveIterator.AddFilter_ObjectSet(MkSet(eTrackObject));
+        PrimitiveIterator.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject));
         PrimitiveIterator.AddFilter_LayerSet(MkSet(DestinationLayer));
 
         Primitive := PrimitiveIterator.FirstPCBObject;
         while Primitive <> Nil do
         begin
-            Track := Primitive;
-            if Track.Width = LineWidth then
+            if Primitive.ObjectId = eTrackObject then
             begin
-                Primitive.Selected := True;
-                Result := Result + 1;
+                Track := Primitive;
+                if Track.Width = LineWidth then
+                begin
+                    Primitive.Selected := True;
+                    Result := Result + 1;
+                end;
+            end
+            else if Primitive.ObjectId = eArcObject then
+            begin
+                Arc := Primitive;
+                if Arc.LineWidth = LineWidth then
+                begin
+                    Primitive.Selected := True;
+                    Result := Result + 1;
+                end;
             end;
             Primitive := PrimitiveIterator.NextPCBObject;
         end;
@@ -2441,6 +2605,7 @@ var
     PrimitiveIterator: IPCB_GroupIterator;
     Primitive: IPCB_Primitive;
     Track: IPCB_Track;
+    Arc: IPCB_Arc;
     MinX, MaxX: TCoord;
     MinY, MaxY: TCoord;
 begin
@@ -2458,59 +2623,96 @@ begin
         Exit;
 
     try
-        PrimitiveIterator.AddFilter_ObjectSet(MkSet(eTrackObject));
+        PrimitiveIterator.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject));
         PrimitiveIterator.AddFilter_LayerSet(MkSet(DestinationLayer));
 
         Primitive := PrimitiveIterator.FirstPCBObject;
         while Primitive <> Nil do
         begin
-            Track := Primitive;
-            if Track.Width = LineWidth then
+            if Primitive.ObjectId = eTrackObject then
             begin
-                Primitive.Selected := True;
+                Track := Primitive;
+                if Track.Width = LineWidth then
+                begin
+                    Primitive.Selected := True;
 
-                if Track.x1 < Track.x2 then
-                begin
-                    MinX := Track.x1;
-                    MaxX := Track.x2;
-                end
-                else
-                begin
-                    MinX := Track.x2;
-                    MaxX := Track.x1;
-                end;
+                    if Track.x1 < Track.x2 then
+                    begin
+                        MinX := Track.x1;
+                        MaxX := Track.x2;
+                    end
+                    else
+                    begin
+                        MinX := Track.x2;
+                        MaxX := Track.x1;
+                    end;
 
-                if Track.y1 < Track.y2 then
-                begin
-                    MinY := Track.y1;
-                    MaxY := Track.y2;
-                end
-                else
-                begin
-                    MinY := Track.y2;
-                    MaxY := Track.y1;
-                end;
+                    if Track.y1 < Track.y2 then
+                    begin
+                        MinY := Track.y1;
+                        MaxY := Track.y2;
+                    end
+                    else
+                    begin
+                        MinY := Track.y2;
+                        MaxY := Track.y1;
+                    end;
 
-                if Result = 0 then
-                begin
-                    Left := MinX;
-                    Right := MaxX;
-                    Bottom := MinY;
-                    Top := MaxY;
-                end
-                else
-                begin
-                    if MinX < Left then
+                    if Result = 0 then
+                    begin
                         Left := MinX;
-                    if MaxX > Right then
                         Right := MaxX;
-                    if MinY < Bottom then
                         Bottom := MinY;
-                    if MaxY > Top then
                         Top := MaxY;
+                    end
+                    else
+                    begin
+                        if MinX < Left then
+                            Left := MinX;
+                        if MaxX > Right then
+                            Right := MaxX;
+                        if MinY < Bottom then
+                            Bottom := MinY;
+                        if MaxY > Top then
+                            Top := MaxY;
+                    end;
+
+                    Result := Result + 1;
                 end;
+            end
+            else if Primitive.ObjectId = eArcObject then
+            begin
+                Arc := Primitive;
+                if Arc.LineWidth = LineWidth then
+                begin
+                    Primitive.Selected := True;
+
+                    MinX := Arc.XCenter - Arc.Radius;
+                    MaxX := Arc.XCenter + Arc.Radius;
+                    MinY := Arc.YCenter - Arc.Radius;
+                    MaxY := Arc.YCenter + Arc.Radius;
+
+                    if Result = 0 then
+                    begin
+                        Left := MinX;
+                        Right := MaxX;
+                        Bottom := MinY;
+                        Top := MaxY;
+                    end
+                    else
+                    begin
+                        if MinX < Left then
+                            Left := MinX;
+                        if MaxX > Right then
+                            Right := MaxX;
+                        if MinY < Bottom then
+                            Bottom := MinY;
+                        if MaxY > Top then
+                            Top := MaxY;
+                    end;
 
                 Result := Result + 1;
+                end;
             end;
             Primitive := PrimitiveIterator.NextPCBObject;
         end;
@@ -2524,6 +2726,7 @@ var
     PrimitiveIterator: IPCB_GroupIterator;
     Primitive: IPCB_Primitive;
     Track: IPCB_Track;
+    Arc: IPCB_Arc;
     MinX, MaxX: TCoord;
     MinY, MaxY: TCoord;
 begin
@@ -2541,57 +2744,92 @@ begin
         Exit;
 
     try
-        PrimitiveIterator.AddFilter_ObjectSet(MkSet(eTrackObject));
+        PrimitiveIterator.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject));
         PrimitiveIterator.AddFilter_LayerSet(MkSet(DestinationLayer));
 
         Primitive := PrimitiveIterator.FirstPCBObject;
         while Primitive <> Nil do
         begin
-            Track := Primitive;
-            if Track.Width = LineWidth then
+            if Primitive.ObjectId = eTrackObject then
             begin
-                if Track.x1 < Track.x2 then
+                Track := Primitive;
+                if Track.Width = LineWidth then
                 begin
-                    MinX := Track.x1;
-                    MaxX := Track.x2;
-                end
-                else
-                begin
-                    MinX := Track.x2;
-                    MaxX := Track.x1;
-                end;
+                    if Track.x1 < Track.x2 then
+                    begin
+                        MinX := Track.x1;
+                        MaxX := Track.x2;
+                    end
+                    else
+                    begin
+                        MinX := Track.x2;
+                        MaxX := Track.x1;
+                    end;
 
-                if Track.y1 < Track.y2 then
-                begin
-                    MinY := Track.y1;
-                    MaxY := Track.y2;
-                end
-                else
-                begin
-                    MinY := Track.y2;
-                    MaxY := Track.y1;
-                end;
+                    if Track.y1 < Track.y2 then
+                    begin
+                        MinY := Track.y1;
+                        MaxY := Track.y2;
+                    end
+                    else
+                    begin
+                        MinY := Track.y2;
+                        MaxY := Track.y1;
+                    end;
 
-                if Result = 0 then
-                begin
-                    Left := MinX;
-                    Right := MaxX;
-                    Bottom := MinY;
-                    Top := MaxY;
-                end
-                else
-                begin
-                    if MinX < Left then
+                    if Result = 0 then
+                    begin
                         Left := MinX;
-                    if MaxX > Right then
                         Right := MaxX;
-                    if MinY < Bottom then
                         Bottom := MinY;
-                    if MaxY > Top then
                         Top := MaxY;
-                end;
+                    end
+                    else
+                    begin
+                        if MinX < Left then
+                            Left := MinX;
+                        if MaxX > Right then
+                            Right := MaxX;
+                        if MinY < Bottom then
+                            Bottom := MinY;
+                        if MaxY > Top then
+                            Top := MaxY;
+                    end;
 
-                Result := Result + 1;
+                    Result := Result + 1;
+                end;
+            end
+            else if Primitive.ObjectId = eArcObject then
+            begin
+                Arc := Primitive;
+                if Arc.LineWidth = LineWidth then
+                begin
+                    MinX := Arc.XCenter - Arc.Radius;
+                    MaxX := Arc.XCenter + Arc.Radius;
+                    MinY := Arc.YCenter - Arc.Radius;
+                    MaxY := Arc.YCenter + Arc.Radius;
+
+                    if Result = 0 then
+                    begin
+                        Left := MinX;
+                        Right := MaxX;
+                        Bottom := MinY;
+                        Top := MaxY;
+                    end
+                    else
+                    begin
+                        if MinX < Left then
+                            Left := MinX;
+                        if MaxX > Right then
+                            Right := MaxX;
+                        if MinY < Bottom then
+                            Bottom := MinY;
+                        if MaxY > Top then
+                            Top := MaxY;
+                    end;
+
+                    Result := Result + 1;
+                end;
             end;
             Primitive := PrimitiveIterator.NextPCBObject;
         end;
@@ -2762,7 +3000,10 @@ var
     PrimitiveIterator: IPCB_GroupIterator;
     Primitive: IPCB_Primitive;
     Track: IPCB_Track;
+    Arc: IPCB_Arc;
     X1, Y1, X2, Y2: TCoord;
+    MinX, MaxX: TCoord;
+    MinY, MaxY: TCoord;
     Keepout: TCoord;
 begin
     Result := False;
@@ -2781,23 +3022,42 @@ begin
         Exit;
 
     try
-        PrimitiveIterator.AddFilter_ObjectSet(MkSet(eTrackObject));
+        PrimitiveIterator.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject));
         PrimitiveIterator.AddFilter_LayerSet(MkSet(DestinationLayer));
 
         Primitive := PrimitiveIterator.FirstPCBObject;
         while Primitive <> Nil do
         begin
-            Track := Primitive;
-            if Track.Width = LineWidth then
+            if Primitive.ObjectId = eTrackObject then
             begin
-                X1 := PCBLibLocalX(Board, Track.x1);
-                Y1 := PCBLibLocalY(Board, Track.y1);
-                X2 := PCBLibLocalX(Board, Track.x2);
-                Y2 := PCBLibLocalY(Board, Track.y2);
-                if SegmentIntersectsRect(X1, Y1, X2, Y2, Left, Bottom, Right, Top) then
+                Track := Primitive;
+                if Track.Width = LineWidth then
                 begin
-                    Result := True;
-                    Exit;
+                    X1 := PCBLibLocalX(Board, Track.x1);
+                    Y1 := PCBLibLocalY(Board, Track.y1);
+                    X2 := PCBLibLocalX(Board, Track.x2);
+                    Y2 := PCBLibLocalY(Board, Track.y2);
+                    if SegmentIntersectsRect(X1, Y1, X2, Y2, Left, Bottom, Right, Top) then
+                    begin
+                        Result := True;
+                        Exit;
+                    end;
+                end;
+            end
+            else if Primitive.ObjectId = eArcObject then
+            begin
+                Arc := Primitive;
+                if Arc.LineWidth = LineWidth then
+                begin
+                    MinX := PCBLibLocalX(Board, Arc.XCenter - Arc.Radius);
+                    MaxX := PCBLibLocalX(Board, Arc.XCenter + Arc.Radius);
+                    MinY := PCBLibLocalY(Board, Arc.YCenter - Arc.Radius);
+                    MaxY := PCBLibLocalY(Board, Arc.YCenter + Arc.Radius);
+                    if not ((MaxX < Left) or (MinX > Right) or (MaxY < Bottom) or (MinY > Top)) then
+                    begin
+                        Result := True;
+                        Exit;
+                    end;
                 end;
             end;
             Primitive := PrimitiveIterator.NextPCBObject;
@@ -3777,9 +4037,13 @@ var
     SegmentsLoaded      : Integer;
     SegmentsMatched     : Integer;
     TracksCreated       : Integer;
+    ArcsCreated         : Integer;
     TracksRemoved       : Integer;
-    FootprintTracksCreated : Integer;
+    FootprintPrimitivesCreated : Integer;
+    PrimitiveKind      : String;
     X1MM, Y1MM, X2MM, Y2MM : Double;
+    CenterXMM, CenterYMM, RadiusMM : Double;
+    StartAngle, EndAngle : Double;
     i                   : Integer;
     SegmentIndex        : Integer;
 begin
@@ -3823,6 +4087,7 @@ begin
     FootprintsModified := 0;
     SegmentsMatched := 0;
     TracksCreated := 0;
+    ArcsCreated := 0;
     TracksRemoved := 0;
 
     try
@@ -3875,7 +4140,7 @@ begin
 
                 if Footprint <> Nil then
                 begin
-                    FootprintTracksCreated := 0;
+                    FootprintPrimitivesCreated := 0;
 
                     PCBServer.PreProcess;
                     try
@@ -3884,23 +4149,44 @@ begin
 
                         for SegmentIndex := 0 to SegmentLines.Count - 1 do
                         begin
-                            if ParseSilhouetteSegment(SegmentLines[SegmentIndex], SegmentFootprint, X1MM, Y1MM, X2MM, Y2MM) then
+                            if ParseSilhouettePrimitive(SegmentLines[SegmentIndex], SegmentFootprint, PrimitiveKind, X1MM, Y1MM, X2MM, Y2MM, CenterXMM, CenterYMM, RadiusMM, StartAngle, EndAngle) then
                             begin
                                 if UpperCase(SegmentFootprint) = UpperCase(FootprintName) then
                                 begin
-                                    if AddProjectionBoardTrack(
-                                        Board,
-                                        DestinationLayer,
-                                        Board.XOrigin + MMsToCoord(X1MM),
-                                        Board.YOrigin + MMsToCoord(Y1MM),
-                                        Board.XOrigin + MMsToCoord(X2MM),
-                                        Board.YOrigin + MMsToCoord(Y2MM),
-                                        LineWidth
-                                    ) then
+                                    if PrimitiveKind = 'ARC' then
                                     begin
-                                        FootprintTracksCreated := FootprintTracksCreated + 1;
-                                        TracksCreated := TracksCreated + 1;
-                                        SegmentsMatched := SegmentsMatched + 1;
+                                        if AddProjectionBoardArc(
+                                            Board,
+                                            DestinationLayer,
+                                            Board.XOrigin + MMsToCoord(CenterXMM),
+                                            Board.YOrigin + MMsToCoord(CenterYMM),
+                                            MMsToCoord(RadiusMM),
+                                            StartAngle,
+                                            EndAngle,
+                                            LineWidth
+                                        ) then
+                                        begin
+                                            FootprintPrimitivesCreated := FootprintPrimitivesCreated + 1;
+                                            ArcsCreated := ArcsCreated + 1;
+                                            SegmentsMatched := SegmentsMatched + 1;
+                                        end;
+                                    end
+                                    else
+                                    begin
+                                        if AddProjectionBoardTrack(
+                                            Board,
+                                            DestinationLayer,
+                                            Board.XOrigin + MMsToCoord(X1MM),
+                                            Board.YOrigin + MMsToCoord(Y1MM),
+                                            Board.XOrigin + MMsToCoord(X2MM),
+                                            Board.YOrigin + MMsToCoord(Y2MM),
+                                            LineWidth
+                                        ) then
+                                        begin
+                                            FootprintPrimitivesCreated := FootprintPrimitivesCreated + 1;
+                                            TracksCreated := TracksCreated + 1;
+                                            SegmentsMatched := SegmentsMatched + 1;
+                                        end;
                                     end;
                                 end;
                             end;
@@ -3909,7 +4195,7 @@ begin
                         PCBServer.PostProcess;
                     end;
 
-                    if FootprintTracksCreated > 0 then
+                    if FootprintPrimitivesCreated > 0 then
                     begin
                         FootprintsModified := FootprintsModified + 1;
                         ModifiedFootprints.Add('"' + JSONEscapeString(FootprintName) + '"');
@@ -3938,6 +4224,8 @@ begin
         AddJSONInteger(ResultProps, 'footprints_modified', FootprintsModified);
         AddJSONInteger(ResultProps, 'tracks_removed', TracksRemoved);
         AddJSONInteger(ResultProps, 'tracks_created', TracksCreated);
+        AddJSONInteger(ResultProps, 'arcs_created', ArcsCreated);
+        AddJSONInteger(ResultProps, 'primitives_created', TracksCreated + ArcsCreated);
         ResultProps.Add(BuildJSONArray(SkippedFootprints, 'skipped_footprints'));
         ResultProps.Add(BuildJSONArray(ModifiedFootprints, 'modified_footprints'));
 

@@ -1646,6 +1646,64 @@ begin
     end;
 end;
 
+function Parse3DBodySelectedDumpCommand(MoveText: String; var DestinationNumber: Integer; var LineWidthMM: Double): Boolean;
+var
+    FirstSeparatorPos: Integer;
+    SecondSeparatorPos: Integer;
+    CommandName: String;
+    RemainderText: String;
+    DestinationText: String;
+    LineWidthText: String;
+begin
+    Result := False;
+    DestinationNumber := 0;
+    LineWidthMM := 0;
+    MoveText := Trim(MoveText);
+
+    FirstSeparatorPos := Pos('|', MoveText);
+    if FirstSeparatorPos <= 1 then
+        Exit;
+
+    CommandName := UpperCase(Trim(Copy(MoveText, 1, FirstSeparatorPos - 1)));
+    if CommandName <> '3D_BODY_SELECTED_DUMP' then
+        Exit;
+
+    RemainderText := Copy(MoveText, FirstSeparatorPos + 1, Length(MoveText) - FirstSeparatorPos);
+    SecondSeparatorPos := Pos('|', RemainderText);
+    if SecondSeparatorPos <= 1 then
+        Exit;
+
+    DestinationText := Copy(RemainderText, 1, SecondSeparatorPos - 1);
+    LineWidthText := Copy(RemainderText, SecondSeparatorPos + 1, Length(RemainderText) - SecondSeparatorPos);
+
+    if not TryParsePositiveInteger(DestinationText, DestinationNumber) then
+        Exit;
+
+    if (DestinationNumber < 1) or (DestinationNumber > 32) then
+        Exit;
+
+    LineWidthMM := SafeStrToFloat(LineWidthText);
+    Result := LineWidthMM > 0;
+end;
+
+function Find3DBodySelectedDumpCommand(LayerMoves: TStringList; var DestinationNumber: Integer; var LineWidthMM: Double): Boolean;
+var
+    i: Integer;
+begin
+    Result := False;
+    DestinationNumber := 0;
+    LineWidthMM := 0;
+
+    for i := 0 to LayerMoves.Count - 1 do
+    begin
+        if Parse3DBodySelectedDumpCommand(LayerMoves[i], DestinationNumber, LineWidthMM) then
+        begin
+            Result := True;
+            Exit;
+        end;
+    end;
+end;
+
 function Parse3DBodyTextCommand(MoveText: String; var DestinationNumber: Integer; var ReferenceFootprintName: String): Boolean;
 var
     FirstSeparatorPos: Integer;
@@ -2855,6 +2913,176 @@ begin
     begin
         if Abs(CoordToMMs(Y)) > 100 then
             Result := Y - Board.YOrigin;
+    end;
+end;
+
+function DumpSelectedProjectionPrimitives(ExcludeFootprints: TStringList; DestinationLayerNumber: Integer; LineWidthMM: Double): String;
+var
+    PcbLib              : IPCB_Library;
+    Board               : IPCB_Board;
+    Footprint           : IPCB_LibComponent;
+    PrimitiveIterator   : IPCB_GroupIterator;
+    Primitive           : IPCB_Primitive;
+    Track               : IPCB_Track;
+    Arc                 : IPCB_Arc;
+    DestinationLayer    : TLayer;
+    LineWidth           : TCoord;
+    ResultProps         : TStringList;
+    PrimitiveArray      : TStringList;
+    PrimitiveProps      : TStringList;
+    OutputLines         : TStringList;
+    FootprintName       : String;
+    SelectedTracks      : Integer;
+    SelectedArcs        : Integer;
+    X1MM, Y1MM          : Double;
+    X2MM, Y2MM          : Double;
+    DXMM, DYMM          : Double;
+    RadiusMM            : Double;
+    SweepDeg            : Double;
+    ArcLengthMM         : Double;
+begin
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    if PcbLib = Nil then
+    begin
+        Result := '{"success": false, "error": "No PCB library document is currently active. Open a .PcbLib file first."}';
+        Exit;
+    end;
+
+    if (DestinationLayerNumber < 1) or (DestinationLayerNumber > 32) then
+    begin
+        Result := '{"success": false, "error": "Mechanical layer number must be between 1 and 32."}';
+        Exit;
+    end;
+
+    if LineWidthMM <= 0 then
+    begin
+        Result := '{"success": false, "error": "Line width must be greater than zero."}';
+        Exit;
+    end;
+
+    Footprint := PcbLib.CurrentComponent;
+    if Footprint = Nil then
+    begin
+        Result := '{"success": false, "error": "No current footprint is active in the PCB library."}';
+        Exit;
+    end;
+
+    FootprintName := Footprint.Name;
+    if StringListContainsText(ExcludeFootprints, FootprintName) then
+    begin
+        Result := '{"success": false, "error": "The current footprint is excluded."}';
+        Exit;
+    end;
+
+    Board := PcbLib.Board;
+    DestinationLayer := ILayer.MechanicalLayer(DestinationLayerNumber);
+    LineWidth := MMsToCoord(LineWidthMM);
+    ResultProps := TStringList.Create;
+    PrimitiveArray := TStringList.Create;
+    SelectedTracks := 0;
+    SelectedArcs := 0;
+
+    try
+        PrimitiveIterator := Footprint.GroupIterator_Create;
+        if PrimitiveIterator = Nil then
+        begin
+            Result := '{"success": false, "error": "Failed to create selected primitive iterator."}';
+            Exit;
+        end;
+
+        try
+            PrimitiveIterator.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject));
+            PrimitiveIterator.AddFilter_LayerSet(MkSet(DestinationLayer));
+
+            Primitive := PrimitiveIterator.FirstPCBObject;
+            while Primitive <> Nil do
+            begin
+                if (Primitive.ObjectId = eTrackObject) and Primitive.Selected then
+                begin
+                    Track := Primitive;
+                    if Track.Width = LineWidth then
+                    begin
+                        SelectedTracks := SelectedTracks + 1;
+                        X1MM := CoordToMMs(PCBLibLocalX(Board, Track.x1));
+                        Y1MM := CoordToMMs(PCBLibLocalY(Board, Track.y1));
+                        X2MM := CoordToMMs(PCBLibLocalX(Board, Track.x2));
+                        Y2MM := CoordToMMs(PCBLibLocalY(Board, Track.y2));
+                        DXMM := X2MM - X1MM;
+                        DYMM := Y2MM - Y1MM;
+
+                        PrimitiveProps := TStringList.Create;
+                        try
+                            AddJSONProperty(PrimitiveProps, 'kind', 'LINE');
+                            AddJSONInteger(PrimitiveProps, 'index', SelectedTracks + SelectedArcs);
+                            AddJSONNumber(PrimitiveProps, 'x1_mm', X1MM);
+                            AddJSONNumber(PrimitiveProps, 'y1_mm', Y1MM);
+                            AddJSONNumber(PrimitiveProps, 'x2_mm', X2MM);
+                            AddJSONNumber(PrimitiveProps, 'y2_mm', Y2MM);
+                            AddJSONNumber(PrimitiveProps, 'length_mm', Sqrt((DXMM * DXMM) + (DYMM * DYMM)));
+                            AddJSONNumber(PrimitiveProps, 'line_width_mm', CoordToMMs(Track.Width));
+                            PrimitiveArray.Add(BuildJSONObject(PrimitiveProps, 1));
+                        finally
+                            PrimitiveProps.Free;
+                        end;
+                    end;
+                end
+                else if (Primitive.ObjectId = eArcObject) and Primitive.Selected then
+                begin
+                    Arc := Primitive;
+                    if Arc.LineWidth = LineWidth then
+                    begin
+                        SelectedArcs := SelectedArcs + 1;
+                        RadiusMM := CoordToMMs(Arc.Radius);
+                        SweepDeg := Arc.EndAngle - Arc.StartAngle;
+                        while SweepDeg < 0 do
+                            SweepDeg := SweepDeg + 360.0;
+                        while SweepDeg > 360.0 do
+                            SweepDeg := SweepDeg - 360.0;
+                        ArcLengthMM := RadiusMM * SweepDeg * 3.141592653589793 / 180.0;
+
+                        PrimitiveProps := TStringList.Create;
+                        try
+                            AddJSONProperty(PrimitiveProps, 'kind', 'ARC');
+                            AddJSONInteger(PrimitiveProps, 'index', SelectedTracks + SelectedArcs);
+                            AddJSONNumber(PrimitiveProps, 'center_x_mm', CoordToMMs(PCBLibLocalX(Board, Arc.XCenter)));
+                            AddJSONNumber(PrimitiveProps, 'center_y_mm', CoordToMMs(PCBLibLocalY(Board, Arc.YCenter)));
+                            AddJSONNumber(PrimitiveProps, 'radius_mm', RadiusMM);
+                            AddJSONNumber(PrimitiveProps, 'start_angle_deg', Arc.StartAngle);
+                            AddJSONNumber(PrimitiveProps, 'end_angle_deg', Arc.EndAngle);
+                            AddJSONNumber(PrimitiveProps, 'sweep_deg', SweepDeg);
+                            AddJSONNumber(PrimitiveProps, 'arc_length_mm', ArcLengthMM);
+                            AddJSONNumber(PrimitiveProps, 'line_width_mm', CoordToMMs(Arc.LineWidth));
+                            PrimitiveArray.Add(BuildJSONObject(PrimitiveProps, 1));
+                        finally
+                            PrimitiveProps.Free;
+                        end;
+                    end;
+                end;
+                Primitive := PrimitiveIterator.NextPCBObject;
+            end;
+        finally
+            Footprint.GroupIterator_Destroy(PrimitiveIterator);
+        end;
+
+        AddJSONBoolean(ResultProps, 'success', True);
+        AddJSONProperty(ResultProps, 'footprint', FootprintName);
+        AddJSONInteger(ResultProps, 'mechanical_layer', DestinationLayerNumber);
+        AddJSONNumber(ResultProps, 'line_width_mm', LineWidthMM);
+        AddJSONInteger(ResultProps, 'selected_tracks', SelectedTracks);
+        AddJSONInteger(ResultProps, 'selected_arcs', SelectedArcs);
+        AddJSONInteger(ResultProps, 'selected_primitives_count', SelectedTracks + SelectedArcs);
+        ResultProps.Add(BuildJSONArray(PrimitiveArray, 'selected_primitives'));
+
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := OutputLines.Text;
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        ResultProps.Free;
+        PrimitiveArray.Free;
     end;
 end;
 
@@ -4605,6 +4833,12 @@ begin
     if Find3DBodyTrackSelectCommand(LayerMoves, ProjectionLayerNumber, ProjectionLineWidthMM) then
     begin
         Result := SelectPCBLibraryProjectionTracksForEditor(ExcludeFootprints, ProjectionLayerNumber, ProjectionLineWidthMM);
+        Exit;
+    end;
+
+    if Find3DBodySelectedDumpCommand(LayerMoves, ProjectionLayerNumber, ProjectionLineWidthMM) then
+    begin
+        Result := DumpSelectedProjectionPrimitives(ExcludeFootprints, ProjectionLayerNumber, ProjectionLineWidthMM);
         Exit;
     end;
 

@@ -22,6 +22,7 @@ OCCLUSION_EPSILON_MM = 0.01
 POINT_EPSILON_MM = 1e-5
 OUTPUT_COORD_DECIMALS = 3
 OUTPUT_MIN_LINE_LENGTH_MM = 0.03
+PROJECTION_LINE_WIDTH_MM = 0.1
 OPTIMIZE_POINT_GRID_MM = 0.001
 COLLINEAR_DISTANCE_TOLERANCE_MM = 0.01
 COLLINEAR_GAP_TOLERANCE_MM = 0.02
@@ -30,6 +31,12 @@ ARC_MIN_SWEEP_DEG = 3.0
 ARC_MAX_SWEEP_DEG = 355.0
 ARC_MERGE_ANGLE_TOLERANCE_DEG = 0.5
 ARC_BBOX_TOLERANCE_MM = 0.05
+MIN_VISIBLE_LINE_LENGTH_FACTOR = 1.0
+MIN_VISIBLE_ARC_LENGTH_FACTOR = 1.0
+MIN_VISIBLE_ARC_RADIUS_FACTOR = 1.0
+STROKE_COVERAGE_DISTANCE_FACTOR = 0.5
+STROKE_COVERAGE_MAX_LENGTH_FACTOR = 4.0
+STROKE_COVERAGE_SAMPLE_STEP_FACTOR = 0.33
 
 
 NUM_RE = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][+-]?\d+)?"
@@ -1225,6 +1232,182 @@ def merge_arc_primitives(primitives: list[dict]) -> list[dict]:
     return passthrough + merged
 
 
+def primitive_arc_sweep_degrees(primitive: dict) -> float:
+    start = float(primitive["start"])
+    end = float(primitive["end"])
+    while end < start:
+        end += 360.0
+    return end - start
+
+
+def primitive_length(primitive: dict) -> float:
+    if primitive.get("kind") == "LINE":
+        return math.hypot(
+            float(primitive["x2"]) - float(primitive["x1"]),
+            float(primitive["y2"]) - float(primitive["y1"]),
+        )
+    if primitive.get("kind") == "ARC":
+        return float(primitive["r"]) * math.radians(primitive_arc_sweep_degrees(primitive))
+    return 0.0
+
+
+def arc_endpoint(primitive: dict, angle_degrees: float) -> tuple[float, float]:
+    radius = float(primitive["r"])
+    angle = math.radians(angle_degrees)
+    return (
+        float(primitive["cx"]) + radius * math.cos(angle),
+        float(primitive["cy"]) + radius * math.sin(angle),
+    )
+
+
+def distance_point_to_segment(
+    point: tuple[float, float],
+    start: tuple[float, float],
+    end: tuple[float, float],
+) -> float:
+    dx = end[0] - start[0]
+    dy = end[1] - start[1]
+    length_sq = dx * dx + dy * dy
+    if length_sq <= 1e-12:
+        return math.hypot(point[0] - start[0], point[1] - start[1])
+    projection = ((point[0] - start[0]) * dx + (point[1] - start[1]) * dy) / length_sq
+    projection = max(0.0, min(1.0, projection))
+    closest = (start[0] + projection * dx, start[1] + projection * dy)
+    return math.hypot(point[0] - closest[0], point[1] - closest[1])
+
+
+def distance_point_to_arc(point: tuple[float, float], primitive: dict) -> float:
+    center = (float(primitive["cx"]), float(primitive["cy"]))
+    radius = float(primitive["r"])
+    start = float(primitive["start"])
+    end = float(primitive["end"])
+    point_angle = math.degrees(math.atan2(point[1] - center[1], point[0] - center[0]))
+    while point_angle < 0:
+        point_angle += 360.0
+
+    if angle_in_arc_sweep(point_angle, start, end):
+        return abs(math.hypot(point[0] - center[0], point[1] - center[1]) - radius)
+
+    return min(
+        math.hypot(point[0] - arc_endpoint(primitive, start)[0], point[1] - arc_endpoint(primitive, start)[1]),
+        math.hypot(point[0] - arc_endpoint(primitive, end)[0], point[1] - arc_endpoint(primitive, end)[1]),
+    )
+
+
+def distance_point_to_primitive(point: tuple[float, float], primitive: dict) -> float:
+    if primitive.get("kind") == "LINE":
+        return distance_point_to_segment(
+            point,
+            (float(primitive["x1"]), float(primitive["y1"])),
+            (float(primitive["x2"]), float(primitive["y2"])),
+        )
+    if primitive.get("kind") == "ARC":
+        return distance_point_to_arc(point, primitive)
+    return float("inf")
+
+
+def primitive_sample_points(primitive: dict, step_mm: float) -> list[tuple[float, float]]:
+    length = primitive_length(primitive)
+    sample_count = max(2, min(64, int(math.ceil(length / step_mm)) + 1))
+
+    if primitive.get("kind") == "LINE":
+        x1 = float(primitive["x1"])
+        y1 = float(primitive["y1"])
+        x2 = float(primitive["x2"])
+        y2 = float(primitive["y2"])
+        return [
+            (
+                x1 + (x2 - x1) * index / (sample_count - 1),
+                y1 + (y2 - y1) * index / (sample_count - 1),
+            )
+            for index in range(sample_count)
+        ]
+
+    if primitive.get("kind") == "ARC":
+        start = float(primitive["start"])
+        sweep = primitive_arc_sweep_degrees(primitive)
+        return [
+            arc_endpoint(primitive, start + sweep * index / (sample_count - 1))
+            for index in range(sample_count)
+        ]
+
+    return []
+
+
+def primitive_is_stroke_covered(candidate: dict, cover: dict, tolerance_mm: float, sample_step_mm: float) -> bool:
+    samples = primitive_sample_points(candidate, sample_step_mm)
+    if not samples:
+        return False
+    return all(distance_point_to_primitive(point, cover) <= tolerance_mm for point in samples)
+
+
+def remove_small_visible_primitives(primitives: list[dict]) -> tuple[list[dict], dict[str, int]]:
+    min_line_length = PROJECTION_LINE_WIDTH_MM * MIN_VISIBLE_LINE_LENGTH_FACTOR
+    min_arc_length = PROJECTION_LINE_WIDTH_MM * MIN_VISIBLE_ARC_LENGTH_FACTOR
+    min_arc_radius = PROJECTION_LINE_WIDTH_MM * MIN_VISIBLE_ARC_RADIUS_FACTOR
+    result: list[dict] = []
+    stats = {
+        "short_lines_removed": 0,
+        "short_arcs_removed": 0,
+        "small_radius_arcs_removed": 0,
+    }
+
+    for primitive in primitives:
+        length = primitive_length(primitive)
+        if primitive.get("kind") == "LINE" and length < min_line_length:
+            stats["short_lines_removed"] += 1
+            continue
+        if primitive.get("kind") == "ARC":
+            if length < min_arc_length:
+                stats["short_arcs_removed"] += 1
+                continue
+            if float(primitive["r"]) < min_arc_radius:
+                stats["small_radius_arcs_removed"] += 1
+                continue
+        result.append(primitive)
+
+    return result, stats
+
+
+def remove_stroke_covered_primitives(primitives: list[dict]) -> tuple[list[dict], dict[str, int]]:
+    max_candidate_length = PROJECTION_LINE_WIDTH_MM * STROKE_COVERAGE_MAX_LENGTH_FACTOR
+    coverage_tolerance = PROJECTION_LINE_WIDTH_MM * STROKE_COVERAGE_DISTANCE_FACTOR
+    sample_step = max(PROJECTION_LINE_WIDTH_MM * STROKE_COVERAGE_SAMPLE_STEP_FACTOR, OPTIMIZE_POINT_GRID_MM)
+    lengths = [primitive_length(primitive) for primitive in primitives]
+    result: list[dict] = []
+    stats = {
+        "stroke_covered_lines_removed": 0,
+        "stroke_covered_arcs_removed": 0,
+    }
+
+    for index, primitive in enumerate(primitives):
+        length = lengths[index]
+        covered = False
+        if length <= max_candidate_length:
+            for other_index, other in enumerate(primitives):
+                if other_index == index:
+                    continue
+                other_length = lengths[other_index]
+                if other_length < length - POINT_EPSILON_MM:
+                    continue
+                if abs(other_length - length) <= POINT_EPSILON_MM and other_index > index:
+                    continue
+                if primitive_is_stroke_covered(primitive, other, coverage_tolerance, sample_step):
+                    covered = True
+                    break
+
+        if covered:
+            if primitive.get("kind") == "ARC":
+                stats["stroke_covered_arcs_removed"] += 1
+            else:
+                stats["stroke_covered_lines_removed"] += 1
+            continue
+
+        result.append(primitive)
+
+    return result, stats
+
+
 def optimize_segments_to_primitives(
     segments: list[tuple[float, float, float, float]],
 ) -> tuple[list[dict], dict]:
@@ -1235,6 +1418,9 @@ def optimize_segments_to_primitives(
         primitives.extend(primitives_from_path(path))
     primitives = merge_line_primitives(primitives)
     primitives = merge_arc_primitives(primitives)
+    pre_prune_primitive_count = len(primitives)
+    primitives, small_visible_stats = remove_small_visible_primitives(primitives)
+    primitives, stroke_coverage_stats = remove_stroke_covered_primitives(primitives)
 
     line_keys: set[tuple[tuple[int, int], tuple[int, int]]] = set()
     arc_keys: set[tuple[int, int, int, int, int]] = set()
@@ -1269,9 +1455,13 @@ def optimize_segments_to_primitives(
         "input_segments": len(segments),
         "deduped_segments": len(deduped),
         "paths": len(paths),
+        "pre_prune_primitives": pre_prune_primitive_count,
+        "projection_line_width_mm": PROJECTION_LINE_WIDTH_MM,
         "optimized_primitives": len(result),
         "optimized_lines": sum(1 for primitive in result if primitive.get("kind") == "LINE"),
         "optimized_arcs": sum(1 for primitive in result if primitive.get("kind") == "ARC"),
+        **small_visible_stats,
+        **stroke_coverage_stats,
     }
 
 

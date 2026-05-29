@@ -184,6 +184,101 @@ The cool thing about layout duplication this way as opposed to with Altium's bui
 - `set_pcb_library_pad_shapes`: Set all copper pad shapes in the currently active .PcbLib document to Rounded Rectangle, excluding any footprint names passed in `exclude_footprint_names` (for example `["53398-0271"]`). Uses Altium's `eRoundedRectangular` pad shape enum.
 - `move_pcb_library_mechanical_layers`: Move primitives between mechanical layers in the currently active .PcbLib document, excluding any footprint names passed in `exclude_footprint_names` (for example `["53398-0271"]`). Layer moves are passed as `source|destination` strings in `layer_moves`, for example `["13|1", "15|3"]`.
 
+#### Adding 3D STEP bodies to PcbLib footprints
+
+Use the vendor STEP file unchanged. Do not rotate, mirror, translate, or add PcbLib-origin offsets to the STEP geometry itself. Altium stores a generic STEP body's placement separately from the model file, using the 3D Body location, model rotation, and standoff/height fields.
+
+The common placement state is:
+
+- body location: X/Y in the footprint/PcbLib coordinate system.
+- model orientation: Rotation X, Rotation Y, and Rotation Z in the Generic 3D Model properties.
+- vertical placement: Standoff Height and Overall Height.
+
+For documents with a non-zero PcbLib board origin, keep the correction in the body/model placement state. If code or a metadata tool writes raw PcbLib coordinates, calculate:
+
+```text
+raw_x = Board.XOrigin + local_footprint_x
+raw_y = Board.YOrigin + local_footprint_y
+```
+
+`Board.XOrigin` and `Board.YOrigin` can be non-zero in a PcbLib, so a footprint-local body center at `(0, 0)` may be stored at raw coordinates offset by the library origin. Read those origin values from `3D_BODY_DUMP` and apply them only to the Altium body snap point. Do not edit STEP `CARTESIAN_POINT` records to compensate for a PcbLib origin.
+
+The safe manual Altium flow is:
+
+1. Focus the target footprint in the `.PcbLib`.
+2. Place/import the original vendor STEP as a Generic 3D Body.
+3. Set X/Y, Rotation X/Y/Z, Model Z/Standoff Height, and Overall Height in Altium's 3D Body Properties panel.
+4. If scripted import left the body at raw local coordinates instead of origin-adjusted PcbLib coordinates, run `3D_BODY_FIX_ORIGIN_OFFSET|<footprint>` or `3D_BODY_FIX_ORIGIN_OFFSET|*`. This moves the Altium 3D body object by `Board.XOrigin`/`Board.YOrigin`; it does not edit STEP geometry or model rotation.
+5. Run `3D_BODY_DUMP` and verify the origin-corrected `left_mm`, `right_mm`, `bottom_mm`, and `top_mm` are centered around the footprint.
+6. After any scripted PcbLib modification, run `PCB_POSTPROCESS` before saving.
+
+The script may safely create a basic STEP body container and set supported `IPCB_ComponentBody` height fields:
+
+```pascal
+PcbLib.CurrentComponent := Footprint;
+Board := PcbLib.Board;
+
+StepBody := PCBServer.PCBObjectFactory(eComponentBodyObject, eNoDimension, eCreate_Default);
+StepBody.Layer := ILayer.MechanicalLayer(1);
+Model := StepBody.ModelFactory_FromFilename(StepPath, False);
+StepBody.Model := Model;
+StepBody.SetState_FromModel;
+StepBody.Layer := ILayer.MechanicalLayer(1);
+StepBody.StandoffHeight := MMsToCoord(StandoffMm);
+StepBody.OverallHeight := MMsToCoord(OverallHeightMm);
+
+PCBServer.SendMessageToRobots(StepBody.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+Board.AddPCBObject(StepBody);
+PCBServer.SendMessageToRobots(StepBody.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+```
+
+Do not use DelphiScript to transform the STEP model data. Apply placement through the 3D Body object/model state and leave the STEP file byte-for-byte unchanged. In Altium Designer 26.6, the following have caused compile errors or `ScriptingSystem.dll` access violations:
+
+- assigning non-existent properties such as `Body.ModelRotationX` or `Model.ROTX`.
+- assigning `IPCB_ComponentBody.X`, `IPCB_ComponentBody.Y`, `RotationX`, `RotationY`, or `RotationZ` from the PcbLib script path, either before or after `Board.AddPCBObject`.
+- using .NET/property-panel wrapper members from DelphiScript, such as `GetState_ModelDescriptorString`.
+- calling `IPCB_Model.SetState(...)` without pushing the model back onto the body and rebuilding the body from the model.
+- deleting existing 3D bodies and re-importing replacements in the same scripted operation.
+
+`3D_BODY_IMPORT|...` is therefore intentionally non-mutating in this MCP script. It returns the requested placement values for review, but it does not delete or re-add bodies.
+
+The generic scripted placement sequence for an existing body is:
+
+```pascal
+Model := Body.GetModel;
+Model.SetState(RotX, RotY, RotZ, MMsToCoord(ModelZMM));
+Body.SetModel(Model);
+Body.SetState_FromModel;
+Body.SetState_SnapPointX(Board.XOrigin + MMsToCoord(LocalXMM));
+Body.SetState_SnapPointY(Board.YOrigin + MMsToCoord(LocalYMM));
+Body.StandoffHeight := MMsToCoord(StandoffMM);
+Body.OverallHeight := MMsToCoord(OverallHeightMM);
+```
+
+`SetState_FromModel` can reset the body reference point, so always set `SetState_SnapPointX/Y` after it. Add `Board.XOrigin`/`Board.YOrigin` when writing raw snap points so the 3D body stays in the footprint coordinate frame.
+
+Avoid part-number-specific refresh or generator helpers in the common MCP script. Use explicit footprint names, explicit STEP file paths, and explicit Altium placement values, then verify placement with `3D_BODY_DUMP` before saving.
+
+Supported generic helper commands:
+
+- `3D_BODY_DUMP`: reports body bounding boxes, raw coordinates, board origin, standoff height, and overall height.
+- `3D_BODY_SET_HEIGHTS|<footprint>|<standoff_mm>|<overall_height_mm>`: updates existing 3D body height fields without touching STEP geometry or model rotation. Use `*` as the footprint name to update all footprints.
+- `3D_BODY_SET_PLACEMENT|<footprint>|<local_x_mm>|<local_y_mm>|<rot_x_deg>|<rot_y_deg>|<rot_z_deg>|<model_z_mm>|<standoff_mm>|<overall_height_mm>`: updates an existing Generic 3D Body's Altium placement state. It uses `IPCB_Model.SetState`, `IPCB_ComponentBody.SetModel`, `SetState_FromModel`, then `SetState_SnapPointX/Y` with `Board.XOrigin + local_x` and `Board.YOrigin + local_y`. It does not transform or rewrite the STEP file.
+- `3D_BODY_FIX_ORIGIN_OFFSET|<footprint>`: moves existing 3D bodies whose raw bounding rectangle is still near local origin by the active PcbLib `Board.XOrigin`/`Board.YOrigin`. Use `*` as the footprint name to repair all unshifted bodies while skipping already-shifted bodies.
+- `FOOTPRINT_PRIMITIVE_DUMP|<footprint>`: dumps pads, tracks, arcs, regions, and body primitives for a single footprint.
+- `PCB_POSTPROCESS`: call after any PcbLib modification to close any leftover PCB server transaction and redraw the editor.
+
+Example placement repair after a body imported with the right STEP file but default Generic model orientation:
+
+```text
+move_pcb_library_mechanical_layers(
+  exclude_footprint_names=[],
+  layer_moves=["3D_BODY_SET_PLACEMENT|<footprint>|<local_x_mm>|<local_y_mm>|<rot_x_deg>|<rot_y_deg>|<rot_z_deg>|<model_z_mm>|<standoff_mm>|<overall_height_mm>"]
+)
+```
+
+Keep family-specific placement tables outside this README. The common workflow is to capture placement from a known-good footprint or mechanical drawing, apply it with `3D_BODY_SET_PLACEMENT`, and verify the resulting raw and origin-corrected body bounds with `3D_BODY_DUMP`.
+
 #### 3D STEP silhouette projections
 
 The PcbLib mechanical-layer tool also has internal commands used to create Draftsman-style 2D silhouettes from embedded 3D STEP bodies. The intended flow is:
@@ -210,7 +305,7 @@ The PcbLib mechanical-layer tool also has internal commands used to create Draft
 
 The extractor reads Altium's OLE compound-file `Models` storage directly and decompresses the embedded zlib STEP streams. Do not use a manually downloaded model when the PcbLib has `MODEL.EMBED=TRUE`; extract the embedded stream and keep its original `MODEL.NAME` filename.
 
-Do not infer projection rotation from footprint names. The generator reads the PcbLib's embedded model state records (`MODEL.NAME`, `MODEL.3D.ROTX`, `MODEL.3D.ROTY`, `MODEL.3D.ROTZ`, `MODEL.2D.ROTATION`, and `IDENTIFIER`) and derives the correction from that metadata. It prefers the exact extracted `MODEL.NAME` file, and it also allows a model identifier such as `DF40C-100DS` to match footprint variants such as `DF40C-100DS-0.4V`. It applies that 3D placement before filtering the STEP topology to top-facing visible face boundaries, so hidden/back-side edges are not emitted. This keeps top-entry, side-entry, and future connector variants tied to their actual embedded 3D body placement instead of a hard-coded suffix such as `GHS-TBT`.
+Do not infer projection rotation from footprint names. The generator reads the PcbLib's embedded model state records (`MODEL.NAME`, `MODEL.3D.ROTX`, `MODEL.3D.ROTY`, `MODEL.3D.ROTZ`, `MODEL.2D.ROTATION`, and `IDENTIFIER`) and derives the correction from that metadata. It prefers the exact extracted `MODEL.NAME` file, and it can also match a model identifier prefix to footprint variants when the naming scheme is shared. It applies that 3D placement before filtering the STEP topology to top-facing visible face boundaries, so hidden/back-side edges are not emitted. This keeps top-entry, side-entry, and future connector variants tied to their actual embedded 3D body placement instead of a hard-coded suffix.
 
 The Altium importer accepts the new optimized `LINE`/`ARC` records and still accepts the legacy five-field line format. The cleanup, count, select, and text-placement helpers treat tracks and arcs as projection primitives, so rerunning `3D_BODY_EDITOR_CLEAN|layer|width` removes both primitive types.
 
@@ -219,6 +314,28 @@ For tuning the projection optimizer, select example generated tracks/arcs in the
 Use `3D_BODY_PROJECTION|<mechanical_layer>|<line_width_mm>` only as a fallback. It draws the 3D body's bounding rectangle, not the real STEP silhouette.
 
 Do not save the PcbLib automatically after these operations. Leave the document dirty and let the user inspect the mechanical layer and save manually.
+
+If a PcbLib-modifying script hit an access violation or Altium later refuses to save with `A command is currently active and save cannot be completed at this time`, run the PcbLib save-state recovery command once:
+
+```text
+move_pcb_library_mechanical_layers(
+  exclude_footprint_names=[],
+  layer_moves=["PCB_POSTPROCESS"]
+)
+```
+
+`PCB_POSTPROCESS` intentionally calls `PCBServer.PostProcess`, then sends `PCB:Cancel`, clears selection, and redraws the PCB editor. This is a recovery for an unmatched `PCBServer.PreProcess` left behind by a failed PcbLib script command. After any large scripted PcbLib modification, especially one that deleted/re-added footprint primitives or 3D bodies, call this recovery before trying to save if Altium still appears to be inside an active command.
+
+If normal `Ctrl+S` still shows the warning after recovery, save through Altium's workspace process:
+
+```text
+move_pcb_library_mechanical_layers(
+  exclude_footprint_names=[],
+  layer_moves=["SAVE_DOCUMENT"]
+)
+```
+
+In Altium Designer 26.6 this direct `WorkspaceManager:SaveObject` path succeeded after the PcbLib title still showed `*` and the normal save UI remained blocked. If the warning dialog appears, choose `No`; do not save a copy unless a separate duplicate library file is intended.
 
 #### Deleting primitives from PcbLib safely
 
@@ -230,10 +347,12 @@ Use this pattern instead:
 2. Set `PcbLib.CurrentComponent := Footprint` for the footprint being cleaned.
 3. Refresh the view with `Board.ViewManager_FullUpdate` when `Board` is available.
 4. Iterate the footprint's primitives and set `Primitive.Selected := True` only on objects that should be deleted.
-5. Delete through the editor with `Client.SendMessage('PCB:DeleteObjects', 'Object=FOCUSED', 255, Client.CurrentView)`.
+5. Delete through the editor with `Client.SendMessage('PCB:DeleteObjects', 'Object=SELECTED', 255, Client.CurrentView)`.
 6. Clear selection again and redraw with `Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView)`.
 
-The `3D_BODY_EDITOR_CLEAN|layer|width` command follows this select-and-delete approach for generated projection tracks. Avoid using direct-delete cleanup for generated PcbLib projections unless there is a very specific reason and it has been tested in the target Altium version.
+Use `Object=SELECTED` when more than one primitive may be selected. `Object=FOCUSED` can delete only one selected 3D body and leave stale duplicate bodies attached to the footprint.
+
+The `3D_BODY_EDITOR_CLEAN|layer|width` command follows this select-and-delete approach for generated projection tracks. Avoid using direct-delete cleanup for generated PcbLib projections or 3D component bodies unless there is a very specific reason and it has been tested in the target Altium version.
 
 ### Both
 - `get_screenshot`: Take a screenshot of the Altium PCB window or Schematic Window that is the current view. It should auto focus either of these if it is open but a different document type is focused. Note: Claude is not very good at analyzing images like circuits or layout screenshots. ChatGPT is very good at it, but they haven't released MCP yet, so this functionality will be more useful in the future.

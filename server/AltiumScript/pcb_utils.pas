@@ -1572,6 +1572,22 @@ begin
     end;
 end;
 
+function FindPCBPostProcessCommand(LayerMoves: TStringList): Boolean;
+var
+    i: Integer;
+begin
+    Result := False;
+
+    for i := 0 to LayerMoves.Count - 1 do
+    begin
+        if UpperCase(Trim(LayerMoves[i])) = 'PCB_POSTPROCESS' then
+        begin
+            Result := True;
+            Exit;
+        end;
+    end;
+end;
+
 function FindSaveDocumentCommand(LayerMoves: TStringList): Boolean;
 var
     i: Integer;
@@ -1881,6 +1897,314 @@ begin
     end;
 end;
 
+function Parse3DBodyImportCommand(MoveText: String; var FootprintName, StepPath: String; var LocalXMM, LocalYMM, RotX, RotY, RotZ, StandoffMM, OverallHeightMM: Double): Boolean;
+var
+    CommandName: String;
+    Fields     : TStringList;
+    Remainder  : String;
+    Separator  : Integer;
+begin
+    Result := False;
+    FootprintName := '';
+    StepPath := '';
+    LocalXMM := 0;
+    LocalYMM := 0;
+    RotX := 0;
+    RotY := 0;
+    RotZ := 0;
+    StandoffMM := 0;
+    OverallHeightMM := 0;
+
+    MoveText := Trim(MoveText);
+    Separator := Pos('|', MoveText);
+    if Separator <= 1 then
+        Exit;
+
+    CommandName := UpperCase(Trim(Copy(MoveText, 1, Separator - 1)));
+    if CommandName <> '3D_BODY_IMPORT' then
+        Exit;
+
+    Remainder := Copy(MoveText, Separator + 1, Length(MoveText) - Separator);
+    Fields := TStringList.Create;
+    try
+        Fields.Delimiter := '|';
+        Fields.StrictDelimiter := True;
+        Fields.DelimitedText := Remainder;
+
+        if Fields.Count < 9 then
+            Exit;
+
+        FootprintName := Trim(Fields[0]);
+        StepPath := Trim(Fields[1]);
+        if (FootprintName = '') or (StepPath = '') then
+            Exit;
+
+        LocalXMM := SafeStrToFloat(Trim(Fields[2]));
+        LocalYMM := SafeStrToFloat(Trim(Fields[3]));
+        RotX := SafeStrToFloat(Trim(Fields[4]));
+        RotY := SafeStrToFloat(Trim(Fields[5]));
+        RotZ := SafeStrToFloat(Trim(Fields[6]));
+        StandoffMM := SafeStrToFloat(Trim(Fields[7]));
+        OverallHeightMM := SafeStrToFloat(Trim(Fields[8]));
+
+        Result := True;
+    finally
+        Fields.Free;
+    end;
+end;
+
+function Find3DBodyImportCommand(LayerMoves: TStringList; var FootprintName, StepPath: String; var LocalXMM, LocalYMM, RotX, RotY, RotZ, StandoffMM, OverallHeightMM: Double): Boolean;
+var
+    i: Integer;
+begin
+    Result := False;
+    FootprintName := '';
+    StepPath := '';
+
+    for i := 0 to LayerMoves.Count - 1 do
+    begin
+        if Parse3DBodyImportCommand(LayerMoves[i], FootprintName, StepPath, LocalXMM, LocalYMM, RotX, RotY, RotZ, StandoffMM, OverallHeightMM) then
+        begin
+            Result := True;
+            Exit;
+        end;
+    end;
+end;
+
+function Parse3DBodySetHeightsCommand(MoveText: String; var FootprintName: String; var StandoffMM, OverallHeightMM: Double): Boolean;
+var
+    CommandName: String;
+    Fields     : TStringList;
+    Remainder  : String;
+    Separator  : Integer;
+begin
+    Result := False;
+    FootprintName := '';
+    StandoffMM := 0;
+    OverallHeightMM := 0;
+
+    MoveText := Trim(MoveText);
+    Separator := Pos('|', MoveText);
+    if Separator <= 1 then
+        Exit;
+
+    CommandName := UpperCase(Trim(Copy(MoveText, 1, Separator - 1)));
+    if CommandName <> '3D_BODY_SET_HEIGHTS' then
+        Exit;
+
+    Remainder := Copy(MoveText, Separator + 1, Length(MoveText) - Separator);
+    Fields := TStringList.Create;
+    try
+        Fields.Delimiter := '|';
+        Fields.StrictDelimiter := True;
+        Fields.DelimitedText := Remainder;
+
+        if Fields.Count < 3 then
+            Exit;
+
+        FootprintName := Trim(Fields[0]);
+        if FootprintName = '' then
+            Exit;
+
+        StandoffMM := SafeStrToFloat(Trim(Fields[1]));
+        OverallHeightMM := SafeStrToFloat(Trim(Fields[2]));
+
+        Result := OverallHeightMM >= StandoffMM;
+    finally
+        Fields.Free;
+    end;
+end;
+
+function Find3DBodySetHeightsCommand(LayerMoves: TStringList; var FootprintName: String; var StandoffMM, OverallHeightMM: Double): Boolean;
+var
+    i: Integer;
+begin
+    Result := False;
+    FootprintName := '';
+    StandoffMM := 0;
+    OverallHeightMM := 0;
+
+    for i := 0 to LayerMoves.Count - 1 do
+    begin
+        if Parse3DBodySetHeightsCommand(LayerMoves[i], FootprintName, StandoffMM, OverallHeightMM) then
+        begin
+            Result := True;
+            Exit;
+        end;
+    end;
+end;
+
+function Parse3DBodyFixOriginOffsetCommand(MoveText: String; var FootprintName: String): Boolean;
+var
+    CommandName: String;
+    Separator  : Integer;
+begin
+    Result := False;
+    FootprintName := '';
+
+    MoveText := Trim(MoveText);
+    Separator := Pos('|', MoveText);
+    if Separator <= 1 then
+        Exit;
+
+    CommandName := UpperCase(Trim(Copy(MoveText, 1, Separator - 1)));
+    if CommandName <> '3D_BODY_FIX_ORIGIN_OFFSET' then
+        Exit;
+
+    FootprintName := Trim(Copy(MoveText, Separator + 1, Length(MoveText) - Separator));
+    if FootprintName = '' then
+        FootprintName := '*';
+
+    Result := True;
+end;
+
+function Find3DBodyFixOriginOffsetCommand(LayerMoves: TStringList; var FootprintName: String): Boolean;
+var
+    i: Integer;
+begin
+    Result := False;
+    FootprintName := '';
+
+    for i := 0 to LayerMoves.Count - 1 do
+    begin
+        if Parse3DBodyFixOriginOffsetCommand(LayerMoves[i], FootprintName) then
+        begin
+            Result := True;
+            Exit;
+        end;
+    end;
+end;
+
+function Parse3DBodyParamsDumpCommand(MoveText: String; var FootprintName: String): Boolean;
+var
+    CommandName: String;
+    Separator  : Integer;
+begin
+    Result := False;
+    FootprintName := '';
+
+    MoveText := Trim(MoveText);
+    Separator := Pos('|', MoveText);
+    if Separator <= 1 then
+        Exit;
+
+    CommandName := UpperCase(Trim(Copy(MoveText, 1, Separator - 1)));
+    if CommandName <> '3D_BODY_PARAMS_DUMP' then
+        Exit;
+
+    FootprintName := Trim(Copy(MoveText, Separator + 1, Length(MoveText) - Separator));
+    Result := FootprintName <> '';
+end;
+
+function Find3DBodyParamsDumpCommand(LayerMoves: TStringList; var FootprintName: String): Boolean;
+var
+    i: Integer;
+begin
+    Result := False;
+    FootprintName := '';
+
+    for i := 0 to LayerMoves.Count - 1 do
+    begin
+        if Parse3DBodyParamsDumpCommand(LayerMoves[i], FootprintName) then
+        begin
+            Result := True;
+            Exit;
+        end;
+    end;
+end;
+
+function Parse3DBodySetPlacementCommand(MoveText: String; var FootprintName: String; var LocalXMM, LocalYMM, RotX, RotY, RotZ, ModelZMM, StandoffMM, OverallHeightMM: Double): Boolean;
+var
+    CommandName: String;
+    Separator  : Integer;
+    Remainder  : String;
+    Fields     : TStringList;
+begin
+    Result := False;
+    FootprintName := '';
+    LocalXMM := 0;
+    LocalYMM := 0;
+    RotX := 0;
+    RotY := 0;
+    RotZ := 0;
+    ModelZMM := 0;
+    StandoffMM := 0;
+    OverallHeightMM := 0;
+
+    MoveText := Trim(MoveText);
+    Separator := Pos('|', MoveText);
+    if Separator <= 1 then
+        Exit;
+
+    CommandName := UpperCase(Trim(Copy(MoveText, 1, Separator - 1)));
+    if CommandName <> '3D_BODY_SET_PLACEMENT' then
+        Exit;
+
+    Remainder := Copy(MoveText, Separator + 1, Length(MoveText) - Separator);
+    Fields := TStringList.Create;
+    try
+        Fields.Delimiter := '|';
+        Fields.StrictDelimiter := True;
+        Fields.DelimitedText := Remainder;
+
+        if Fields.Count < 9 then
+            Exit;
+
+        FootprintName := Trim(Fields[0]);
+        if FootprintName = '' then
+            Exit;
+
+        LocalXMM := SafeStrToFloat(Trim(Fields[1]));
+        LocalYMM := SafeStrToFloat(Trim(Fields[2]));
+        RotX := SafeStrToFloat(Trim(Fields[3]));
+        RotY := SafeStrToFloat(Trim(Fields[4]));
+        RotZ := SafeStrToFloat(Trim(Fields[5]));
+        ModelZMM := SafeStrToFloat(Trim(Fields[6]));
+        StandoffMM := SafeStrToFloat(Trim(Fields[7]));
+        OverallHeightMM := SafeStrToFloat(Trim(Fields[8]));
+
+        Result := OverallHeightMM >= StandoffMM;
+    finally
+        Fields.Free;
+    end;
+end;
+
+function Find3DBodySetPlacementCommand(LayerMoves: TStringList; var FootprintName: String; var LocalXMM, LocalYMM, RotX, RotY, RotZ, ModelZMM, StandoffMM, OverallHeightMM: Double): Boolean;
+var
+    i: Integer;
+begin
+    Result := False;
+    FootprintName := '';
+    LocalXMM := 0;
+    LocalYMM := 0;
+    RotX := 0;
+    RotY := 0;
+    RotZ := 0;
+    ModelZMM := 0;
+    StandoffMM := 0;
+    OverallHeightMM := 0;
+
+    for i := 0 to LayerMoves.Count - 1 do
+    begin
+        if Parse3DBodySetPlacementCommand(
+            LayerMoves[i],
+            FootprintName,
+            LocalXMM,
+            LocalYMM,
+            RotX,
+            RotY,
+            RotZ,
+            ModelZMM,
+            StandoffMM,
+            OverallHeightMM
+        ) then
+        begin
+            Result := True;
+            Exit;
+        end;
+    end;
+end;
+
 function FindMechanicalLayerMove(CurrentLayer: TLayer; LayerMoves: TStringList; var SourceNumber: Integer; var DestinationNumber: Integer): Boolean;
 var
     i: Integer;
@@ -1916,6 +2240,7 @@ var
     BodyIterator        : IPCB_GroupIterator;
     Primitive           : IPCB_Primitive;
     Body                : IPCB_ComponentBody;
+    Model               : IPCB_Model;
     Rect                : TCoordRect;
     ResultProps         : TStringList;
     BodyArray           : TStringList;
@@ -1926,6 +2251,9 @@ var
     FootprintsProcessed : Integer;
     BodiesSeen          : Integer;
     LeftMM, BottomMM, RightMM, TopMM : Double;
+    RawLeftMM, RawBottomMM, RawRightMM, RawTopMM : Double;
+    ModelRotX, ModelRotY, ModelRotZ : Double;
+    ModelZ              : TCoord;
 begin
     PcbLib := PCBServer.GetCurrentPCBLibrary;
     if PcbLib = Nil then
@@ -1981,11 +2309,16 @@ begin
                             begin
                                 BodiesSeen := BodiesSeen + 1;
                                 Body := Primitive;
+                                Model := Body.GetModel;
                                 Rect := Primitive.BoundingRectangle;
                                 LeftMM := CoordToMMs(Rect.Left);
                                 BottomMM := CoordToMMs(Rect.Bottom);
                                 RightMM := CoordToMMs(Rect.Right);
                                 TopMM := CoordToMMs(Rect.Top);
+                                RawLeftMM := LeftMM;
+                                RawBottomMM := BottomMM;
+                                RawRightMM := RightMM;
+                                RawTopMM := TopMM;
 
                                 if (Board <> Nil) and
                                    ((Abs(LeftMM) > 100) or (Abs(BottomMM) > 100) or
@@ -2001,7 +2334,23 @@ begin
                                 try
                                     AddJSONProperty(BodyProps, 'footprint', FootprintName);
                                     AddJSONProperty(BodyProps, 'object_id', Primitive.ObjectIDString);
+                                    AddJSONProperty(BodyProps, 'identifier', Primitive.Identifier);
+                                    AddJSONProperty(BodyProps, 'descriptor', Primitive.Descriptor);
                                     AddJSONProperty(BodyProps, 'layer', Layer2String(Primitive.Layer));
+                                    AddJSONBoolean(BodyProps, 'in_board', Body.GetState_InBoard);
+                                    AddJSONNumber(BodyProps, 'snap_point_x_mm', CoordToMMs(Body.GetState_SnapPointX));
+                                    AddJSONNumber(BodyProps, 'snap_point_y_mm', CoordToMMs(Body.GetState_SnapPointY));
+                                    AddJSONNumber(BodyProps, 'body_x_mm', CoordToMMs(Body.X));
+                                    AddJSONNumber(BodyProps, 'body_y_mm', CoordToMMs(Body.Y));
+                                    if Board <> Nil then
+                                    begin
+                                        AddJSONNumber(BodyProps, 'board_x_origin_mm', CoordToMMs(Board.XOrigin));
+                                        AddJSONNumber(BodyProps, 'board_y_origin_mm', CoordToMMs(Board.YOrigin));
+                                    end;
+                                    AddJSONNumber(BodyProps, 'raw_left_mm', RawLeftMM);
+                                    AddJSONNumber(BodyProps, 'raw_bottom_mm', RawBottomMM);
+                                    AddJSONNumber(BodyProps, 'raw_right_mm', RawRightMM);
+                                    AddJSONNumber(BodyProps, 'raw_top_mm', RawTopMM);
                                     AddJSONNumber(BodyProps, 'left_mm', LeftMM);
                                     AddJSONNumber(BodyProps, 'bottom_mm', BottomMM);
                                     AddJSONNumber(BodyProps, 'right_mm', RightMM);
@@ -2009,6 +2358,18 @@ begin
                                     AddJSONNumber(BodyProps, 'standoff_height_mm', CoordToMMs(Body.StandoffHeight));
                                     AddJSONNumber(BodyProps, 'overall_height_mm', CoordToMMs(Body.OverallHeight));
                                     AddJSONInteger(BodyProps, 'body_projection', Body.BodyProjection);
+                                    if Model <> Nil then
+                                    begin
+                                        ModelRotX := 0;
+                                        ModelRotY := 0;
+                                        ModelRotZ := 0;
+                                        ModelZ := 0;
+                                        Model.GetState(ModelRotX, ModelRotY, ModelRotZ, ModelZ);
+                                        AddJSONNumber(BodyProps, 'model_rotation_x_deg', ModelRotX);
+                                        AddJSONNumber(BodyProps, 'model_rotation_y_deg', ModelRotY);
+                                        AddJSONNumber(BodyProps, 'model_rotation_z_deg', ModelRotZ);
+                                        AddJSONNumber(BodyProps, 'model_z_mm', CoordToMMs(ModelZ));
+                                    end;
                                     BodyArray.Add(BuildJSONObject(BodyProps, 1));
                                 finally
                                     BodyProps.Free;
@@ -2558,6 +2919,35 @@ begin
     try
         AddJSONBoolean(ResultProps, 'success', True);
         AddJSONProperty(ResultProps, 'process', 'PCB:Cancel');
+
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := OutputLines.Text;
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        ResultProps.Free;
+    end;
+end;
+
+function RunPCBPostProcessCommand: String;
+var
+    ResultProps : TStringList;
+    OutputLines : TStringList;
+begin
+    PCBServer.PostProcess;
+    ResetParameters;
+    RunProcess('PCB:Cancel');
+    Client.SendMessage('PCB:Cancel', '', 255, Client.CurrentView);
+    Client.SendMessage('PCB:DeSelect', 'Scope=All', 255, Client.CurrentView);
+    Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
+
+    ResultProps := TStringList.Create;
+    try
+        AddJSONBoolean(ResultProps, 'success', True);
+        AddJSONProperty(ResultProps, 'process', 'PCBServer.PostProcess');
 
         OutputLines := TStringList.Create;
         try
@@ -3605,6 +3995,1024 @@ begin
         end;
     finally
         PcbLib.LibraryIterator_Destroy(FootprintIterator);
+    end;
+end;
+
+function ParseFootprintPrimitiveDumpCommand(MoveText: String; var FootprintName: String): Boolean;
+var
+    CommandName : String;
+    SeparatorPos: Integer;
+begin
+    Result := False;
+    FootprintName := '';
+
+    SeparatorPos := Pos('|', MoveText);
+    if SeparatorPos > 0 then
+    begin
+        CommandName := UpperCase(Trim(Copy(MoveText, 1, SeparatorPos - 1)));
+        FootprintName := Trim(Copy(MoveText, SeparatorPos + 1, Length(MoveText) - SeparatorPos));
+    end
+    else
+        CommandName := UpperCase(Trim(MoveText));
+
+    if CommandName <> 'FOOTPRINT_PRIMITIVE_DUMP' then
+        Exit;
+
+    Result := FootprintName <> '';
+end;
+
+function FindFootprintPrimitiveDumpCommand(LayerMoves: TStringList; var FootprintName: String): Boolean;
+var
+    i: Integer;
+begin
+    Result := False;
+    FootprintName := '';
+
+    for i := 0 to LayerMoves.Count - 1 do
+    begin
+        if ParseFootprintPrimitiveDumpCommand(LayerMoves[i], FootprintName) then
+        begin
+            Result := True;
+            Exit;
+        end;
+    end;
+end;
+
+function ApplyGenericStepModelPlacement(Model: IPCB_Model; RotX, RotY, RotZ, StandoffMM: Double; var ErrorText: String): Boolean;
+begin
+    Result := False;
+    ErrorText := 'Generic STEP model rotation is not applied by this DelphiScript path. AD 26.6 can access-violate when IPCB_Model.SetState is called from script; keep the STEP file unchanged and set Rotation X/Y/Z plus Standoff Height through Altium 3D Body properties, then verify with 3D_BODY_DUMP.';
+
+    if Model = Nil then
+    begin
+        ErrorText := 'STEP model is nil.';
+        Exit;
+    end;
+end;
+
+function AddStepBodyToActiveComponentWithPlacement(PcbLib: IPCB_Library; Footprint: IPCB_LibComponent; StepPath: String; LocalXMM, LocalYMM, RotX, RotY, RotZ, StandoffMM, OverallHeightMM: Double; var ErrorText: String): Boolean;
+var
+    Board   : IPCB_Board;
+    StepBody: IPCB_ComponentBody;
+    Model   : IPCB_Model;
+    ModelError : String;
+begin
+    Result := False;
+    ErrorText := '';
+
+    if (PcbLib = Nil) or (Footprint = Nil) then
+    begin
+        ErrorText := 'PcbLib or footprint is nil.';
+        Exit;
+    end;
+
+    if not FileExists(StepPath) then
+    begin
+        ErrorText := 'STEP file not found: ' + StepPath;
+        Exit;
+    end;
+
+    PcbLib.CurrentComponent := Footprint;
+    Board := PcbLib.Board;
+    if Board = Nil then
+    begin
+        ErrorText := 'PcbLib board is nil.';
+        Exit;
+    end;
+
+    StepBody := PCBServer.PCBObjectFactory(eComponentBodyObject, eNoDimension, eCreate_Default);
+    if StepBody = Nil then
+    begin
+        ErrorText := 'Failed to create component body.';
+        Exit;
+    end;
+
+    StepBody.Layer := ILayer.MechanicalLayer(1);
+    Model := StepBody.ModelFactory_FromFilename(StepPath, False);
+    if Model = Nil then
+    begin
+        ErrorText := 'Failed to load STEP model: ' + StepPath;
+        Exit;
+    end;
+
+    if not ApplyGenericStepModelPlacement(Model, RotX, RotY, RotZ, StandoffMM, ModelError) then
+    begin
+        ErrorText := ModelError;
+        Exit;
+    end;
+
+    StepBody.Model := Model;
+    StepBody.SetState_FromModel;
+    StepBody.Layer := ILayer.MechanicalLayer(1);
+    StepBody.StandoffHeight := MMsToCoord(StandoffMM);
+    if OverallHeightMM > 0 then
+        StepBody.OverallHeight := MMsToCoord(OverallHeightMM);
+
+    PCBServer.SendMessageToRobots(StepBody.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+    Board.AddPCBObject(StepBody);
+    PCBServer.SendMessageToRobots(StepBody.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+    Result := True;
+end;
+
+function Import3DBodyWithPlacement(FootprintName, StepPath: String; LocalXMM, LocalYMM, RotX, RotY, RotZ, StandoffMM, OverallHeightMM: Double): String;
+var
+    PcbLib          : IPCB_Library;
+    Board           : IPCB_Board;
+    Footprint       : IPCB_LibComponent;
+    RemovedBodies   : Integer;
+    BodyError       : String;
+    ResultProps     : TStringList;
+    OutputLines     : TStringList;
+begin
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    if PcbLib = Nil then
+    begin
+        Result := '{"success": false, "error": "No PCB library document is currently active. Open a .PcbLib file first."}';
+        Exit;
+    end;
+
+    Footprint := FindPCBLibraryFootprintByName(PcbLib, FootprintName);
+    if Footprint = Nil then
+    begin
+        Result := '{"success": false, "error": "Footprint not found."}';
+        Exit;
+    end;
+
+    if not FileExists(StepPath) then
+    begin
+        Result := '{"success": false, "error": "STEP file not found."}';
+        Exit;
+    end;
+
+    ResultProps := TStringList.Create;
+    OutputLines := TStringList.Create;
+    try
+        AddJSONBoolean(ResultProps, 'success', False);
+        AddJSONBoolean(ResultProps, 'mutated', False);
+        AddJSONProperty(ResultProps, 'footprint', FootprintName);
+        AddJSONProperty(ResultProps, 'step_file', StepPath);
+        AddJSONNumber(ResultProps, 'local_x_mm', LocalXMM);
+        AddJSONNumber(ResultProps, 'local_y_mm', LocalYMM);
+        AddJSONNumber(ResultProps, 'model_rot_x_deg', RotX);
+        AddJSONNumber(ResultProps, 'model_rot_y_deg', RotY);
+        AddJSONNumber(ResultProps, 'model_rot_z_deg', RotZ);
+        AddJSONNumber(ResultProps, 'standoff_height_mm', StandoffMM);
+        AddJSONNumber(ResultProps, 'overall_height_mm', OverallHeightMM);
+        AddJSONProperty(ResultProps, 'error', '3D_BODY_IMPORT is disabled for mutation in AD 26.6 because scripted generic STEP model placement can crash ScriptingSystem.dll. Import the unchanged STEP into a Generic 3D Body, set X/Y, Rotation X/Y/Z, Standoff Height, and Overall Height in the Altium Properties panel, then run 3D_BODY_DUMP to verify.');
+        OutputLines.Text := BuildJSONObject(ResultProps);
+        Result := OutputLines.Text;
+    finally
+        OutputLines.Free;
+        ResultProps.Free;
+    end;
+    Exit;
+
+    Board := PcbLib.Board;
+    EnsureMechanicalLayerEnabled(Board, 1);
+    ResultProps := TStringList.Create;
+
+    try
+        Client.SendMessage('PCB:DeSelect', 'Scope=All', 255, Client.CurrentView);
+        PcbLib.CurrentComponent := Footprint;
+        Footprint := PcbLib.CurrentComponent;
+        if Board <> Nil then
+            Board.ViewManager_FullUpdate;
+
+        RemovedBodies := SelectComponentBodiesForDelete(Footprint);
+        if RemovedBodies > 0 then
+            Client.SendMessage('PCB:DeleteObjects', 'Object=SELECTED', 255, Client.CurrentView);
+
+        PCBServer.PreProcess;
+        try
+            if not AddStepBodyToActiveComponentWithPlacement(PcbLib, Footprint, StepPath, LocalXMM, LocalYMM, RotX, RotY, RotZ, StandoffMM, OverallHeightMM, BodyError) then
+            begin
+                AddJSONBoolean(ResultProps, 'success', False);
+                AddJSONProperty(ResultProps, 'error', BodyError);
+            end
+            else
+            begin
+                AddJSONBoolean(ResultProps, 'success', True);
+                AddJSONProperty(ResultProps, 'footprint', FootprintName);
+                AddJSONProperty(ResultProps, 'step_file', StepPath);
+                AddJSONInteger(ResultProps, 'removed_bodies', RemovedBodies);
+                AddJSONNumber(ResultProps, 'local_x_mm', LocalXMM);
+                AddJSONNumber(ResultProps, 'local_y_mm', LocalYMM);
+                AddJSONNumber(ResultProps, 'model_rot_x_deg', RotX);
+                AddJSONNumber(ResultProps, 'model_rot_y_deg', RotY);
+                AddJSONNumber(ResultProps, 'model_rot_z_deg', RotZ);
+                AddJSONNumber(ResultProps, 'standoff_height_mm', StandoffMM);
+                AddJSONNumber(ResultProps, 'overall_height_mm', OverallHeightMM);
+            end;
+        finally
+            PCBServer.PostProcess;
+        end;
+
+        Client.SendMessage('PCB:DeSelect', 'Scope=All', 255, Client.CurrentView);
+        if Board <> Nil then
+            Board.ViewManager_FullUpdate;
+        Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
+
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := OutputLines.Text;
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        ResultProps.Free;
+    end;
+end;
+
+function Set3DBodyHeightsForFootprint(PcbLib: IPCB_Library; Footprint: IPCB_LibComponent; StandoffMM, OverallHeightMM: Double): Integer;
+var
+    BodyIterator : IPCB_GroupIterator;
+    Primitive    : IPCB_Primitive;
+    Body         : IPCB_ComponentBody;
+begin
+    Result := 0;
+    if (PcbLib = Nil) or (Footprint = Nil) then
+        Exit;
+
+    PcbLib.CurrentComponent := Footprint;
+    Footprint := PcbLib.CurrentComponent;
+    if Footprint = Nil then
+        Exit;
+
+    BodyIterator := Footprint.GroupIterator_Create;
+    if BodyIterator = Nil then
+        Exit;
+
+    try
+        BodyIterator.AddFilter_ObjectSet(MkSet(eComponentBodyObject));
+        BodyIterator.AddFilter_LayerSet(AllLayers);
+
+        Primitive := BodyIterator.FirstPCBObject;
+        while Primitive <> Nil do
+        begin
+            Body := Primitive;
+            PCBServer.SendMessageToRobots(Body.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+            Body.StandoffHeight := MMsToCoord(StandoffMM);
+            Body.OverallHeight := MMsToCoord(OverallHeightMM);
+            PCBServer.SendMessageToRobots(Body.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+            Result := Result + 1;
+            Primitive := BodyIterator.NextPCBObject;
+        end;
+    finally
+        Footprint.GroupIterator_Destroy(BodyIterator);
+    end;
+end;
+
+function SetPCBLibrary3DBodyHeights(FootprintName: String; StandoffMM, OverallHeightMM: Double): String;
+var
+    PcbLib              : IPCB_Library;
+    Board               : IPCB_Board;
+    FootprintIterator   : IPCB_LibraryIterator;
+    Footprint           : IPCB_LibComponent;
+    TargetFootprint     : IPCB_LibComponent;
+    FootprintsProcessed : Integer;
+    BodiesModified      : Integer;
+    ResultProps         : TStringList;
+    OutputLines         : TStringList;
+begin
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    if PcbLib = Nil then
+    begin
+        Result := '{"success": false, "error": "No PCB library document is currently active. Open a .PcbLib file first."}';
+        Exit;
+    end;
+
+    ResultProps := TStringList.Create;
+    OutputLines := TStringList.Create;
+    Board := PcbLib.Board;
+    FootprintsProcessed := 0;
+    BodiesModified := 0;
+
+    try
+        PCBServer.PreProcess;
+        try
+            if FootprintName = '*' then
+            begin
+                FootprintIterator := PcbLib.LibraryIterator_Create;
+                if FootprintIterator <> Nil then
+                begin
+                    try
+                        FootprintIterator.SetState_FilterAll;
+                        Footprint := FootprintIterator.FirstPCBObject;
+                        while Footprint <> Nil do
+                        begin
+                            FootprintsProcessed := FootprintsProcessed + 1;
+                            BodiesModified := BodiesModified + Set3DBodyHeightsForFootprint(PcbLib, Footprint, StandoffMM, OverallHeightMM);
+                            Footprint := FootprintIterator.NextPCBObject;
+                        end;
+                    finally
+                        PcbLib.LibraryIterator_Destroy(FootprintIterator);
+                    end;
+                end;
+            end
+            else
+            begin
+                TargetFootprint := FindPCBLibraryFootprintByName(PcbLib, FootprintName);
+                if TargetFootprint <> Nil then
+                begin
+                    FootprintsProcessed := 1;
+                    BodiesModified := Set3DBodyHeightsForFootprint(PcbLib, TargetFootprint, StandoffMM, OverallHeightMM);
+                end;
+            end;
+        finally
+            PCBServer.PostProcess;
+        end;
+
+        AddJSONBoolean(ResultProps, 'success', BodiesModified > 0);
+        AddJSONProperty(ResultProps, 'footprint', FootprintName);
+        AddJSONInteger(ResultProps, 'footprints_processed', FootprintsProcessed);
+        AddJSONInteger(ResultProps, 'bodies_modified', BodiesModified);
+        AddJSONNumber(ResultProps, 'standoff_height_mm', StandoffMM);
+        AddJSONNumber(ResultProps, 'overall_height_mm', OverallHeightMM);
+        if BodiesModified = 0 then
+            AddJSONProperty(ResultProps, 'error', 'No matching 3D bodies were found.');
+
+        if Board <> Nil then
+            Board.ViewManager_FullUpdate;
+        Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
+
+        OutputLines.Text := BuildJSONObject(ResultProps);
+        Result := OutputLines.Text;
+    finally
+        OutputLines.Free;
+        ResultProps.Free;
+    end;
+end;
+
+function Set3DBodyPlacementForFootprint(PcbLib: IPCB_Library; Board: IPCB_Board; Footprint: IPCB_LibComponent; LocalXMM, LocalYMM, RotX, RotY, RotZ, ModelZMM, StandoffMM, OverallHeightMM: Double; FootprintResults: TStringList): Integer;
+var
+    BodyIterator : IPCB_GroupIterator;
+    Primitive    : IPCB_Primitive;
+    Body         : IPCB_ComponentBody;
+    Model        : IPCB_Model;
+    Props        : TStringList;
+    FootprintName: String;
+    BodiesSeen   : Integer;
+    BodiesUpdated: Integer;
+    OldRotX      : Double;
+    OldRotY      : Double;
+    OldRotZ      : Double;
+    OldModelZ    : TCoord;
+begin
+    Result := 0;
+    if (PcbLib = Nil) or (Board = Nil) or (Footprint = Nil) then
+        Exit;
+
+    FootprintName := Footprint.Name;
+    PcbLib.CurrentComponent := Footprint;
+    Footprint := PcbLib.CurrentComponent;
+    if Footprint = Nil then
+        Exit;
+
+    BodiesSeen := 0;
+    BodiesUpdated := 0;
+
+    BodyIterator := Footprint.GroupIterator_Create;
+    if BodyIterator = Nil then
+        Exit;
+
+    try
+        BodyIterator.AddFilter_ObjectSet(MkSet(eComponentBodyObject));
+        BodyIterator.AddFilter_LayerSet(AllLayers);
+
+        Primitive := BodyIterator.FirstPCBObject;
+        while Primitive <> Nil do
+        begin
+            BodiesSeen := BodiesSeen + 1;
+            Body := Primitive;
+            Model := Body.GetModel;
+
+            if Model <> Nil then
+            begin
+                PCBServer.SendMessageToRobots(Primitive.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+                try
+                    OldRotX := 0;
+                    OldRotY := 0;
+                    OldRotZ := 0;
+                    OldModelZ := 0;
+                    Model.GetState(OldRotX, OldRotY, OldRotZ, OldModelZ);
+                    Model.SetState(RotX, RotY, RotZ, MMsToCoord(ModelZMM));
+                    Body.SetModel(Model);
+                    Body.SetState_FromModel;
+                    Body.SetState_SnapPointX(Board.XOrigin + MMsToCoord(LocalXMM));
+                    Body.SetState_SnapPointY(Board.YOrigin + MMsToCoord(LocalYMM));
+                    Body.StandoffHeight := MMsToCoord(StandoffMM);
+                    Body.OverallHeight := MMsToCoord(OverallHeightMM);
+                    Primitive.GraphicallyInvalidate;
+                    BodiesUpdated := BodiesUpdated + 1;
+                finally
+                    PCBServer.SendMessageToRobots(Primitive.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+                end;
+            end;
+
+            Primitive := BodyIterator.NextPCBObject;
+        end;
+    finally
+        Footprint.GroupIterator_Destroy(BodyIterator);
+    end;
+
+    if FootprintResults <> Nil then
+    begin
+        Props := TStringList.Create;
+        try
+            AddJSONProperty(Props, 'footprint', FootprintName);
+            AddJSONInteger(Props, 'bodies_seen', BodiesSeen);
+            AddJSONInteger(Props, 'bodies_updated', BodiesUpdated);
+            AddJSONNumber(Props, 'local_x_mm', LocalXMM);
+            AddJSONNumber(Props, 'local_y_mm', LocalYMM);
+            AddJSONNumber(Props, 'rotation_x_deg', RotX);
+            AddJSONNumber(Props, 'rotation_y_deg', RotY);
+            AddJSONNumber(Props, 'rotation_z_deg', RotZ);
+            AddJSONNumber(Props, 'model_z_mm', ModelZMM);
+            AddJSONNumber(Props, 'standoff_height_mm', StandoffMM);
+            AddJSONNumber(Props, 'overall_height_mm', OverallHeightMM);
+            FootprintResults.Add(BuildJSONObject(Props, 1));
+        finally
+            Props.Free;
+        end;
+    end;
+
+    Result := BodiesUpdated;
+end;
+
+function SetPCBLibrary3DBodyPlacement(FootprintName: String; LocalXMM, LocalYMM, RotX, RotY, RotZ, ModelZMM, StandoffMM, OverallHeightMM: Double): String;
+var
+    PcbLib              : IPCB_Library;
+    Board               : IPCB_Board;
+    FootprintIterator   : IPCB_LibraryIterator;
+    Footprint           : IPCB_LibComponent;
+    ResultProps         : TStringList;
+    FootprintResults    : TStringList;
+    OutputLines         : TStringList;
+    TargetFootprint     : IPCB_LibComponent;
+    FootprintsProcessed : Integer;
+    BodiesUpdated       : Integer;
+begin
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    if PcbLib = Nil then
+    begin
+        Result := '{"success": false, "error": "No PCB library document is currently active. Open a .PcbLib file first."}';
+        Exit;
+    end;
+
+    Board := PcbLib.Board;
+    if Board = Nil then
+    begin
+        Result := '{"success": false, "error": "No PcbLib board is available."}';
+        Exit;
+    end;
+
+    ResultProps := TStringList.Create;
+    FootprintResults := TStringList.Create;
+    OutputLines := TStringList.Create;
+    FootprintsProcessed := 0;
+    BodiesUpdated := 0;
+
+    try
+        PCBServer.PreProcess;
+        try
+            if FootprintName = '*' then
+            begin
+                FootprintIterator := PcbLib.LibraryIterator_Create;
+                if FootprintIterator <> Nil then
+                begin
+                    try
+                        FootprintIterator.SetState_FilterAll;
+                        Footprint := FootprintIterator.FirstPCBObject;
+                        while Footprint <> Nil do
+                        begin
+                            FootprintsProcessed := FootprintsProcessed + 1;
+                            BodiesUpdated := BodiesUpdated + Set3DBodyPlacementForFootprint(
+                                PcbLib,
+                                Board,
+                                Footprint,
+                                LocalXMM,
+                                LocalYMM,
+                                RotX,
+                                RotY,
+                                RotZ,
+                                ModelZMM,
+                                StandoffMM,
+                                OverallHeightMM,
+                                FootprintResults
+                            );
+                            Footprint := FootprintIterator.NextPCBObject;
+                        end;
+                    finally
+                        PcbLib.LibraryIterator_Destroy(FootprintIterator);
+                    end;
+                end;
+            end
+            else
+            begin
+                TargetFootprint := FindPCBLibraryFootprintByName(PcbLib, FootprintName);
+                if TargetFootprint <> Nil then
+                begin
+                    FootprintsProcessed := 1;
+                    BodiesUpdated := Set3DBodyPlacementForFootprint(
+                        PcbLib,
+                        Board,
+                        TargetFootprint,
+                        LocalXMM,
+                        LocalYMM,
+                        RotX,
+                        RotY,
+                        RotZ,
+                        ModelZMM,
+                        StandoffMM,
+                        OverallHeightMM,
+                        FootprintResults
+                    );
+                end;
+            end;
+        finally
+            PCBServer.PostProcess;
+        end;
+
+        AddJSONBoolean(ResultProps, 'success', BodiesUpdated > 0);
+        AddJSONProperty(ResultProps, 'footprint', FootprintName);
+        AddJSONInteger(ResultProps, 'footprints_processed', FootprintsProcessed);
+        AddJSONInteger(ResultProps, 'bodies_updated', BodiesUpdated);
+        AddJSONNumber(ResultProps, 'local_x_mm', LocalXMM);
+        AddJSONNumber(ResultProps, 'local_y_mm', LocalYMM);
+        AddJSONNumber(ResultProps, 'rotation_x_deg', RotX);
+        AddJSONNumber(ResultProps, 'rotation_y_deg', RotY);
+        AddJSONNumber(ResultProps, 'rotation_z_deg', RotZ);
+        AddJSONNumber(ResultProps, 'model_z_mm', ModelZMM);
+        AddJSONNumber(ResultProps, 'standoff_height_mm', StandoffMM);
+        AddJSONNumber(ResultProps, 'overall_height_mm', OverallHeightMM);
+        ResultProps.Add(BuildJSONArray(FootprintResults, 'footprint_results'));
+        if BodiesUpdated = 0 then
+            AddJSONProperty(ResultProps, 'error', 'No matching 3D bodies with Generic model state were found.');
+
+        Board.ViewManager_FullUpdate;
+        Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
+
+        OutputLines.Text := BuildJSONObject(ResultProps);
+        Result := OutputLines.Text;
+    finally
+        OutputLines.Free;
+        FootprintResults.Free;
+        ResultProps.Free;
+    end;
+end;
+
+function Fix3DBodyOriginOffsetForFootprint(PcbLib: IPCB_Library; Board: IPCB_Board; Footprint: IPCB_LibComponent; Threshold: TCoord; FootprintResults: TStringList; var BodiesSkipped: Integer): Integer;
+var
+    BodyIterator   : IPCB_GroupIterator;
+    Primitive      : IPCB_Primitive;
+    Rect           : TCoordRect;
+    Props          : TStringList;
+    FootprintName  : String;
+    BodiesSeen     : Integer;
+    BodiesMoved    : Integer;
+    BodiesSkippedHere : Integer;
+    ShouldMove     : Boolean;
+begin
+    Result := 0;
+    if (PcbLib = Nil) or (Board = Nil) or (Footprint = Nil) then
+        Exit;
+
+    FootprintName := Footprint.Name;
+    PcbLib.CurrentComponent := Footprint;
+    Footprint := PcbLib.CurrentComponent;
+    if Footprint = Nil then
+        Exit;
+
+    BodiesSeen := 0;
+    BodiesMoved := 0;
+    BodiesSkippedHere := 0;
+
+    BodyIterator := Footprint.GroupIterator_Create;
+    if BodyIterator = Nil then
+        Exit;
+
+    try
+        BodyIterator.AddFilter_ObjectSet(MkSet(eComponentBodyObject));
+        BodyIterator.AddFilter_LayerSet(AllLayers);
+
+        Primitive := BodyIterator.FirstPCBObject;
+        while Primitive <> Nil do
+        begin
+            BodiesSeen := BodiesSeen + 1;
+            Rect := Primitive.BoundingRectangle;
+
+            ShouldMove := (Abs(Rect.Left) < Threshold) and
+                          (Abs(Rect.Right) < Threshold) and
+                          (Abs(Rect.Bottom) < Threshold) and
+                          (Abs(Rect.Top) < Threshold);
+
+            if ShouldMove then
+            begin
+                PCBServer.SendMessageToRobots(Primitive.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+                Primitive.MoveByXY(Board.XOrigin, Board.YOrigin);
+                PCBServer.SendMessageToRobots(Primitive.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+                BodiesMoved := BodiesMoved + 1;
+            end
+            else
+                BodiesSkippedHere := BodiesSkippedHere + 1;
+
+            Primitive := BodyIterator.NextPCBObject;
+        end;
+    finally
+        Footprint.GroupIterator_Destroy(BodyIterator);
+    end;
+
+    if BodiesSeen > 0 then
+    begin
+        Props := TStringList.Create;
+        try
+            AddJSONProperty(Props, 'footprint', FootprintName);
+            AddJSONInteger(Props, 'bodies_seen', BodiesSeen);
+            AddJSONInteger(Props, 'bodies_moved', BodiesMoved);
+            AddJSONInteger(Props, 'bodies_skipped', BodiesSkippedHere);
+            FootprintResults.Add(BuildJSONObject(Props, 1));
+        finally
+            Props.Free;
+        end;
+    end;
+
+    BodiesSkipped := BodiesSkipped + BodiesSkippedHere;
+    Result := BodiesMoved;
+end;
+
+function FixPCBLibrary3DBodyOriginOffset(FootprintName: String): String;
+var
+    PcbLib              : IPCB_Library;
+    Board               : IPCB_Board;
+    FootprintIterator   : IPCB_LibraryIterator;
+    Footprint           : IPCB_LibComponent;
+    TargetFootprint     : IPCB_LibComponent;
+    ResultProps         : TStringList;
+    FootprintResults    : TStringList;
+    OutputLines         : TStringList;
+    Threshold           : TCoord;
+    FootprintsProcessed : Integer;
+    BodiesMoved         : Integer;
+    BodiesSkipped       : Integer;
+begin
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    if PcbLib = Nil then
+    begin
+        Result := '{"success": false, "error": "No PCB library document is currently active. Open a .PcbLib file first."}';
+        Exit;
+    end;
+
+    Board := PcbLib.Board;
+    if Board = Nil then
+    begin
+        Result := '{"success": false, "error": "PcbLib board is nil."}';
+        Exit;
+    end;
+
+    ResultProps := TStringList.Create;
+    FootprintResults := TStringList.Create;
+    OutputLines := TStringList.Create;
+    Threshold := MMsToCoord(100);
+    FootprintsProcessed := 0;
+    BodiesMoved := 0;
+    BodiesSkipped := 0;
+
+    try
+        PCBServer.PreProcess;
+        try
+            if FootprintName = '*' then
+            begin
+                FootprintIterator := PcbLib.LibraryIterator_Create;
+                if FootprintIterator <> Nil then
+                begin
+                    try
+                        FootprintIterator.SetState_FilterAll;
+                        Footprint := FootprintIterator.FirstPCBObject;
+                        while Footprint <> Nil do
+                        begin
+                            FootprintsProcessed := FootprintsProcessed + 1;
+                            BodiesMoved := BodiesMoved + Fix3DBodyOriginOffsetForFootprint(PcbLib, Board, Footprint, Threshold, FootprintResults, BodiesSkipped);
+                            Footprint := FootprintIterator.NextPCBObject;
+                        end;
+                    finally
+                        PcbLib.LibraryIterator_Destroy(FootprintIterator);
+                    end;
+                end;
+            end
+            else
+            begin
+                TargetFootprint := FindPCBLibraryFootprintByName(PcbLib, FootprintName);
+                if TargetFootprint <> Nil then
+                begin
+                    FootprintsProcessed := 1;
+                    BodiesMoved := Fix3DBodyOriginOffsetForFootprint(PcbLib, Board, TargetFootprint, Threshold, FootprintResults, BodiesSkipped);
+                end;
+            end;
+        finally
+            PCBServer.PostProcess;
+        end;
+
+        AddJSONBoolean(ResultProps, 'success', (BodiesMoved > 0) or (BodiesSkipped > 0));
+        AddJSONBoolean(ResultProps, 'mutated', BodiesMoved > 0);
+        AddJSONProperty(ResultProps, 'footprint', FootprintName);
+        AddJSONInteger(ResultProps, 'footprints_processed', FootprintsProcessed);
+        AddJSONInteger(ResultProps, 'bodies_moved', BodiesMoved);
+        AddJSONInteger(ResultProps, 'bodies_skipped', BodiesSkipped);
+        AddJSONNumber(ResultProps, 'x_offset_mm', CoordToMMs(Board.XOrigin));
+        AddJSONNumber(ResultProps, 'y_offset_mm', CoordToMMs(Board.YOrigin));
+        AddJSONNumber(ResultProps, 'local_origin_threshold_mm', CoordToMMs(Threshold));
+        ResultProps.Add(BuildJSONArray(FootprintResults, 'footprint_results'));
+        if BodiesMoved = 0 then
+            AddJSONProperty(ResultProps, 'message', 'No 3D bodies looked like unshifted local-origin bodies. Already shifted bodies were left untouched.');
+
+        Board.ViewManager_FullUpdate;
+        Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
+
+        OutputLines.Text := BuildJSONObject(ResultProps);
+        Result := OutputLines.Text;
+    finally
+        OutputLines.Free;
+        FootprintResults.Free;
+        ResultProps.Free;
+    end;
+end;
+
+function Dump3DBodyParametersForFootprint(FootprintName: String): String;
+var
+    PcbLib          : IPCB_Library;
+    Board           : IPCB_Board;
+    Footprint       : IPCB_LibComponent;
+    BodyIterator    : IPCB_GroupIterator;
+    Primitive       : IPCB_Primitive;
+    Body            : IPCB_ComponentBody;
+    ResultProps     : TStringList;
+    BodyArray       : TStringList;
+    BodyProps       : TStringList;
+    OutputLines     : TStringList;
+    ParamText       : TPCBString;
+    ParamSpace      : Integer;
+    BodyIndex       : Integer;
+begin
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    if PcbLib = Nil then
+    begin
+        Result := '{"success": false, "error": "No PCB library document is currently active. Open a .PcbLib file first."}';
+        Exit;
+    end;
+
+    Footprint := FindPCBLibraryFootprintByName(PcbLib, FootprintName);
+    if Footprint = Nil then
+    begin
+        Result := '{"success": false, "error": "Footprint not found."}';
+        Exit;
+    end;
+
+    Board := PcbLib.Board;
+    PcbLib.CurrentComponent := Footprint;
+    Footprint := PcbLib.CurrentComponent;
+    if Board <> Nil then
+        Board.ViewManager_FullUpdate;
+
+    ResultProps := TStringList.Create;
+    BodyArray := TStringList.Create;
+    OutputLines := TStringList.Create;
+    BodyIndex := 0;
+
+    try
+        BodyIterator := Footprint.GroupIterator_Create;
+        if BodyIterator <> Nil then
+        begin
+            try
+                BodyIterator.AddFilter_ObjectSet(MkSet(eComponentBodyObject));
+                BodyIterator.AddFilter_LayerSet(AllLayers);
+
+                Primitive := BodyIterator.FirstPCBObject;
+                while Primitive <> Nil do
+                begin
+                    BodyIndex := BodyIndex + 1;
+                    Body := Primitive;
+                    BodyProps := TStringList.Create;
+                    try
+                        AddJSONInteger(BodyProps, 'index', BodyIndex);
+                        AddJSONProperty(BodyProps, 'object_id', Primitive.ObjectIDString);
+                        AddJSONProperty(BodyProps, 'identifier', Primitive.Identifier);
+                        AddJSONProperty(BodyProps, 'descriptor', Primitive.Descriptor);
+                        AddJSONProperty(BodyProps, 'detail', Primitive.Detail);
+                        ParamSpace := Primitive.RequiredParamterSpace;
+                        AddJSONInteger(BodyProps, 'required_parameter_space', ParamSpace);
+                        if ParamSpace > 0 then
+                        begin
+                            ParamText := StringOfChar(' ', ParamSpace + 1);
+                            Primitive.Export_ToParameters(ParamText);
+                            AddJSONProperty(BodyProps, 'parameters', ParamText);
+                        end
+                        else
+                            AddJSONProperty(BodyProps, 'parameters', '');
+
+                        BodyArray.Add(BuildJSONObject(BodyProps, 1));
+                    finally
+                        BodyProps.Free;
+                    end;
+
+                    Primitive := BodyIterator.NextPCBObject;
+                end;
+            finally
+                Footprint.GroupIterator_Destroy(BodyIterator);
+            end;
+        end;
+
+        AddJSONBoolean(ResultProps, 'success', True);
+        AddJSONProperty(ResultProps, 'footprint', FootprintName);
+        AddJSONInteger(ResultProps, 'body_count', BodyIndex);
+        ResultProps.Add(BuildJSONArray(BodyArray, 'bodies'));
+
+        OutputLines.Text := BuildJSONObject(ResultProps);
+        Result := OutputLines.Text;
+    finally
+        OutputLines.Free;
+        BodyArray.Free;
+        ResultProps.Free;
+    end;
+end;
+
+function DumpPCBLibraryFootprintPrimitives(FootprintName: String): String;
+var
+    PcbLib            : IPCB_Library;
+    Board             : IPCB_Board;
+    Footprint         : IPCB_LibComponent;
+    PrimitiveIterator : IPCB_GroupIterator;
+    Primitive         : IPCB_Primitive;
+    Pad               : IPCB_Pad;
+    Track             : IPCB_Track;
+    Arc               : IPCB_Arc;
+    TextPrimitive     : IPCB_Text;
+    Body              : IPCB_ComponentBody;
+    Rect              : TCoordRect;
+    ResultProps       : TStringList;
+    PadsArray         : TStringList;
+    TracksArray       : TStringList;
+    ArcsArray         : TStringList;
+    TextsArray        : TStringList;
+    BodiesArray       : TStringList;
+    Props             : TStringList;
+    OutputLines       : TStringList;
+begin
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    if PcbLib = Nil then
+    begin
+        Result := '{"success": false, "error": "No PCB library document is currently active. Open a .PcbLib file first."}';
+        Exit;
+    end;
+
+    Board := PcbLib.Board;
+    Footprint := FindPCBLibraryFootprintByName(PcbLib, FootprintName);
+    if Footprint = Nil then
+    begin
+        Result := '{"success": false, "error": "Footprint not found."}';
+        Exit;
+    end;
+
+    PcbLib.CurrentComponent := Footprint;
+    Footprint := PcbLib.CurrentComponent;
+    if Board <> Nil then
+        Board.ViewManager_FullUpdate;
+
+    ResultProps := TStringList.Create;
+    PadsArray := TStringList.Create;
+    TracksArray := TStringList.Create;
+    ArcsArray := TStringList.Create;
+    TextsArray := TStringList.Create;
+    BodiesArray := TStringList.Create;
+
+    try
+        PrimitiveIterator := Footprint.GroupIterator_Create;
+        if PrimitiveIterator = Nil then
+        begin
+            Result := '{"success": false, "error": "Failed to create PCB library primitive iterator."}';
+            Exit;
+        end;
+
+        try
+            PrimitiveIterator.SetState_FilterAll;
+            Primitive := PrimitiveIterator.FirstPCBObject;
+            while Primitive <> Nil do
+            begin
+                if Primitive.ObjectId = ePadObject then
+                begin
+                    Pad := Primitive;
+                    Props := TStringList.Create;
+                    try
+                        AddJSONProperty(Props, 'name', Pad.Name);
+                        AddJSONProperty(Props, 'layer', Layer2String(Pad.Layer));
+                        AddJSONNumber(Props, 'x_mm', CoordToMMs(PCBLibLocalX(Board, Pad.X)));
+                        AddJSONNumber(Props, 'y_mm', CoordToMMs(PCBLibLocalY(Board, Pad.Y)));
+                        AddJSONNumber(Props, 'top_x_size_mm', CoordToMMs(Pad.TopXSize));
+                        AddJSONNumber(Props, 'top_y_size_mm', CoordToMMs(Pad.TopYSize));
+                        AddJSONInteger(Props, 'top_shape', Pad.TopShape);
+                        PadsArray.Add(BuildJSONObject(Props, 1));
+                    finally
+                        Props.Free;
+                    end;
+                end
+                else if Primitive.ObjectId = eTrackObject then
+                begin
+                    Track := Primitive;
+                    Props := TStringList.Create;
+                    try
+                        AddJSONProperty(Props, 'layer', Layer2String(Track.Layer));
+                        AddJSONNumber(Props, 'x1_mm', CoordToMMs(PCBLibLocalX(Board, Track.X1)));
+                        AddJSONNumber(Props, 'y1_mm', CoordToMMs(PCBLibLocalY(Board, Track.Y1)));
+                        AddJSONNumber(Props, 'x2_mm', CoordToMMs(PCBLibLocalX(Board, Track.X2)));
+                        AddJSONNumber(Props, 'y2_mm', CoordToMMs(PCBLibLocalY(Board, Track.Y2)));
+                        AddJSONNumber(Props, 'width_mm', CoordToMMs(Track.Width));
+                        TracksArray.Add(BuildJSONObject(Props, 1));
+                    finally
+                        Props.Free;
+                    end;
+                end
+                else if Primitive.ObjectId = eArcObject then
+                begin
+                    Arc := Primitive;
+                    Props := TStringList.Create;
+                    try
+                        AddJSONProperty(Props, 'layer', Layer2String(Arc.Layer));
+                        AddJSONNumber(Props, 'center_x_mm', CoordToMMs(PCBLibLocalX(Board, Arc.XCenter)));
+                        AddJSONNumber(Props, 'center_y_mm', CoordToMMs(PCBLibLocalY(Board, Arc.YCenter)));
+                        AddJSONNumber(Props, 'radius_mm', CoordToMMs(Arc.Radius));
+                        AddJSONNumber(Props, 'start_angle_deg', Arc.StartAngle);
+                        AddJSONNumber(Props, 'end_angle_deg', Arc.EndAngle);
+                        AddJSONNumber(Props, 'line_width_mm', CoordToMMs(Arc.LineWidth));
+                        ArcsArray.Add(BuildJSONObject(Props, 1));
+                    finally
+                        Props.Free;
+                    end;
+                end
+                else if Primitive.ObjectId = eTextObject then
+                begin
+                    TextPrimitive := Primitive;
+                    Props := TStringList.Create;
+                    try
+                        AddJSONProperty(Props, 'text', TextPrimitive.Text);
+                        AddJSONProperty(Props, 'layer', Layer2String(TextPrimitive.Layer));
+                        AddJSONNumber(Props, 'x_mm', CoordToMMs(PCBLibLocalX(Board, TextPrimitive.XLocation)));
+                        AddJSONNumber(Props, 'y_mm', CoordToMMs(PCBLibLocalY(Board, TextPrimitive.YLocation)));
+                        AddJSONNumber(Props, 'size_mm', CoordToMMs(TextPrimitive.Size));
+                        AddJSONNumber(Props, 'width_mm', CoordToMMs(TextPrimitive.Width));
+                        AddJSONNumber(Props, 'rotation_deg', TextPrimitive.Rotation);
+                        TextsArray.Add(BuildJSONObject(Props, 1));
+                    finally
+                        Props.Free;
+                    end;
+                end
+                else if Primitive.ObjectId = eComponentBodyObject then
+                begin
+                    Body := Primitive;
+                    Rect := Primitive.BoundingRectangle;
+                    Props := TStringList.Create;
+                    try
+                        AddJSONProperty(Props, 'layer', Layer2String(Primitive.Layer));
+                        AddJSONNumber(Props, 'left_mm', CoordToMMs(PCBLibLocalX(Board, Rect.Left)));
+                        AddJSONNumber(Props, 'bottom_mm', CoordToMMs(PCBLibLocalY(Board, Rect.Bottom)));
+                        AddJSONNumber(Props, 'right_mm', CoordToMMs(PCBLibLocalX(Board, Rect.Right)));
+                        AddJSONNumber(Props, 'top_mm', CoordToMMs(PCBLibLocalY(Board, Rect.Top)));
+                        AddJSONNumber(Props, 'standoff_height_mm', CoordToMMs(Body.StandoffHeight));
+                        AddJSONNumber(Props, 'overall_height_mm', CoordToMMs(Body.OverallHeight));
+                        AddJSONInteger(Props, 'body_projection', Body.BodyProjection);
+                        BodiesArray.Add(BuildJSONObject(Props, 1));
+                    finally
+                        Props.Free;
+                    end;
+                end;
+
+                Primitive := PrimitiveIterator.NextPCBObject;
+            end;
+        finally
+            Footprint.GroupIterator_Destroy(PrimitiveIterator);
+        end;
+
+        AddJSONBoolean(ResultProps, 'success', True);
+        AddJSONProperty(ResultProps, 'footprint', FootprintName);
+        ResultProps.Add(BuildJSONArray(PadsArray, 'pads'));
+        ResultProps.Add(BuildJSONArray(TracksArray, 'tracks'));
+        ResultProps.Add(BuildJSONArray(ArcsArray, 'arcs'));
+        ResultProps.Add(BuildJSONArray(TextsArray, 'texts'));
+        ResultProps.Add(BuildJSONArray(BodiesArray, 'bodies'));
+
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := OutputLines.Text;
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        ResultProps.Free;
+        PadsArray.Free;
+        TracksArray.Free;
+        ArcsArray.Free;
+        TextsArray.Free;
+        BodiesArray.Free;
     end;
 end;
 
@@ -4799,6 +6207,30 @@ var
     RemoveExistingProjection : Boolean;
     ReferenceFootprintName : String;
     TextDumpFootprintName : String;
+    PrimitiveDumpFootprintName : String;
+    Import3DBodyFootprintName : String;
+    Import3DBodyStepPath : String;
+    Import3DBodyLocalXMM : Double;
+    Import3DBodyLocalYMM : Double;
+    Import3DBodyRotX : Double;
+    Import3DBodyRotY : Double;
+    Import3DBodyRotZ : Double;
+    Import3DBodyStandoffMM : Double;
+    Import3DBodyOverallHeightMM : Double;
+    Set3DBodyHeightsFootprintName : String;
+    Set3DBodyHeightsStandoffMM : Double;
+    Set3DBodyHeightsOverallHeightMM : Double;
+    Fix3DBodyOriginFootprintName : String;
+    ParamsDump3DBodyFootprintName : String;
+    Set3DBodyPlacementFootprintName : String;
+    Set3DBodyPlacementLocalXMM : Double;
+    Set3DBodyPlacementLocalYMM : Double;
+    Set3DBodyPlacementRotX : Double;
+    Set3DBodyPlacementRotY : Double;
+    Set3DBodyPlacementRotZ : Double;
+    Set3DBodyPlacementModelZMM : Double;
+    Set3DBodyPlacementStandoffMM : Double;
+    Set3DBodyPlacementOverallHeightMM : Double;
 begin
     if Find3DBodyDumpCommand(LayerMoves) then
     begin
@@ -4815,6 +6247,12 @@ begin
     if FindPCBCancelCommand(LayerMoves) then
     begin
         Result := RunPCBCancelCommand;
+        Exit;
+    end;
+
+    if FindPCBPostProcessCommand(LayerMoves) then
+    begin
+        Result := RunPCBPostProcessCommand;
         Exit;
     end;
 
@@ -4845,6 +6283,63 @@ begin
     if Find3DBodyTextDumpCommand(LayerMoves, ProjectionLayerNumber, TextDumpFootprintName) then
     begin
         Result := DumpPCBLibraryProjectionTextPlacement(ProjectionLayerNumber, TextDumpFootprintName);
+        Exit;
+    end;
+
+    if FindFootprintPrimitiveDumpCommand(LayerMoves, PrimitiveDumpFootprintName) then
+    begin
+        Result := DumpPCBLibraryFootprintPrimitives(PrimitiveDumpFootprintName);
+        Exit;
+    end;
+
+    if Find3DBodyImportCommand(LayerMoves, Import3DBodyFootprintName, Import3DBodyStepPath, Import3DBodyLocalXMM, Import3DBodyLocalYMM, Import3DBodyRotX, Import3DBodyRotY, Import3DBodyRotZ, Import3DBodyStandoffMM, Import3DBodyOverallHeightMM) then
+    begin
+        Result := Import3DBodyWithPlacement(Import3DBodyFootprintName, Import3DBodyStepPath, Import3DBodyLocalXMM, Import3DBodyLocalYMM, Import3DBodyRotX, Import3DBodyRotY, Import3DBodyRotZ, Import3DBodyStandoffMM, Import3DBodyOverallHeightMM);
+        Exit;
+    end;
+
+    if Find3DBodySetHeightsCommand(LayerMoves, Set3DBodyHeightsFootprintName, Set3DBodyHeightsStandoffMM, Set3DBodyHeightsOverallHeightMM) then
+    begin
+        Result := SetPCBLibrary3DBodyHeights(Set3DBodyHeightsFootprintName, Set3DBodyHeightsStandoffMM, Set3DBodyHeightsOverallHeightMM);
+        Exit;
+    end;
+
+    if Find3DBodySetPlacementCommand(
+        LayerMoves,
+        Set3DBodyPlacementFootprintName,
+        Set3DBodyPlacementLocalXMM,
+        Set3DBodyPlacementLocalYMM,
+        Set3DBodyPlacementRotX,
+        Set3DBodyPlacementRotY,
+        Set3DBodyPlacementRotZ,
+        Set3DBodyPlacementModelZMM,
+        Set3DBodyPlacementStandoffMM,
+        Set3DBodyPlacementOverallHeightMM
+    ) then
+    begin
+        Result := SetPCBLibrary3DBodyPlacement(
+            Set3DBodyPlacementFootprintName,
+            Set3DBodyPlacementLocalXMM,
+            Set3DBodyPlacementLocalYMM,
+            Set3DBodyPlacementRotX,
+            Set3DBodyPlacementRotY,
+            Set3DBodyPlacementRotZ,
+            Set3DBodyPlacementModelZMM,
+            Set3DBodyPlacementStandoffMM,
+            Set3DBodyPlacementOverallHeightMM
+        );
+        Exit;
+    end;
+
+    if Find3DBodyFixOriginOffsetCommand(LayerMoves, Fix3DBodyOriginFootprintName) then
+    begin
+        Result := FixPCBLibrary3DBodyOriginOffset(Fix3DBodyOriginFootprintName);
+        Exit;
+    end;
+
+    if Find3DBodyParamsDumpCommand(LayerMoves, ParamsDump3DBodyFootprintName) then
+    begin
+        Result := Dump3DBodyParametersForFootprint(ParamsDump3DBodyFootprintName);
         Exit;
     end;
 

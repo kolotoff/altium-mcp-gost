@@ -15,6 +15,7 @@ STEP_EXTENSIONS = {".stp", ".step"}
 ALTIUM_WORKSPACE_OFFSET_MM = 1270.0
 COORDINATE_WRAP_THRESHOLD_MM = 500.0
 ALTIUM_TOP_PROJECTION_Z_BASELINE_DEG = 180.0
+ALTIUM_TOP_PROJECTION_ROTATION_CORRECTION_DEG = 90.0
 ROTATION_EPSILON_DEG = 1e-6
 FACE_VISIBLE_EPSILON = 1e-6
 COPLANAR_FACE_DOT = 0.9999
@@ -682,6 +683,61 @@ def scale_segments(
     return scaled
 
 
+def place_segments_without_rescale(
+    segments: list[tuple[float, float, float, float]],
+    target_bbox: tuple[float, float, float, float],
+    source_bbox: tuple[float, float, float, float] | None = None,
+    rotation_deg: float = 0.0,
+    anchor_bbox: tuple[float, float, float, float] | None = None,
+) -> list[tuple[float, float, float, float]]:
+    if source_bbox is None:
+        source_bbox = bbox_for_segments(segments)
+
+    source_left, source_bottom, source_right, source_top = source_bbox
+    target_left, target_bottom, target_right, target_top = target_bbox
+    source_center_x = (source_left + source_right) / 2.0
+    source_center_y = (source_bottom + source_top) / 2.0
+    anchor_left, anchor_bottom, anchor_right, anchor_top = anchor_bbox or target_bbox
+    target_center_x = (anchor_left + anchor_right) / 2.0
+    target_center_y = (anchor_bottom + anchor_top) / 2.0
+
+    rotation_deg = normalize_rotation_degrees(rotation_deg)
+    radians = math.radians(rotation_deg)
+    cos_a = math.cos(radians)
+    sin_a = math.sin(radians)
+
+    def map_point(x: float, y: float) -> tuple[float, float]:
+        rel_x = x - source_center_x
+        rel_y = y - source_center_y
+        return (
+            target_center_x + rel_x * cos_a - rel_y * sin_a,
+            target_center_y + rel_x * sin_a + rel_y * cos_a,
+        )
+
+    placed: list[tuple[float, float, float, float]] = []
+    seen: set[tuple[int, int, int, int]] = set()
+    for x1, y1, x2, y2 in segments:
+        nx1, ny1 = map_point(x1, y1)
+        nx2, ny2 = map_point(x2, y2)
+        if math.hypot(nx2 - nx1, ny2 - ny1) < 0.03:
+            continue
+
+        a = (round(nx1, 3), round(ny1, 3))
+        b = (round(nx2, 3), round(ny2, 3))
+        key_points = sorted((a, b))
+        key = (
+            int(round(key_points[0][0] * 1000)),
+            int(round(key_points[0][1] * 1000)),
+            int(round(key_points[1][0] * 1000)),
+            int(round(key_points[1][1] * 1000)),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        placed.append((a[0], a[1], b[0], b[1]))
+    return placed
+
+
 def normalize_target_bbox(
     target_bbox: tuple[float, float, float, float],
 ) -> tuple[tuple[float, float, float, float], bool]:
@@ -816,8 +872,10 @@ def projection_rotation_from_model_state(state: dict | None) -> float:
         return 0.0
     rotx = state.get("rotx")
     baseline = ALTIUM_TOP_PROJECTION_Z_BASELINE_DEG
-    if rotx is not None and normalize_rotation_degrees(float(rotx)) == 0.0:
-        baseline = 0.0
+    if rotx is not None:
+        normalized_rotx = normalize_rotation_degrees(float(rotx))
+        if normalized_rotx in (0.0, 90.0, 270.0):
+            baseline = 0.0
     rotation_2d = state.get("rotation_2d") or 0.0
     return normalize_rotation_degrees(baseline - float(rotz) + float(rotation_2d))
 
@@ -833,6 +891,54 @@ def transformed_model_extents(geometry: dict, state: dict | None) -> tuple[float
         max(point[1] for point in transformed) - min(point[1] for point in transformed),
         max(point[2] for point in transformed) - min(point[2] for point in transformed),
     )
+
+
+def transformed_model_height_state(geometry: dict, state: dict | None) -> dict[str, float] | None:
+    points = geometry.get("points", {}).values()
+    transformed = [transform_model_point(point, state) for point in points]
+    if not transformed:
+        return None
+
+    min_z = min(point[2] for point in transformed)
+    max_z = max(point[2] for point in transformed)
+    contact_plane = transformed_model_contact_plane_z(transformed)
+    contact_standoff = -contact_plane if contact_plane is not None else -min_z
+    return {
+        "min_z_mm": min_z,
+        "max_z_mm": max_z,
+        "overall_height_mm": max_z - min_z,
+        "absolute_min_standoff_height_mm": -min_z,
+        "contact_plane_z_mm": contact_plane if contact_plane is not None else min_z,
+        "standoff_height_mm": contact_standoff,
+    }
+
+
+def transformed_model_contact_plane_z(
+    transformed_points: list[tuple[float, float, float]],
+    z_grid_mm: float = 0.001,
+) -> float | None:
+    if not transformed_points:
+        return None
+
+    z_counts: dict[float, int] = {}
+    for point in transformed_points:
+        z = round(point[2] / z_grid_mm) * z_grid_mm
+        z = round(z, 6)
+        z_counts[z] = z_counts.get(z, 0) + 1
+
+    max_plane_count = max(z_counts.values())
+    # The absolute minimum is often a sparse plastic/detail outlier. Use the
+    # first dense negative Z plane as the real pad/contact plane.
+    min_dense_count = max(8, int(max_plane_count * 0.5), int(len(transformed_points) * 0.08))
+    dense_negative_planes = [
+        (z, count)
+        for z, count in sorted(z_counts.items())
+        if z < -1e-9 and count >= min_dense_count
+    ]
+    if dense_negative_planes:
+        return dense_negative_planes[0][0]
+
+    return min(point[2] for point in transformed_points)
 
 
 def aspect_ratio_for_bbox(bbox: tuple[float, float, float, float] | None) -> float | None:
@@ -1713,12 +1819,30 @@ def main() -> int:
             skipped[footprint] = "no visible projected STEP edges"
             continue
 
-        scaled = scale_segments(source_segments, normalized_bbox, source_bbox)
+        placement_rotation_deg = normalize_rotation_degrees(
+            projection_rotation_deg + ALTIUM_TOP_PROJECTION_ROTATION_CORRECTION_DEG
+        )
+        scaled = place_segments_without_rescale(
+            source_segments,
+            normalized_bbox,
+            source_bbox,
+            placement_rotation_deg,
+        )
         if not scaled:
             skipped[footprint] = "no scaled segments"
             continue
 
         primitives, footprint_optimization_stats = optimize_segments_to_primitives(scaled)
+        footprint_optimization_stats["placement_rotation_deg"] = round(placement_rotation_deg, 6)
+        footprint_optimization_stats["placement_preserves_step_scale"] = True
+        height_state = transformed_model_height_state(model_cache[model_path], projection_model_state)
+        if height_state is not None:
+            footprint_optimization_stats["computed_model_z_mm"] = round(height_state["standoff_height_mm"], 6)
+            footprint_optimization_stats["computed_body_standoff_height_mm"] = 0.0
+            footprint_optimization_stats["computed_standoff_height_mm"] = round(height_state["standoff_height_mm"], 6)
+            footprint_optimization_stats["computed_contact_plane_z_mm"] = round(height_state["contact_plane_z_mm"], 6)
+            footprint_optimization_stats["computed_absolute_min_standoff_height_mm"] = round(height_state["absolute_min_standoff_height_mm"], 6)
+            footprint_optimization_stats["computed_overall_height_mm"] = round(height_state["overall_height_mm"], 6)
         optimization_stats[footprint] = footprint_optimization_stats
         if not primitives:
             skipped[footprint] = "no optimized primitives"

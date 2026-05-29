@@ -196,7 +196,9 @@ The common placement state is:
 
 - body location: X/Y in the footprint/PcbLib coordinate system.
 - model orientation: Rotation X, Rotation Y, and Rotation Z in the Generic 3D Model properties.
-- vertical placement: Standoff Height and Overall Height.
+- vertical placement: Generic STEP model Z offset plus Overall Height. Keep the component-body standoff metadata at `0 mm` for this flow.
+
+Calculate vertical STEP placement from transformed model geometry, not from the absolute lowest STEP vertex alone. After applying the intended Altium model rotations, group transformed vertex Z values into 0.001 mm planes. Ignore sparse outlier planes and use the first negative plane whose count is significant for that model, for example at least half of the most populated Z plane and at least 8% of all transformed vertices. Use `model_z_mm = -contact_plane_z_mm` and keep the component body standoff field at `0 mm` unless there is a specific Altium UI requirement. This places the dense pad/contact plane on the board pad surface while avoiding isolated plastic or reference-geometry outliers. In generated diagnostics, `computed_model_z_mm` is the value to pass as the `3D_BODY_SET_PLACEMENT` model-Z argument; `computed_body_standoff_height_mm` should remain `0`.
 
 For documents with a non-zero PcbLib board origin, keep the correction in the body/model placement state. If code or a metadata tool writes raw PcbLib coordinates, calculate:
 
@@ -261,6 +263,8 @@ Body.OverallHeight := MMsToCoord(OverallHeightMM);
 
 `SetState_FromModel` can reset the body reference point, so always set `SetState_SnapPointX/Y` after it. Add `Board.XOrigin`/`Board.YOrigin` when writing raw snap points so the 3D body stays in the footprint coordinate frame.
 
+Do not recenter a 3D body by its bounding rectangle after setting the snap point. The Generic STEP model reference point and the visible bounding-box center are not guaranteed to be the same, so snap-point plus bounding-box movement can drift X/Y placement.
+
 Avoid part-number-specific refresh or generator helpers in the common MCP script. Use explicit footprint names, explicit STEP file paths, and explicit Altium placement values, then verify placement with `3D_BODY_DUMP` before saving.
 
 Supported generic helper commands:
@@ -272,7 +276,11 @@ Supported generic helper commands:
 - `FOOTPRINT_PRIMITIVE_DUMP|<footprint>`: dumps pads, tracks, arcs, regions, and body primitives for a single footprint.
 - `PCB_LIB_DESCRIPTION_DUMP|<footprint>`: dumps footprint descriptions. Use `*` as the footprint name to inspect all footprints in the active PcbLib.
 - `PCB_LIB_SET_DESCRIPTION|<footprint>|<description>`: updates a footprint description with datasheet/product-page facts. Pass one command per footprint; do not use it to write generation provenance.
+- `PCB_LIB_CLEAN_PADS_OVERLAY|<target_name_contains>|<pad_name_prefix>|<overlay_layer>`: selects matching footprints, deletes pads whose names start with the prefix, and deletes tracks/arcs on the named overlay layer through Altium's editor delete process. Use it before a `PCB_LIB_BATCH_CREATE|...|FALSE` refresh when replacing generated mounting pads and overlay graphics.
+- `PCB_LIB_BATCH_CREATE|<data_file>|<skip_existing>`: creates or populates PcbLib footprints from a pipe-delimited data file with `FOOTPRINT`, `PAD`, `TRACK`, `ARC`, `TEXT`, and `END` records. Use this for generic batch footprint work only; keep part-family tables in a task-local file, not in the common script or README. The helper writes raw primitive coordinates through the active PcbLib board using `Board.XOrigin + local_x` and `Board.YOrigin + local_y`, so it works with non-zero PcbLib origins.
 - `PCB_POSTPROCESS`: call after any PcbLib modification to close any leftover PCB server transaction and redraw the editor.
+
+When verifying a 3D placement update, run `3D_BODY_SET_PLACEMENT` and `PCB_POSTPROCESS` as separate MCP calls so the placement result is visible in the tool response before the refresh result.
 
 When sending descriptions through `layer_moves`, prefer semicolon-separated clauses instead of commas. The MCP command transport treats commas as list delimiters in some paths.
 

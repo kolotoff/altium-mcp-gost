@@ -4038,6 +4038,287 @@ begin
     end;
 end;
 
+function ParsePCBLibraryDescriptionDumpCommand(MoveText: String; var FootprintName: String): Boolean;
+var
+    CommandName : String;
+    SeparatorPos: Integer;
+begin
+    Result := False;
+    FootprintName := '*';
+
+    SeparatorPos := Pos('|', MoveText);
+    if SeparatorPos > 0 then
+    begin
+        CommandName := UpperCase(Trim(Copy(MoveText, 1, SeparatorPos - 1)));
+        FootprintName := Trim(Copy(MoveText, SeparatorPos + 1, Length(MoveText) - SeparatorPos));
+    end
+    else
+        CommandName := UpperCase(Trim(MoveText));
+
+    if CommandName <> 'PCB_LIB_DESCRIPTION_DUMP' then
+        Exit;
+
+    if FootprintName = '' then
+        FootprintName := '*';
+
+    Result := True;
+end;
+
+function FindPCBLibraryDescriptionDumpCommand(LayerMoves: TStringList; var FootprintName: String): Boolean;
+var
+    i: Integer;
+begin
+    Result := False;
+    FootprintName := '*';
+
+    for i := 0 to LayerMoves.Count - 1 do
+    begin
+        if ParsePCBLibraryDescriptionDumpCommand(LayerMoves[i], FootprintName) then
+        begin
+            Result := True;
+            Exit;
+        end;
+    end;
+end;
+
+function ParsePCBLibrarySetDescriptionCommand(MoveText: String; var FootprintName, DescriptionText: String): Boolean;
+var
+    CommandName: String;
+    Remainder  : String;
+    Separator  : Integer;
+    DescriptionSeparator: Integer;
+begin
+    Result := False;
+    FootprintName := '';
+    DescriptionText := '';
+
+    MoveText := Trim(MoveText);
+    Separator := Pos('|', MoveText);
+    if Separator <= 1 then
+        Exit;
+
+    CommandName := UpperCase(Trim(Copy(MoveText, 1, Separator - 1)));
+    if CommandName <> 'PCB_LIB_SET_DESCRIPTION' then
+        Exit;
+
+    Remainder := Copy(MoveText, Separator + 1, Length(MoveText) - Separator);
+    DescriptionSeparator := Pos('|', Remainder);
+    if DescriptionSeparator <= 1 then
+        Exit;
+
+    FootprintName := Trim(Copy(Remainder, 1, DescriptionSeparator - 1));
+    DescriptionText := Trim(Copy(Remainder, DescriptionSeparator + 1, Length(Remainder) - DescriptionSeparator));
+    Result := (FootprintName <> '') and (DescriptionText <> '');
+end;
+
+function FindPCBLibrarySetDescriptionCommands(LayerMoves: TStringList; FootprintNames, DescriptionTexts: TStringList): Boolean;
+var
+    i              : Integer;
+    FootprintName  : String;
+    DescriptionText: String;
+begin
+    Result := False;
+
+    for i := 0 to LayerMoves.Count - 1 do
+    begin
+        if ParsePCBLibrarySetDescriptionCommand(LayerMoves[i], FootprintName, DescriptionText) then
+        begin
+            FootprintNames.Add(FootprintName);
+            DescriptionTexts.Add(DescriptionText);
+            Result := True;
+        end;
+    end;
+end;
+
+function DumpPCBLibraryFootprintDescriptions(FootprintName: String): String;
+var
+    PcbLib          : IPCB_Library;
+    FootprintIterator: IPCB_LibraryIterator;
+    Footprint       : IPCB_LibComponent;
+    ResultProps     : TStringList;
+    DescriptionsArray: TStringList;
+    Props           : TStringList;
+    OutputLines     : TStringList;
+    MatchAll        : Boolean;
+    Count           : Integer;
+begin
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    if PcbLib = Nil then
+    begin
+        Result := '{"success": false, "error": "No PCB library document is currently active. Open a .PcbLib file first."}';
+        Exit;
+    end;
+
+    ResultProps := TStringList.Create;
+    DescriptionsArray := TStringList.Create;
+    OutputLines := TStringList.Create;
+    Count := 0;
+    MatchAll := (Trim(FootprintName) = '') or (Trim(FootprintName) = '*');
+
+    try
+        if MatchAll then
+        begin
+            FootprintIterator := PcbLib.LibraryIterator_Create;
+            if FootprintIterator = Nil then
+            begin
+                Result := '{"success": false, "error": "Failed to create PCB library iterator."}';
+                Exit;
+            end;
+
+            try
+                FootprintIterator.SetState_FilterAll;
+                Footprint := FootprintIterator.FirstPCBObject;
+                while Footprint <> Nil do
+                begin
+                    Props := TStringList.Create;
+                    try
+                        AddJSONProperty(Props, 'footprint', Footprint.Name);
+                        AddJSONProperty(Props, 'description', Footprint.GetState_Description);
+                        DescriptionsArray.Add(BuildJSONObject(Props, 1));
+                    finally
+                        Props.Free;
+                    end;
+                    Count := Count + 1;
+                    Footprint := FootprintIterator.NextPCBObject;
+                end;
+            finally
+                PcbLib.LibraryIterator_Destroy(FootprintIterator);
+            end;
+        end
+        else
+        begin
+            Footprint := FindPCBLibraryFootprintByName(PcbLib, FootprintName);
+            if Footprint = Nil then
+            begin
+                Result := '{"success": false, "error": "Footprint not found."}';
+                Exit;
+            end;
+
+            Props := TStringList.Create;
+            try
+                AddJSONProperty(Props, 'footprint', Footprint.Name);
+                AddJSONProperty(Props, 'description', Footprint.GetState_Description);
+                DescriptionsArray.Add(BuildJSONObject(Props, 1));
+            finally
+                Props.Free;
+            end;
+            Count := 1;
+        end;
+
+        AddJSONBoolean(ResultProps, 'success', True);
+        AddJSONProperty(ResultProps, 'footprint_filter', FootprintName);
+        AddJSONInteger(ResultProps, 'footprints_processed', Count);
+        ResultProps.Add(BuildJSONArray(DescriptionsArray, 'descriptions'));
+
+        OutputLines.Text := BuildJSONObject(ResultProps);
+        Result := OutputLines.Text;
+    finally
+        OutputLines.Free;
+        DescriptionsArray.Free;
+        ResultProps.Free;
+    end;
+end;
+
+function SetPCBLibraryFootprintDescriptions(FootprintNames, DescriptionTexts: TStringList): String;
+var
+    PcbLib          : IPCB_Library;
+    Board           : IPCB_Board;
+    Footprint       : IPCB_LibComponent;
+    ResultProps     : TStringList;
+    ResultsArray    : TStringList;
+    Props           : TStringList;
+    OutputLines     : TStringList;
+    i               : Integer;
+    ModifiedCount   : Integer;
+    UnchangedCount  : Integer;
+    MissingCount    : Integer;
+    OldDescription  : String;
+    NewDescription  : String;
+begin
+    if FootprintNames.Count <> DescriptionTexts.Count then
+    begin
+        Result := '{"success": false, "error": "Description command name/value count mismatch."}';
+        Exit;
+    end;
+
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    if PcbLib = Nil then
+    begin
+        Result := '{"success": false, "error": "No PCB library document is currently active. Open a .PcbLib file first."}';
+        Exit;
+    end;
+
+    Board := PcbLib.Board;
+    ResultProps := TStringList.Create;
+    ResultsArray := TStringList.Create;
+    OutputLines := TStringList.Create;
+    ModifiedCount := 0;
+    UnchangedCount := 0;
+    MissingCount := 0;
+
+    try
+        for i := 0 to FootprintNames.Count - 1 do
+        begin
+            Footprint := FindPCBLibraryFootprintByName(PcbLib, FootprintNames[i]);
+            Props := TStringList.Create;
+            try
+                AddJSONProperty(Props, 'footprint', FootprintNames[i]);
+                if Footprint = Nil then
+                begin
+                    AddJSONBoolean(Props, 'success', False);
+                    AddJSONProperty(Props, 'error', 'Footprint not found.');
+                    MissingCount := MissingCount + 1;
+                end
+                else
+                begin
+                    PcbLib.CurrentComponent := Footprint;
+                    Footprint := PcbLib.CurrentComponent;
+                    OldDescription := Footprint.GetState_Description;
+                    NewDescription := DescriptionTexts[i];
+
+                    AddJSONBoolean(Props, 'success', True);
+                    AddJSONProperty(Props, 'old_description', OldDescription);
+                    AddJSONProperty(Props, 'new_description', NewDescription);
+
+                    if OldDescription <> NewDescription then
+                    begin
+                        Footprint.SetState_Description(NewDescription);
+                        AddJSONBoolean(Props, 'modified', True);
+                        ModifiedCount := ModifiedCount + 1;
+                    end
+                    else
+                    begin
+                        AddJSONBoolean(Props, 'modified', False);
+                        UnchangedCount := UnchangedCount + 1;
+                    end;
+                end;
+
+                ResultsArray.Add(BuildJSONObject(Props, 1));
+            finally
+                Props.Free;
+            end;
+        end;
+
+        if Board <> Nil then
+            Board.ViewManager_FullUpdate;
+        Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
+
+        AddJSONBoolean(ResultProps, 'success', MissingCount = 0);
+        AddJSONInteger(ResultProps, 'commands_seen', FootprintNames.Count);
+        AddJSONInteger(ResultProps, 'footprints_modified', ModifiedCount);
+        AddJSONInteger(ResultProps, 'footprints_unchanged', UnchangedCount);
+        AddJSONInteger(ResultProps, 'footprints_missing', MissingCount);
+        ResultProps.Add(BuildJSONArray(ResultsArray, 'results'));
+
+        OutputLines.Text := BuildJSONObject(ResultProps);
+        Result := OutputLines.Text;
+    finally
+        OutputLines.Free;
+        ResultsArray.Free;
+        ResultProps.Free;
+    end;
+end;
+
 function ApplyGenericStepModelPlacement(Model: IPCB_Model; RotX, RotY, RotZ, StandoffMM: Double; var ErrorText: String): Boolean;
 begin
     Result := False;
@@ -6208,6 +6489,9 @@ var
     ReferenceFootprintName : String;
     TextDumpFootprintName : String;
     PrimitiveDumpFootprintName : String;
+    DescriptionDumpFootprintName : String;
+    SetDescriptionFootprintNames : TStringList;
+    SetDescriptionTexts : TStringList;
     Import3DBodyFootprintName : String;
     Import3DBodyStepPath : String;
     Import3DBodyLocalXMM : Double;
@@ -6290,6 +6574,25 @@ begin
     begin
         Result := DumpPCBLibraryFootprintPrimitives(PrimitiveDumpFootprintName);
         Exit;
+    end;
+
+    if FindPCBLibraryDescriptionDumpCommand(LayerMoves, DescriptionDumpFootprintName) then
+    begin
+        Result := DumpPCBLibraryFootprintDescriptions(DescriptionDumpFootprintName);
+        Exit;
+    end;
+
+    SetDescriptionFootprintNames := TStringList.Create;
+    SetDescriptionTexts := TStringList.Create;
+    try
+        if FindPCBLibrarySetDescriptionCommands(LayerMoves, SetDescriptionFootprintNames, SetDescriptionTexts) then
+        begin
+            Result := SetPCBLibraryFootprintDescriptions(SetDescriptionFootprintNames, SetDescriptionTexts);
+            Exit;
+        end;
+    finally
+        SetDescriptionTexts.Free;
+        SetDescriptionFootprintNames.Free;
     end;
 
     if Find3DBodyImportCommand(LayerMoves, Import3DBodyFootprintName, Import3DBodyStepPath, Import3DBodyLocalXMM, Import3DBodyLocalYMM, Import3DBodyRotX, Import3DBodyRotY, Import3DBodyRotZ, Import3DBodyStandoffMM, Import3DBodyOverallHeightMM) then

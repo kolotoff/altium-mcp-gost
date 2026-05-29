@@ -1897,7 +1897,7 @@ begin
     end;
 end;
 
-function Parse3DBodyImportCommand(MoveText: String; var FootprintName, StepPath: String; var LocalXMM, LocalYMM, RotX, RotY, RotZ, StandoffMM, OverallHeightMM: Double): Boolean;
+function Parse3DBodyImportCommand(MoveText: String; var FootprintName, StepPath: String; var LocalXMM, LocalYMM, RotX, RotY, RotZ, ModelZMM, StandoffMM, OverallHeightMM: Double): Boolean;
 var
     CommandName: String;
     Fields     : TStringList;
@@ -1912,6 +1912,7 @@ begin
     RotX := 0;
     RotY := 0;
     RotZ := 0;
+    ModelZMM := 0;
     StandoffMM := 0;
     OverallHeightMM := 0;
 
@@ -1944,8 +1945,17 @@ begin
         RotX := SafeStrToFloat(Trim(Fields[4]));
         RotY := SafeStrToFloat(Trim(Fields[5]));
         RotZ := SafeStrToFloat(Trim(Fields[6]));
-        StandoffMM := SafeStrToFloat(Trim(Fields[7]));
-        OverallHeightMM := SafeStrToFloat(Trim(Fields[8]));
+        if Fields.Count >= 10 then
+        begin
+            ModelZMM := SafeStrToFloat(Trim(Fields[7]));
+            StandoffMM := SafeStrToFloat(Trim(Fields[8]));
+            OverallHeightMM := SafeStrToFloat(Trim(Fields[9]));
+        end
+        else
+        begin
+            StandoffMM := SafeStrToFloat(Trim(Fields[7]));
+            OverallHeightMM := SafeStrToFloat(Trim(Fields[8]));
+        end;
 
         Result := True;
     finally
@@ -1953,17 +1963,18 @@ begin
     end;
 end;
 
-function Find3DBodyImportCommand(LayerMoves: TStringList; var FootprintName, StepPath: String; var LocalXMM, LocalYMM, RotX, RotY, RotZ, StandoffMM, OverallHeightMM: Double): Boolean;
+function Find3DBodyImportCommand(LayerMoves: TStringList; var FootprintName, StepPath: String; var LocalXMM, LocalYMM, RotX, RotY, RotZ, ModelZMM, StandoffMM, OverallHeightMM: Double): Boolean;
 var
     i: Integer;
 begin
     Result := False;
     FootprintName := '';
     StepPath := '';
+    ModelZMM := 0;
 
     for i := 0 to LayerMoves.Count - 1 do
     begin
-        if Parse3DBodyImportCommand(LayerMoves[i], FootprintName, StepPath, LocalXMM, LocalYMM, RotX, RotY, RotZ, StandoffMM, OverallHeightMM) then
+        if Parse3DBodyImportCommand(LayerMoves[i], FootprintName, StepPath, LocalXMM, LocalYMM, RotX, RotY, RotZ, ModelZMM, StandoffMM, OverallHeightMM) then
         begin
             Result := True;
             Exit;
@@ -3041,6 +3052,52 @@ begin
                     Result := Result + 1;
                 end;
             end;
+            Primitive := PrimitiveIterator.NextPCBObject;
+        end;
+    finally
+        Footprint.GroupIterator_Destroy(PrimitiveIterator);
+    end;
+end;
+
+function SelectPadsByPrefixAndLayerPrimitives(Footprint: IPCB_LibComponent; OverlayLayer: TLayer; PadNamePrefix: String): Integer;
+var
+    PrimitiveIterator: IPCB_GroupIterator;
+    Primitive: IPCB_Primitive;
+    Pad: IPCB_Pad;
+    PrefixText: String;
+begin
+    Result := 0;
+
+    if Footprint = Nil then
+        Exit;
+
+    PrefixText := UpperCase(Trim(PadNamePrefix));
+
+    PrimitiveIterator := Footprint.GroupIterator_Create;
+    if PrimitiveIterator = Nil then
+        Exit;
+
+    try
+        PrimitiveIterator.AddFilter_ObjectSet(MkSet(ePadObject, eTrackObject, eArcObject));
+
+        Primitive := PrimitiveIterator.FirstPCBObject;
+        while Primitive <> Nil do
+        begin
+            if Primitive.ObjectId = ePadObject then
+            begin
+                Pad := Primitive;
+                if (PrefixText <> '') and (Copy(UpperCase(Pad.Name), 1, Length(PrefixText)) = PrefixText) then
+                begin
+                    Primitive.Selected := True;
+                    Result := Result + 1;
+                end;
+            end
+            else if Primitive.Layer = OverlayLayer then
+            begin
+                Primitive.Selected := True;
+                Result := Result + 1;
+            end;
+
             Primitive := PrimitiveIterator.NextPCBObject;
         end;
     finally
@@ -4130,6 +4187,154 @@ begin
     end;
 end;
 
+function ParsePCBLibraryBatchCreateCommand(MoveText: String; var DataFileName: String; var SkipExisting: Boolean): Boolean;
+var
+    Fields: TStringList;
+begin
+    Result := False;
+    DataFileName := ROOT_DIR + 'pcblib_batch_footprints.txt';
+    SkipExisting := True;
+
+    Fields := TStringList.Create;
+    try
+        Fields.Delimiter := '|';
+        Fields.StrictDelimiter := True;
+        Fields.DelimitedText := Trim(MoveText);
+
+        if Fields.Count < 1 then
+            Exit;
+        if UpperCase(Trim(Fields[0])) <> 'PCB_LIB_BATCH_CREATE' then
+            Exit;
+
+        if (Fields.Count >= 2) and (Trim(Fields[1]) <> '') then
+            DataFileName := Trim(Fields[1]);
+        if Fields.Count >= 3 then
+            SkipExisting := UpperCase(Trim(Fields[2])) <> 'FALSE';
+
+        Result := True;
+    finally
+        Fields.Free;
+    end;
+end;
+
+function FindPCBLibraryBatchCreateCommand(LayerMoves: TStringList; var DataFileName: String; var SkipExisting: Boolean): Boolean;
+var
+    i: Integer;
+begin
+    Result := False;
+    DataFileName := ROOT_DIR + 'pcblib_batch_footprints.txt';
+    SkipExisting := True;
+
+    for i := 0 to LayerMoves.Count - 1 do
+    begin
+        if ParsePCBLibraryBatchCreateCommand(LayerMoves[i], DataFileName, SkipExisting) then
+        begin
+            Result := True;
+            Exit;
+        end;
+    end;
+end;
+
+function ParsePCBLibraryCleanPadsOverlayCommand(MoveText: String; var TargetNameContains, PadNamePrefix, OverlayLayerName: String): Boolean;
+var
+    Fields: TStringList;
+begin
+    Result := False;
+    TargetNameContains := '';
+    PadNamePrefix := 'MP';
+    OverlayLayerName := 'Top Overlay';
+
+    Fields := TStringList.Create;
+    try
+        Fields.Delimiter := '|';
+        Fields.StrictDelimiter := True;
+        Fields.DelimitedText := Trim(MoveText);
+
+        if Fields.Count < 1 then
+            Exit;
+        if UpperCase(Trim(Fields[0])) <> 'PCB_LIB_CLEAN_PADS_OVERLAY' then
+            Exit;
+
+        if Fields.Count >= 2 then
+            TargetNameContains := Trim(Fields[1]);
+        if (Fields.Count >= 3) and (Trim(Fields[2]) <> '') then
+            PadNamePrefix := Trim(Fields[2]);
+        if (Fields.Count >= 4) and (Trim(Fields[3]) <> '') then
+            OverlayLayerName := Trim(Fields[3]);
+
+        Result := True;
+    finally
+        Fields.Free;
+    end;
+end;
+
+function FindPCBLibraryCleanPadsOverlayCommand(LayerMoves: TStringList; var TargetNameContains, PadNamePrefix, OverlayLayerName: String): Boolean;
+var
+    i: Integer;
+begin
+    Result := False;
+    TargetNameContains := '';
+    PadNamePrefix := 'MP';
+    OverlayLayerName := 'Top Overlay';
+
+    for i := 0 to LayerMoves.Count - 1 do
+    begin
+        if ParsePCBLibraryCleanPadsOverlayCommand(LayerMoves[i], TargetNameContains, PadNamePrefix, OverlayLayerName) then
+        begin
+            Result := True;
+            Exit;
+        end;
+    end;
+end;
+
+function Parse3DBodyBatchImportCommand(MoveText: String; var DataFileName: String; var SkipExisting: Boolean): Boolean;
+var
+    Fields: TStringList;
+begin
+    Result := False;
+    DataFileName := ROOT_DIR + 'pcblib_3d_body_import.txt';
+    SkipExisting := True;
+
+    Fields := TStringList.Create;
+    try
+        Fields.Delimiter := '|';
+        Fields.StrictDelimiter := True;
+        Fields.DelimitedText := Trim(MoveText);
+
+        if Fields.Count < 1 then
+            Exit;
+        if UpperCase(Trim(Fields[0])) <> '3D_BODY_BATCH_IMPORT' then
+            Exit;
+
+        if (Fields.Count >= 2) and (Trim(Fields[1]) <> '') then
+            DataFileName := Trim(Fields[1]);
+        if Fields.Count >= 3 then
+            SkipExisting := UpperCase(Trim(Fields[2])) <> 'FALSE';
+
+        Result := True;
+    finally
+        Fields.Free;
+    end;
+end;
+
+function Find3DBodyBatchImportCommand(LayerMoves: TStringList; var DataFileName: String; var SkipExisting: Boolean): Boolean;
+var
+    i: Integer;
+begin
+    Result := False;
+    DataFileName := ROOT_DIR + 'pcblib_3d_body_import.txt';
+    SkipExisting := True;
+
+    for i := 0 to LayerMoves.Count - 1 do
+    begin
+        if Parse3DBodyBatchImportCommand(LayerMoves[i], DataFileName, SkipExisting) then
+        begin
+            Result := True;
+            Exit;
+        end;
+    end;
+end;
+
 function DumpPCBLibraryFootprintDescriptions(FootprintName: String): String;
 var
     PcbLib          : IPCB_Library;
@@ -4319,24 +4524,387 @@ begin
     end;
 end;
 
-function ApplyGenericStepModelPlacement(Model: IPCB_Model; RotX, RotY, RotZ, StandoffMM: Double; var ErrorText: String): Boolean;
+function CountPCBLibraryFootprintPrimitives(Footprint: IPCB_LibComponent): Integer;
+var
+    PrimitiveIterator: IPCB_GroupIterator;
+    Primitive        : IPCB_Primitive;
 begin
-    Result := False;
-    ErrorText := 'Generic STEP model rotation is not applied by this DelphiScript path. AD 26.6 can access-violate when IPCB_Model.SetState is called from script; keep the STEP file unchanged and set Rotation X/Y/Z plus Standoff Height through Altium 3D Body properties, then verify with 3D_BODY_DUMP.';
-
-    if Model = Nil then
-    begin
-        ErrorText := 'STEP model is nil.';
+    Result := 0;
+    if Footprint = Nil then
         Exit;
+
+    PrimitiveIterator := Footprint.GroupIterator_Create;
+    if PrimitiveIterator = Nil then
+        Exit;
+
+    try
+        PrimitiveIterator.SetState_FilterAll;
+        Primitive := PrimitiveIterator.FirstPCBObject;
+        while Primitive <> Nil do
+        begin
+            Result := Result + 1;
+            Primitive := PrimitiveIterator.NextPCBObject;
+        end;
+    finally
+        Footprint.GroupIterator_Destroy(PrimitiveIterator);
     end;
 end;
 
-function AddStepBodyToActiveComponentWithPlacement(PcbLib: IPCB_Library; Footprint: IPCB_LibComponent; StepPath: String; LocalXMM, LocalYMM, RotX, RotY, RotZ, StandoffMM, OverallHeightMM: Double; var ErrorText: String): Boolean;
+function CreatePCBLibraryBatchFootprints(DataFileName: String; SkipExisting: Boolean): String;
+var
+    PcbLib          : IPCB_Library;
+    Board           : IPCB_Board;
+    LibComp         : IPCB_Component;
+    Footprint       : IPCB_LibComponent;
+    ExistingFootprint: IPCB_LibComponent;
+    Lines           : TStringList;
+    Fields          : TStringList;
+    ResultProps     : TStringList;
+    CreatedFootprints: TStringList;
+    SkippedFootprints: TStringList;
+    PopulatedFootprints: TStringList;
+    ErrorArray      : TStringList;
+    OutputLines     : TStringList;
+    LineText        : String;
+    CommandName     : String;
+    CurrentName     : String;
+    CurrentDescription: String;
+    LayerName       : String;
+    ShapeStr        : String;
+    PadShape        : TShape;
+    CurrentSkipped  : Boolean;
+    CurrentExisting : Boolean;
+    i               : Integer;
+    FootprintsSeen  : Integer;
+    FootprintsCreated: Integer;
+    FootprintsSkipped: Integer;
+    FootprintsPopulated: Integer;
+    ExistingPrimitiveCount: Integer;
+    PrimitiveCount  : Integer;
+    Pad             : IPCB_Pad;
+    Track           : IPCB_Track;
+    Arc             : IPCB_Arc;
+    TextPrimitive   : IPCB_Text;
+begin
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    if PcbLib = Nil then
+    begin
+        Result := '{"success": false, "error": "No PCB library document is currently active. Open a .PcbLib file first."}';
+        Exit;
+    end;
+
+    if not FileExists(DataFileName) then
+    begin
+        Result := '{"success": false, "error": "Batch footprint file not found."}';
+        Exit;
+    end;
+
+    Board := PcbLib.Board;
+    Lines := TStringList.Create;
+    Fields := TStringList.Create;
+    ResultProps := TStringList.Create;
+    CreatedFootprints := TStringList.Create;
+    SkippedFootprints := TStringList.Create;
+    PopulatedFootprints := TStringList.Create;
+    ErrorArray := TStringList.Create;
+    OutputLines := TStringList.Create;
+    CurrentName := '';
+    CurrentDescription := '';
+    CurrentSkipped := False;
+    CurrentExisting := False;
+    LibComp := Nil;
+    Footprint := Nil;
+    FootprintsSeen := 0;
+    FootprintsCreated := 0;
+    FootprintsSkipped := 0;
+    FootprintsPopulated := 0;
+    PrimitiveCount := 0;
+
+    try
+        Fields.Delimiter := '|';
+        Fields.StrictDelimiter := True;
+        Lines.LoadFromFile(DataFileName);
+
+        PCBServer.PreProcess;
+        try
+            for i := 0 to Lines.Count - 1 do
+            begin
+            LineText := Trim(Lines[i]);
+            if LineText = '' then
+                continue;
+            if Copy(LineText, 1, 1) = '#' then
+                continue;
+
+            Fields.Clear;
+            Fields.DelimitedText := LineText;
+            if Fields.Count = 0 then
+                continue;
+
+            CommandName := UpperCase(Trim(Fields[0]));
+
+            if CommandName = 'FOOTPRINT' then
+            begin
+                if Fields.Count < 3 then
+                begin
+                    ErrorArray.Add('"' + JSONEscapeString('Line ' + IntToStr(i + 1) + ': FOOTPRINT requires name and description.') + '"');
+                    continue;
+                end;
+
+                CurrentName := Trim(Fields[1]);
+                CurrentDescription := Trim(Fields[2]);
+                CurrentSkipped := False;
+                CurrentExisting := False;
+                LibComp := Nil;
+                Footprint := Nil;
+                FootprintsSeen := FootprintsSeen + 1;
+
+                ExistingFootprint := FindPCBLibraryFootprintByName(PcbLib, CurrentName);
+                if ExistingFootprint <> Nil then
+                begin
+                    ExistingPrimitiveCount := CountPCBLibraryFootprintPrimitives(ExistingFootprint);
+                    if SkipExisting and (ExistingPrimitiveCount > 0) then
+                    begin
+                        CurrentSkipped := True;
+                        FootprintsSkipped := FootprintsSkipped + 1;
+                        SkippedFootprints.Add('"' + JSONEscapeString(CurrentName) + '"');
+                    end
+                    else
+                    begin
+                        CurrentExisting := True;
+                        PcbLib.CurrentComponent := ExistingFootprint;
+                        Footprint := PcbLib.CurrentComponent;
+                        if Footprint <> Nil then
+                            Footprint.SetState_Description(CurrentDescription);
+                    end;
+                end;
+
+                if (ExistingFootprint = Nil) then
+                begin
+                    LibComp := PCBServer.CreatePCBLibComp;
+                    if LibComp = Nil then
+                    begin
+                        ErrorArray.Add('"' + JSONEscapeString('Line ' + IntToStr(i + 1) + ': failed to create footprint: ' + CurrentName) + '"');
+                        CurrentSkipped := True;
+                        continue;
+                    end;
+
+                    LibComp.Name := CurrentName;
+                    PcbLib.RegisterComponent(LibComp);
+                    PcbLib.CurrentComponent := LibComp;
+                    Footprint := PcbLib.CurrentComponent;
+                    if Footprint <> Nil then
+                        Footprint.SetState_Description(CurrentDescription);
+                end;
+            end
+            else if CommandName = 'END' then
+            begin
+                if (not CurrentSkipped) and (Footprint <> Nil) then
+                begin
+                    if CurrentExisting then
+                    begin
+                        PopulatedFootprints.Add('"' + JSONEscapeString(CurrentName) + '"');
+                        FootprintsPopulated := FootprintsPopulated + 1;
+                    end
+                    else
+                    begin
+                        CreatedFootprints.Add('"' + JSONEscapeString(CurrentName) + '"');
+                        FootprintsCreated := FootprintsCreated + 1;
+                    end;
+                end;
+
+                CurrentName := '';
+                CurrentDescription := '';
+                CurrentSkipped := False;
+                CurrentExisting := False;
+                LibComp := Nil;
+                Footprint := Nil;
+            end
+            else if (CurrentSkipped) or (Footprint = Nil) then
+                continue
+            else if CommandName = 'PAD' then
+            begin
+                if Fields.Count < 7 then
+                begin
+                    ErrorArray.Add('"' + JSONEscapeString('Line ' + IntToStr(i + 1) + ': PAD requires name, x, y, width, height, shape.') + '"');
+                    continue;
+                end;
+                if Board = Nil then
+                begin
+                    ErrorArray.Add('"' + JSONEscapeString('Line ' + IntToStr(i + 1) + ': active PcbLib board is nil.') + '"');
+                    continue;
+                end;
+
+                ShapeStr := UpperCase(Trim(Fields[6]));
+                if ShapeStr = 'ROUND' then
+                    PadShape := eRounded
+                else if (ShapeStr = 'OVAL') or (ShapeStr = 'ROUNDRECT') then
+                    PadShape := eRoundedRectangular
+                else
+                    PadShape := eRectangular;
+
+                Pad := PCBServer.PCBObjectFactory(ePadObject, eNoDimension, eCreate_Default);
+                if Pad <> Nil then
+                begin
+                    Pad.Name := Trim(Fields[1]);
+                    Pad.Mode := ePadMode_Simple;
+                    Pad.HoleSize := 0;
+                    Pad.X := Board.XOrigin + MMsToCoord(SafeStrToFloat(Fields[2]));
+                    Pad.Y := Board.YOrigin + MMsToCoord(SafeStrToFloat(Fields[3]));
+                    Pad.Layer := eTopLayer;
+                    Pad.TopXSize := MMsToCoord(SafeStrToFloat(Fields[4]));
+                    Pad.TopYSize := MMsToCoord(SafeStrToFloat(Fields[5]));
+                    Pad.TopShape := PadShape;
+                    PCBServer.SendMessageToRobots(Pad.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+                    Board.AddPCBObject(Pad);
+                    PCBServer.SendMessageToRobots(Pad.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+                    PrimitiveCount := PrimitiveCount + 1;
+                end;
+            end
+            else if CommandName = 'TRACK' then
+            begin
+                if Fields.Count < 7 then
+                begin
+                    ErrorArray.Add('"' + JSONEscapeString('Line ' + IntToStr(i + 1) + ': TRACK requires layer, x1, y1, x2, y2, width.') + '"');
+                    continue;
+                end;
+                if Board = Nil then
+                begin
+                    ErrorArray.Add('"' + JSONEscapeString('Line ' + IntToStr(i + 1) + ': active PcbLib board is nil.') + '"');
+                    continue;
+                end;
+
+                LayerName := Trim(Fields[1]);
+                Track := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
+                if Track <> Nil then
+                begin
+                    Track.Layer := String2Layer(LayerName);
+                    Track.X1 := Board.XOrigin + MMsToCoord(SafeStrToFloat(Fields[2]));
+                    Track.Y1 := Board.YOrigin + MMsToCoord(SafeStrToFloat(Fields[3]));
+                    Track.X2 := Board.XOrigin + MMsToCoord(SafeStrToFloat(Fields[4]));
+                    Track.Y2 := Board.YOrigin + MMsToCoord(SafeStrToFloat(Fields[5]));
+                    Track.Width := MMsToCoord(SafeStrToFloat(Fields[6]));
+                    PCBServer.SendMessageToRobots(Track.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+                    Board.AddPCBObject(Track);
+                    PCBServer.SendMessageToRobots(Track.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+                    PrimitiveCount := PrimitiveCount + 1;
+                end;
+            end
+            else if CommandName = 'ARC' then
+            begin
+                if Fields.Count < 8 then
+                begin
+                    ErrorArray.Add('"' + JSONEscapeString('Line ' + IntToStr(i + 1) + ': ARC requires layer, center x, center y, radius, start angle, end angle, width.') + '"');
+                    continue;
+                end;
+                if Board = Nil then
+                begin
+                    ErrorArray.Add('"' + JSONEscapeString('Line ' + IntToStr(i + 1) + ': active PcbLib board is nil.') + '"');
+                    continue;
+                end;
+
+                LayerName := Trim(Fields[1]);
+                Arc := PCBServer.PCBObjectFactory(eArcObject, eNoDimension, eCreate_Default);
+                if Arc <> Nil then
+                begin
+                    Arc.Layer := String2Layer(LayerName);
+                    Arc.XCenter := Board.XOrigin + MMsToCoord(SafeStrToFloat(Fields[2]));
+                    Arc.YCenter := Board.YOrigin + MMsToCoord(SafeStrToFloat(Fields[3]));
+                    Arc.Radius := MMsToCoord(SafeStrToFloat(Fields[4]));
+                    Arc.StartAngle := SafeStrToFloat(Fields[5]);
+                    Arc.EndAngle := SafeStrToFloat(Fields[6]);
+                    Arc.LineWidth := MMsToCoord(SafeStrToFloat(Fields[7]));
+                    PCBServer.SendMessageToRobots(Arc.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+                    Board.AddPCBObject(Arc);
+                    PCBServer.SendMessageToRobots(Arc.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+                    PrimitiveCount := PrimitiveCount + 1;
+                end;
+            end
+            else if CommandName = 'TEXT' then
+            begin
+                if Fields.Count < 8 then
+                begin
+                    ErrorArray.Add('"' + JSONEscapeString('Line ' + IntToStr(i + 1) + ': TEXT requires layer, text, x, y, size, width, rotation.') + '"');
+                    continue;
+                end;
+                if Board = Nil then
+                begin
+                    ErrorArray.Add('"' + JSONEscapeString('Line ' + IntToStr(i + 1) + ': active PcbLib board is nil.') + '"');
+                    continue;
+                end;
+
+                LayerName := Trim(Fields[1]);
+                TextPrimitive := PCBServer.PCBObjectFactory(eTextObject, eNoDimension, eCreate_Default);
+                if TextPrimitive <> Nil then
+                begin
+                    TextPrimitive.Layer := String2Layer(LayerName);
+                    TextPrimitive.Text := Fields[2];
+                    TextPrimitive.XLocation := Board.XOrigin + MMsToCoord(SafeStrToFloat(Fields[3]));
+                    TextPrimitive.YLocation := Board.YOrigin + MMsToCoord(SafeStrToFloat(Fields[4]));
+                    TextPrimitive.Size := MMsToCoord(SafeStrToFloat(Fields[5]));
+                    TextPrimitive.Width := MMsToCoord(SafeStrToFloat(Fields[6]));
+                    TextPrimitive.Rotation := SafeStrToFloat(Fields[7]);
+                    TextPrimitive.UseTTFonts := True;
+                    TextPrimitive.FontName := 'ARIAL';
+                    PCBServer.SendMessageToRobots(TextPrimitive.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+                    Board.AddPCBObject(TextPrimitive);
+                    PCBServer.SendMessageToRobots(TextPrimitive.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+                    PrimitiveCount := PrimitiveCount + 1;
+                end;
+            end;
+            end;
+        finally
+            PCBServer.PostProcess;
+        end;
+
+        AddJSONBoolean(ResultProps, 'success', ErrorArray.Count = 0);
+        AddJSONProperty(ResultProps, 'data_file', DataFileName);
+        AddJSONBoolean(ResultProps, 'skip_existing', SkipExisting);
+        AddJSONInteger(ResultProps, 'footprints_seen', FootprintsSeen);
+        AddJSONInteger(ResultProps, 'footprints_created', FootprintsCreated);
+        AddJSONInteger(ResultProps, 'footprints_skipped', FootprintsSkipped);
+        AddJSONInteger(ResultProps, 'footprints_populated', FootprintsPopulated);
+        AddJSONInteger(ResultProps, 'primitives_created', PrimitiveCount);
+        ResultProps.Add(BuildJSONArray(CreatedFootprints, 'created_footprints'));
+        ResultProps.Add(BuildJSONArray(SkippedFootprints, 'skipped_footprints'));
+        ResultProps.Add(BuildJSONArray(PopulatedFootprints, 'populated_footprints'));
+        ResultProps.Add(BuildJSONArray(ErrorArray, 'errors'));
+
+        OutputLines.Text := BuildJSONObject(ResultProps);
+        Result := OutputLines.Text;
+    finally
+        OutputLines.Free;
+        ErrorArray.Free;
+        PopulatedFootprints.Free;
+        SkippedFootprints.Free;
+        CreatedFootprints.Free;
+        ResultProps.Free;
+        Fields.Free;
+        Lines.Free;
+    end;
+end;
+
+function ApplyGenericStepModelPlacement(Model: IPCB_Model; RotX, RotY, RotZ, ModelZMM: Double; var ErrorText: String): Boolean;
+begin
+    if Model = Nil then
+    begin
+        Result := False;
+        ErrorText := 'STEP model is nil.';
+        Exit;
+    end;
+
+    ErrorText := '';
+    Model.SetState(RotX, RotY, RotZ, MMsToCoord(ModelZMM));
+    Result := True;
+end;
+
+function AddStepBodyToActiveComponentWithPlacement(PcbLib: IPCB_Library; Footprint: IPCB_LibComponent; StepPath: String; LocalXMM, LocalYMM, RotX, RotY, RotZ, ModelZMM, StandoffMM, OverallHeightMM: Double; var ErrorText: String): Boolean;
 var
     Board   : IPCB_Board;
     StepBody: IPCB_ComponentBody;
     Model   : IPCB_Model;
     ModelError : String;
+    TargetCenterX : TCoord;
+    TargetCenterY : TCoord;
 begin
     Result := False;
     ErrorText := '';
@@ -4376,7 +4944,7 @@ begin
         Exit;
     end;
 
-    if not ApplyGenericStepModelPlacement(Model, RotX, RotY, RotZ, StandoffMM, ModelError) then
+    if not ApplyGenericStepModelPlacement(Model, RotX, RotY, RotZ, ModelZMM, ModelError) then
     begin
         ErrorText := ModelError;
         Exit;
@@ -4385,22 +4953,54 @@ begin
     StepBody.Model := Model;
     StepBody.SetState_FromModel;
     StepBody.Layer := ILayer.MechanicalLayer(1);
+    TargetCenterX := Board.XOrigin + MMsToCoord(LocalXMM);
+    TargetCenterY := Board.YOrigin + MMsToCoord(LocalYMM);
+    StepBody.SetState_SnapPointX(TargetCenterX);
+    StepBody.SetState_SnapPointY(TargetCenterY);
     StepBody.StandoffHeight := MMsToCoord(StandoffMM);
     if OverallHeightMM > 0 then
         StepBody.OverallHeight := MMsToCoord(OverallHeightMM);
 
     PCBServer.SendMessageToRobots(StepBody.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
     Board.AddPCBObject(StepBody);
+    StepBody.GraphicallyInvalidate;
     PCBServer.SendMessageToRobots(StepBody.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
     Result := True;
 end;
 
-function Import3DBodyWithPlacement(FootprintName, StepPath: String; LocalXMM, LocalYMM, RotX, RotY, RotZ, StandoffMM, OverallHeightMM: Double): String;
+function Count3DBodiesForFootprint(Footprint: IPCB_LibComponent): Integer;
+var
+    BodyIterator : IPCB_GroupIterator;
+    Primitive    : IPCB_Primitive;
+begin
+    Result := 0;
+    if Footprint = Nil then
+        Exit;
+
+    BodyIterator := Footprint.GroupIterator_Create;
+    if BodyIterator = Nil then
+        Exit;
+
+    try
+        BodyIterator.AddFilter_ObjectSet(MkSet(eComponentBodyObject));
+        BodyIterator.AddFilter_LayerSet(AllLayers);
+        Primitive := BodyIterator.FirstPCBObject;
+        while Primitive <> Nil do
+        begin
+            Result := Result + 1;
+            Primitive := BodyIterator.NextPCBObject;
+        end;
+    finally
+        Footprint.GroupIterator_Destroy(BodyIterator);
+    end;
+end;
+
+function Import3DBodyWithPlacement(FootprintName, StepPath: String; LocalXMM, LocalYMM, RotX, RotY, RotZ, ModelZMM, StandoffMM, OverallHeightMM: Double): String;
 var
     PcbLib          : IPCB_Library;
     Board           : IPCB_Board;
     Footprint       : IPCB_LibComponent;
-    RemovedBodies   : Integer;
+    ExistingBodies  : Integer;
     BodyError       : String;
     ResultProps     : TStringList;
     OutputLines     : TStringList;
@@ -4425,29 +5025,6 @@ begin
         Exit;
     end;
 
-    ResultProps := TStringList.Create;
-    OutputLines := TStringList.Create;
-    try
-        AddJSONBoolean(ResultProps, 'success', False);
-        AddJSONBoolean(ResultProps, 'mutated', False);
-        AddJSONProperty(ResultProps, 'footprint', FootprintName);
-        AddJSONProperty(ResultProps, 'step_file', StepPath);
-        AddJSONNumber(ResultProps, 'local_x_mm', LocalXMM);
-        AddJSONNumber(ResultProps, 'local_y_mm', LocalYMM);
-        AddJSONNumber(ResultProps, 'model_rot_x_deg', RotX);
-        AddJSONNumber(ResultProps, 'model_rot_y_deg', RotY);
-        AddJSONNumber(ResultProps, 'model_rot_z_deg', RotZ);
-        AddJSONNumber(ResultProps, 'standoff_height_mm', StandoffMM);
-        AddJSONNumber(ResultProps, 'overall_height_mm', OverallHeightMM);
-        AddJSONProperty(ResultProps, 'error', '3D_BODY_IMPORT is disabled for mutation in AD 26.6 because scripted generic STEP model placement can crash ScriptingSystem.dll. Import the unchanged STEP into a Generic 3D Body, set X/Y, Rotation X/Y/Z, Standoff Height, and Overall Height in the Altium Properties panel, then run 3D_BODY_DUMP to verify.');
-        OutputLines.Text := BuildJSONObject(ResultProps);
-        Result := OutputLines.Text;
-    finally
-        OutputLines.Free;
-        ResultProps.Free;
-    end;
-    Exit;
-
     Board := PcbLib.Board;
     EnsureMechanicalLayerEnabled(Board, 1);
     ResultProps := TStringList.Create;
@@ -4459,33 +5036,44 @@ begin
         if Board <> Nil then
             Board.ViewManager_FullUpdate;
 
-        RemovedBodies := SelectComponentBodiesForDelete(Footprint);
-        if RemovedBodies > 0 then
-            Client.SendMessage('PCB:DeleteObjects', 'Object=SELECTED', 255, Client.CurrentView);
+        ExistingBodies := Count3DBodiesForFootprint(Footprint);
+        if ExistingBodies > 0 then
+        begin
+            AddJSONBoolean(ResultProps, 'success', False);
+            AddJSONBoolean(ResultProps, 'mutated', False);
+            AddJSONProperty(ResultProps, 'footprint', FootprintName);
+            AddJSONProperty(ResultProps, 'step_file', StepPath);
+            AddJSONInteger(ResultProps, 'existing_bodies', ExistingBodies);
+            AddJSONProperty(ResultProps, 'error', 'Footprint already has a 3D body. Remove it manually or import into an empty footprint.');
+        end
+        else
+        begin
 
-        PCBServer.PreProcess;
-        try
-            if not AddStepBodyToActiveComponentWithPlacement(PcbLib, Footprint, StepPath, LocalXMM, LocalYMM, RotX, RotY, RotZ, StandoffMM, OverallHeightMM, BodyError) then
-            begin
-                AddJSONBoolean(ResultProps, 'success', False);
-                AddJSONProperty(ResultProps, 'error', BodyError);
-            end
-            else
-            begin
-                AddJSONBoolean(ResultProps, 'success', True);
-                AddJSONProperty(ResultProps, 'footprint', FootprintName);
-                AddJSONProperty(ResultProps, 'step_file', StepPath);
-                AddJSONInteger(ResultProps, 'removed_bodies', RemovedBodies);
-                AddJSONNumber(ResultProps, 'local_x_mm', LocalXMM);
-                AddJSONNumber(ResultProps, 'local_y_mm', LocalYMM);
-                AddJSONNumber(ResultProps, 'model_rot_x_deg', RotX);
-                AddJSONNumber(ResultProps, 'model_rot_y_deg', RotY);
-                AddJSONNumber(ResultProps, 'model_rot_z_deg', RotZ);
-                AddJSONNumber(ResultProps, 'standoff_height_mm', StandoffMM);
-                AddJSONNumber(ResultProps, 'overall_height_mm', OverallHeightMM);
+            PCBServer.PreProcess;
+            try
+                if not AddStepBodyToActiveComponentWithPlacement(PcbLib, Footprint, StepPath, LocalXMM, LocalYMM, RotX, RotY, RotZ, ModelZMM, StandoffMM, OverallHeightMM, BodyError) then
+                begin
+                    AddJSONBoolean(ResultProps, 'success', False);
+                    AddJSONProperty(ResultProps, 'error', BodyError);
+                end
+                else
+                begin
+                    AddJSONBoolean(ResultProps, 'success', True);
+                    AddJSONBoolean(ResultProps, 'mutated', True);
+                    AddJSONProperty(ResultProps, 'footprint', FootprintName);
+                    AddJSONProperty(ResultProps, 'step_file', StepPath);
+                    AddJSONNumber(ResultProps, 'local_x_mm', LocalXMM);
+                    AddJSONNumber(ResultProps, 'local_y_mm', LocalYMM);
+                    AddJSONNumber(ResultProps, 'model_rot_x_deg', RotX);
+                    AddJSONNumber(ResultProps, 'model_rot_y_deg', RotY);
+                    AddJSONNumber(ResultProps, 'model_rot_z_deg', RotZ);
+                    AddJSONNumber(ResultProps, 'model_z_mm', ModelZMM);
+                    AddJSONNumber(ResultProps, 'standoff_height_mm', StandoffMM);
+                    AddJSONNumber(ResultProps, 'overall_height_mm', OverallHeightMM);
+                end;
+            finally
+                PCBServer.PostProcess;
             end;
-        finally
-            PCBServer.PostProcess;
         end;
 
         Client.SendMessage('PCB:DeSelect', 'Scope=All', 255, Client.CurrentView);
@@ -4502,6 +5090,191 @@ begin
         end;
     finally
         ResultProps.Free;
+    end;
+end;
+
+function Import3DBodiesFromBatchFile(DataFileName: String; SkipExisting: Boolean): String;
+var
+    PcbLib              : IPCB_Library;
+    Board               : IPCB_Board;
+    Lines               : TStringList;
+    Fields              : TStringList;
+    ResultProps         : TStringList;
+    ImportedBodies      : TStringList;
+    SkippedBodies       : TStringList;
+    ErrorArray          : TStringList;
+    OutputLines         : TStringList;
+    LineText            : String;
+    CommandName         : String;
+    FootprintName       : String;
+    StepPath            : String;
+    Footprint           : IPCB_LibComponent;
+    BodyError           : String;
+    LocalXMM            : Double;
+    LocalYMM            : Double;
+    RotX                : Double;
+    RotY                : Double;
+    RotZ                : Double;
+    ModelZMM            : Double;
+    StandoffMM          : Double;
+    OverallHeightMM     : Double;
+    ExistingBodies      : Integer;
+    i                   : Integer;
+    RecordsSeen         : Integer;
+    BodiesImported      : Integer;
+    BodiesSkipped       : Integer;
+    FootprintsMissing   : Integer;
+begin
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    if PcbLib = Nil then
+    begin
+        Result := '{"success": false, "error": "No PCB library document is currently active. Open a .PcbLib file first."}';
+        Exit;
+    end;
+
+    if not FileExists(DataFileName) then
+    begin
+        Result := '{"success": false, "error": "3D body batch import file not found."}';
+        Exit;
+    end;
+
+    Board := PcbLib.Board;
+    if Board = Nil then
+    begin
+        Result := '{"success": false, "error": "PcbLib board is nil."}';
+        Exit;
+    end;
+
+    EnsureMechanicalLayerEnabled(Board, 1);
+
+    Lines := TStringList.Create;
+    Fields := TStringList.Create;
+    ResultProps := TStringList.Create;
+    ImportedBodies := TStringList.Create;
+    SkippedBodies := TStringList.Create;
+    ErrorArray := TStringList.Create;
+    OutputLines := TStringList.Create;
+    RecordsSeen := 0;
+    BodiesImported := 0;
+    BodiesSkipped := 0;
+    FootprintsMissing := 0;
+
+    try
+        Fields.Delimiter := '|';
+        Fields.StrictDelimiter := True;
+        Lines.LoadFromFile(DataFileName);
+
+        Client.SendMessage('PCB:DeSelect', 'Scope=All', 255, Client.CurrentView);
+
+        PCBServer.PreProcess;
+        try
+            for i := 0 to Lines.Count - 1 do
+            begin
+                LineText := Trim(Lines[i]);
+                if LineText = '' then
+                    continue;
+                if Copy(LineText, 1, 1) = '#' then
+                    continue;
+
+                Fields.Clear;
+                Fields.DelimitedText := LineText;
+                if Fields.Count = 0 then
+                    continue;
+
+                CommandName := UpperCase(Trim(Fields[0]));
+                if CommandName <> 'BODY' then
+                begin
+                    ErrorArray.Add('"' + JSONEscapeString('Line ' + IntToStr(i + 1) + ': expected BODY record.') + '"');
+                    continue;
+                end;
+
+                if Fields.Count < 11 then
+                begin
+                    ErrorArray.Add('"' + JSONEscapeString('Line ' + IntToStr(i + 1) + ': BODY requires footprint, STEP path, local X/Y, rotations, model Z, standoff, and overall height.') + '"');
+                    continue;
+                end;
+
+                RecordsSeen := RecordsSeen + 1;
+                FootprintName := Trim(Fields[1]);
+                StepPath := Trim(Fields[2]);
+                LocalXMM := SafeStrToFloat(Trim(Fields[3]));
+                LocalYMM := SafeStrToFloat(Trim(Fields[4]));
+                RotX := SafeStrToFloat(Trim(Fields[5]));
+                RotY := SafeStrToFloat(Trim(Fields[6]));
+                RotZ := SafeStrToFloat(Trim(Fields[7]));
+                ModelZMM := SafeStrToFloat(Trim(Fields[8]));
+                StandoffMM := SafeStrToFloat(Trim(Fields[9]));
+                OverallHeightMM := SafeStrToFloat(Trim(Fields[10]));
+
+                Footprint := FindPCBLibraryFootprintByName(PcbLib, FootprintName);
+                if Footprint = Nil then
+                begin
+                    FootprintsMissing := FootprintsMissing + 1;
+                    ErrorArray.Add('"' + JSONEscapeString('Line ' + IntToStr(i + 1) + ': footprint not found: ' + FootprintName) + '"');
+                    continue;
+                end;
+
+                if not FileExists(StepPath) then
+                begin
+                    ErrorArray.Add('"' + JSONEscapeString('Line ' + IntToStr(i + 1) + ': STEP file not found: ' + StepPath) + '"');
+                    continue;
+                end;
+
+                PcbLib.CurrentComponent := Footprint;
+                Footprint := PcbLib.CurrentComponent;
+                ExistingBodies := Count3DBodiesForFootprint(Footprint);
+                if ExistingBodies > 0 then
+                begin
+                    if SkipExisting then
+                    begin
+                        BodiesSkipped := BodiesSkipped + 1;
+                        SkippedBodies.Add('"' + JSONEscapeString(FootprintName) + '"');
+                    end
+                    else
+                    begin
+                        ErrorArray.Add('"' + JSONEscapeString('Line ' + IntToStr(i + 1) + ': footprint already has a 3D body: ' + FootprintName) + '"');
+                    end;
+                    continue;
+                end;
+
+                if not AddStepBodyToActiveComponentWithPlacement(PcbLib, Footprint, StepPath, LocalXMM, LocalYMM, RotX, RotY, RotZ, ModelZMM, StandoffMM, OverallHeightMM, BodyError) then
+                begin
+                    ErrorArray.Add('"' + JSONEscapeString('Line ' + IntToStr(i + 1) + ': ' + BodyError) + '"');
+                    continue;
+                end;
+
+                BodiesImported := BodiesImported + 1;
+                ImportedBodies.Add('"' + JSONEscapeString(FootprintName) + '"');
+            end;
+        finally
+            PCBServer.PostProcess;
+        end;
+
+        Client.SendMessage('PCB:DeSelect', 'Scope=All', 255, Client.CurrentView);
+        Board.ViewManager_FullUpdate;
+        Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
+
+        AddJSONBoolean(ResultProps, 'success', ErrorArray.Count = 0);
+        AddJSONProperty(ResultProps, 'data_file', DataFileName);
+        AddJSONBoolean(ResultProps, 'skip_existing', SkipExisting);
+        AddJSONInteger(ResultProps, 'records_seen', RecordsSeen);
+        AddJSONInteger(ResultProps, 'bodies_imported', BodiesImported);
+        AddJSONInteger(ResultProps, 'bodies_skipped', BodiesSkipped);
+        AddJSONInteger(ResultProps, 'footprints_missing', FootprintsMissing);
+        ResultProps.Add(BuildJSONArray(ImportedBodies, 'imported_footprints'));
+        ResultProps.Add(BuildJSONArray(SkippedBodies, 'skipped_footprints'));
+        ResultProps.Add(BuildJSONArray(ErrorArray, 'errors'));
+
+        OutputLines.Text := BuildJSONObject(ResultProps);
+        Result := OutputLines.Text;
+    finally
+        OutputLines.Free;
+        ErrorArray.Free;
+        SkippedBodies.Free;
+        ImportedBodies.Free;
+        ResultProps.Free;
+        Fields.Free;
+        Lines.Free;
     end;
 end;
 
@@ -4639,6 +5412,8 @@ var
     OldRotY      : Double;
     OldRotZ      : Double;
     OldModelZ    : TCoord;
+    TargetCenterX : TCoord;
+    TargetCenterY : TCoord;
 begin
     Result := 0;
     if (PcbLib = Nil) or (Board = Nil) or (Footprint = Nil) then
@@ -4680,8 +5455,10 @@ begin
                     Model.SetState(RotX, RotY, RotZ, MMsToCoord(ModelZMM));
                     Body.SetModel(Model);
                     Body.SetState_FromModel;
-                    Body.SetState_SnapPointX(Board.XOrigin + MMsToCoord(LocalXMM));
-                    Body.SetState_SnapPointY(Board.YOrigin + MMsToCoord(LocalYMM));
+                    TargetCenterX := Board.XOrigin + MMsToCoord(LocalXMM);
+                    TargetCenterY := Board.YOrigin + MMsToCoord(LocalYMM);
+                    Body.SetState_SnapPointX(TargetCenterX);
+                    Body.SetState_SnapPointY(TargetCenterY);
                     Body.StandoffHeight := MMsToCoord(StandoffMM);
                     Body.OverallHeight := MMsToCoord(OverallHeightMM);
                     Primitive.GraphicallyInvalidate;
@@ -5566,6 +6343,137 @@ begin
         AddJSONInteger(ResultProps, 'footprints_processed', FootprintsProcessed);
         AddJSONInteger(ResultProps, 'footprints_modified', FootprintsModified);
         AddJSONInteger(ResultProps, 'tracks_selected_for_delete', TracksSelected);
+        ResultProps.Add(BuildJSONArray(SkippedFootprints, 'skipped_footprints'));
+        ResultProps.Add(BuildJSONArray(ModifiedFootprints, 'modified_footprints'));
+
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := OutputLines.Text;
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        FootprintNames.Free;
+        ResultProps.Free;
+        ModifiedFootprints.Free;
+        SkippedFootprints.Free;
+    end;
+end;
+
+function CleanPCBLibraryPadsAndOverlayWithEditor(ExcludeFootprints: TStringList; TargetNameContains, PadNamePrefix, OverlayLayerName: String): String;
+var
+    PcbLib              : IPCB_Library;
+    Board               : IPCB_Board;
+    FootprintIterator   : IPCB_LibraryIterator;
+    Footprint           : IPCB_LibComponent;
+    OverlayLayer        : TLayer;
+    ResultProps         : TStringList;
+    ModifiedFootprints  : TStringList;
+    SkippedFootprints   : TStringList;
+    FootprintNames      : TStringList;
+    OutputLines         : TStringList;
+    FootprintName       : String;
+    MatchText           : String;
+    FootprintsSeen      : Integer;
+    FootprintsProcessed : Integer;
+    FootprintsModified  : Integer;
+    PrimitivesSelected  : Integer;
+    FootprintPrimitivesSelected : Integer;
+    i                   : Integer;
+begin
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    if PcbLib = Nil then
+    begin
+        Result := '{"success": false, "error": "No PCB library document is currently active. Open a .PcbLib file first."}';
+        Exit;
+    end;
+
+    Board := PcbLib.Board;
+    OverlayLayer := String2Layer(OverlayLayerName);
+    MatchText := UpperCase(Trim(TargetNameContains));
+
+    FootprintNames := TStringList.Create;
+    ResultProps := TStringList.Create;
+    ModifiedFootprints := TStringList.Create;
+    SkippedFootprints := TStringList.Create;
+    FootprintsSeen := 0;
+    FootprintsProcessed := 0;
+    FootprintsModified := 0;
+    PrimitivesSelected := 0;
+
+    try
+        FootprintIterator := PcbLib.LibraryIterator_Create;
+        if FootprintIterator = Nil then
+        begin
+            Result := '{"success": false, "error": "Failed to create PCB library footprint iterator."}';
+            Exit;
+        end;
+
+        FootprintIterator.SetState_FilterAll;
+        try
+            Footprint := FootprintIterator.FirstPCBObject;
+            while Footprint <> Nil do
+            begin
+                FootprintsSeen := FootprintsSeen + 1;
+                FootprintName := Footprint.Name;
+
+                if StringListContainsText(ExcludeFootprints, FootprintName) then
+                begin
+                    SkippedFootprints.Add('"' + JSONEscapeString(FootprintName) + '"');
+                end
+                else if (MatchText = '') or (Pos(MatchText, UpperCase(FootprintName)) > 0) then
+                begin
+                    FootprintsProcessed := FootprintsProcessed + 1;
+                    FootprintNames.Add(FootprintName);
+                end;
+
+                Footprint := FootprintIterator.NextPCBObject;
+            end;
+        finally
+            PcbLib.LibraryIterator_Destroy(FootprintIterator);
+        end;
+
+        for i := 0 to FootprintNames.Count - 1 do
+        begin
+            FootprintName := FootprintNames[i];
+            Footprint := FindPCBLibraryFootprintByName(PcbLib, FootprintName);
+            if Footprint <> Nil then
+            begin
+                Client.SendMessage('PCB:DeSelect', 'Scope=All', 255, Client.CurrentView);
+                PcbLib.CurrentComponent := Footprint;
+                Footprint := PcbLib.CurrentComponent;
+                if Board <> Nil then
+                    Board.ViewManager_FullUpdate;
+
+                if Footprint <> Nil then
+                begin
+                    FootprintPrimitivesSelected := SelectPadsByPrefixAndLayerPrimitives(Footprint, OverlayLayer, PadNamePrefix);
+                    if FootprintPrimitivesSelected > 0 then
+                    begin
+                        PrimitivesSelected := PrimitivesSelected + FootprintPrimitivesSelected;
+                        Client.SendMessage('PCB:DeleteObjects', 'Object=FOCUSED', 255, Client.CurrentView);
+                        FootprintsModified := FootprintsModified + 1;
+                        ModifiedFootprints.Add('"' + JSONEscapeString(FootprintName) + '"');
+                    end;
+                end;
+            end;
+        end;
+
+        Client.SendMessage('PCB:DeSelect', 'Scope=All', 255, Client.CurrentView);
+        if Board <> Nil then
+            Board.ViewManager_FullUpdate;
+        Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
+
+        AddJSONBoolean(ResultProps, 'success', True);
+        AddJSONProperty(ResultProps, 'cleanup_source', 'PCB editor DeleteObjects process');
+        AddJSONProperty(ResultProps, 'target_name_contains', TargetNameContains);
+        AddJSONProperty(ResultProps, 'pad_name_prefix', PadNamePrefix);
+        AddJSONProperty(ResultProps, 'overlay_layer', OverlayLayerName);
+        AddJSONInteger(ResultProps, 'footprints_seen', FootprintsSeen);
+        AddJSONInteger(ResultProps, 'footprints_processed', FootprintsProcessed);
+        AddJSONInteger(ResultProps, 'footprints_modified', FootprintsModified);
+        AddJSONInteger(ResultProps, 'primitives_selected_for_delete', PrimitivesSelected);
         ResultProps.Add(BuildJSONArray(SkippedFootprints, 'skipped_footprints'));
         ResultProps.Add(BuildJSONArray(ModifiedFootprints, 'modified_footprints'));
 
@@ -6492,6 +7400,13 @@ var
     DescriptionDumpFootprintName : String;
     SetDescriptionFootprintNames : TStringList;
     SetDescriptionTexts : TStringList;
+    BatchCreateDataFileName : String;
+    BatchCreateSkipExisting : Boolean;
+    CleanPadsOverlayTargetNameContains : String;
+    CleanPadsOverlayPadNamePrefix : String;
+    CleanPadsOverlayLayerName : String;
+    Batch3DBodyImportDataFileName : String;
+    Batch3DBodyImportSkipExisting : Boolean;
     Import3DBodyFootprintName : String;
     Import3DBodyStepPath : String;
     Import3DBodyLocalXMM : Double;
@@ -6499,6 +7414,7 @@ var
     Import3DBodyRotX : Double;
     Import3DBodyRotY : Double;
     Import3DBodyRotZ : Double;
+    Import3DBodyModelZMM : Double;
     Import3DBodyStandoffMM : Double;
     Import3DBodyOverallHeightMM : Double;
     Set3DBodyHeightsFootprintName : String;
@@ -6595,9 +7511,27 @@ begin
         SetDescriptionFootprintNames.Free;
     end;
 
-    if Find3DBodyImportCommand(LayerMoves, Import3DBodyFootprintName, Import3DBodyStepPath, Import3DBodyLocalXMM, Import3DBodyLocalYMM, Import3DBodyRotX, Import3DBodyRotY, Import3DBodyRotZ, Import3DBodyStandoffMM, Import3DBodyOverallHeightMM) then
+    if FindPCBLibraryBatchCreateCommand(LayerMoves, BatchCreateDataFileName, BatchCreateSkipExisting) then
     begin
-        Result := Import3DBodyWithPlacement(Import3DBodyFootprintName, Import3DBodyStepPath, Import3DBodyLocalXMM, Import3DBodyLocalYMM, Import3DBodyRotX, Import3DBodyRotY, Import3DBodyRotZ, Import3DBodyStandoffMM, Import3DBodyOverallHeightMM);
+        Result := CreatePCBLibraryBatchFootprints(BatchCreateDataFileName, BatchCreateSkipExisting);
+        Exit;
+    end;
+
+    if FindPCBLibraryCleanPadsOverlayCommand(LayerMoves, CleanPadsOverlayTargetNameContains, CleanPadsOverlayPadNamePrefix, CleanPadsOverlayLayerName) then
+    begin
+        Result := CleanPCBLibraryPadsAndOverlayWithEditor(ExcludeFootprints, CleanPadsOverlayTargetNameContains, CleanPadsOverlayPadNamePrefix, CleanPadsOverlayLayerName);
+        Exit;
+    end;
+
+    if Find3DBodyBatchImportCommand(LayerMoves, Batch3DBodyImportDataFileName, Batch3DBodyImportSkipExisting) then
+    begin
+        Result := Import3DBodiesFromBatchFile(Batch3DBodyImportDataFileName, Batch3DBodyImportSkipExisting);
+        Exit;
+    end;
+
+    if Find3DBodyImportCommand(LayerMoves, Import3DBodyFootprintName, Import3DBodyStepPath, Import3DBodyLocalXMM, Import3DBodyLocalYMM, Import3DBodyRotX, Import3DBodyRotY, Import3DBodyRotZ, Import3DBodyModelZMM, Import3DBodyStandoffMM, Import3DBodyOverallHeightMM) then
+    begin
+        Result := Import3DBodyWithPlacement(Import3DBodyFootprintName, Import3DBodyStepPath, Import3DBodyLocalXMM, Import3DBodyLocalYMM, Import3DBodyRotX, Import3DBodyRotY, Import3DBodyRotZ, Import3DBodyModelZMM, Import3DBodyStandoffMM, Import3DBodyOverallHeightMM);
         Exit;
     end;
 

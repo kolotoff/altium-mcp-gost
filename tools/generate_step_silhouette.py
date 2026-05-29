@@ -37,6 +37,8 @@ MIN_VISIBLE_ARC_RADIUS_FACTOR = 1.0
 STROKE_COVERAGE_DISTANCE_FACTOR = 0.5
 STROKE_COVERAGE_MAX_LENGTH_FACTOR = 4.0
 STROKE_COVERAGE_SAMPLE_STEP_FACTOR = 0.33
+HEIGHT_AXIS_MISMATCH_FACTOR = 4.0
+HEIGHT_AXIS_MISMATCH_MIN_MM = 5.0
 
 
 NUM_RE = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][+-]?\d+)?"
@@ -328,6 +330,7 @@ def projected_segments_for_edges(
     edge_ids: list[int],
     occluder_faces: list[dict] | None = None,
     adjacent_face_ids_by_edge: dict[int, set[int]] | None = None,
+    view_sign: int = 1,
 ) -> tuple[list[tuple[float, float, float, float]], int]:
     segments: list[tuple[float, float, float, float]] = []
     occluded_segments = 0
@@ -343,7 +346,7 @@ def projected_segments_for_edges(
             if adjacent_face_ids_by_edge is not None:
                 adjacent_face_ids = adjacent_face_ids_by_edge.get(edge_id, set())
 
-            if occluder_faces is not None and segment_is_occluded(p1, p2, occluder_faces, adjacent_face_ids):
+            if occluder_faces is not None and segment_is_occluded(p1, p2, occluder_faces, adjacent_face_ids, view_sign):
                 occluded_segments += 1
                 continue
 
@@ -488,6 +491,7 @@ def segment_is_occluded(
     p2: tuple[float, float, float],
     face_infos: list[dict],
     adjacent_face_ids: set[int],
+    view_sign: int = 1,
 ) -> bool:
     midpoint = ((p1[0] + p2[0]) / 2.0, (p1[1] + p2[1]) / 2.0)
     segment_height = (p1[2] + p2[2]) / 2.0
@@ -498,19 +502,43 @@ def segment_is_occluded(
         if not face_contains_point(face_info, midpoint):
             continue
         face_height = face_height_at(face_info, midpoint[0], midpoint[1])
-        if face_height is not None and face_height > segment_height + OCCLUSION_EPSILON_MM:
+        if face_height is None:
+            continue
+        if view_sign >= 0:
+            if face_height > segment_height + OCCLUSION_EPSILON_MM:
+                return True
+        elif face_height < segment_height - OCCLUSION_EPSILON_MM:
             return True
     return False
 
 
 def visible_edge_projection(geometry: dict, state: dict | None) -> dict:
+    if state is not None and state.get("_projection_axis_override"):
+        return visible_edge_projection_for_side(geometry, state, 1)
+
+    candidates = [visible_edge_projection_for_side(geometry, state, 1), visible_edge_projection_for_side(geometry, state, -1)]
+    return max(
+        candidates,
+        key=lambda candidate: (
+            candidate["stats"].get("visible_projected_segments", 0),
+            candidate["stats"].get("visible_edges", 0),
+        ),
+    )
+
+
+def visible_edge_projection_for_side(geometry: dict, state: dict | None, view_sign: int) -> dict:
     all_edge_ids = sorted(geometry["edges"])
-    all_segments, _occluded = projected_segments_for_edges(geometry, state, all_edge_ids)
+    all_segments, _occluded = projected_segments_for_edges(geometry, state, all_edge_ids, view_sign=view_sign)
     if not all_segments:
         return {
             "segments": [],
             "source_bbox": None,
-            "stats": {"all_edges": len(all_edge_ids), "visible_edges": 0, "fallback_all_edges": False},
+            "stats": {
+                "visible_side": "top" if view_sign >= 0 else "bottom",
+                "all_edges": len(all_edge_ids),
+                "visible_edges": 0,
+                "fallback_all_edges": False,
+            },
         }
 
     source_bbox = bbox_for_segments(all_segments)
@@ -539,7 +567,7 @@ def visible_edge_projection(geometry: dict, state: dict | None) -> dict:
                 face_edge_ids.add(edge_id)
                 edge_face_ids.setdefault(edge_id, set()).add(face_id)
 
-        if normal[2] <= FACE_VISIBLE_EPSILON:
+        if view_sign * normal[2] <= FACE_VISIBLE_EPSILON:
             continue
 
         outers, holes = face_polygons(geometry, face, state)
@@ -571,6 +599,7 @@ def visible_edge_projection(geometry: dict, state: dict | None) -> dict:
         sorted(visible_edge_ids),
         top_visible_faces,
         visible_edge_face_ids,
+        view_sign=view_sign,
     )
 
     fallback_all_edges = False
@@ -582,6 +611,7 @@ def visible_edge_projection(geometry: dict, state: dict | None) -> dict:
         "segments": visible_segments,
         "source_bbox": source_bbox,
         "stats": {
+            "visible_side": "top" if view_sign >= 0 else "bottom",
             "all_edges": len(all_edge_ids),
             "all_projected_segments": len(all_segments),
             "top_visible_faces": len(top_visible_faces),
@@ -784,8 +814,85 @@ def projection_rotation_from_model_state(state: dict | None) -> float:
     rotz = state.get("rotz")
     if rotz is None:
         return 0.0
+    rotx = state.get("rotx")
+    baseline = ALTIUM_TOP_PROJECTION_Z_BASELINE_DEG
+    if rotx is not None and normalize_rotation_degrees(float(rotx)) == 0.0:
+        baseline = 0.0
     rotation_2d = state.get("rotation_2d") or 0.0
-    return normalize_rotation_degrees(ALTIUM_TOP_PROJECTION_Z_BASELINE_DEG - float(rotz) + float(rotation_2d))
+    return normalize_rotation_degrees(baseline - float(rotz) + float(rotation_2d))
+
+
+def transformed_model_extents(geometry: dict, state: dict | None) -> tuple[float, float, float] | None:
+    points = geometry.get("points", {}).values()
+    transformed = [transform_model_point(point, state) for point in points]
+    if not transformed:
+        return None
+
+    return (
+        max(point[0] for point in transformed) - min(point[0] for point in transformed),
+        max(point[1] for point in transformed) - min(point[1] for point in transformed),
+        max(point[2] for point in transformed) - min(point[2] for point in transformed),
+    )
+
+
+def aspect_ratio_for_bbox(bbox: tuple[float, float, float, float] | None) -> float | None:
+    if bbox is None:
+        return None
+
+    width = abs(bbox[2] - bbox[0])
+    height = abs(bbox[3] - bbox[1])
+    if width <= 1e-9 or height <= 1e-9:
+        return None
+
+    return width / height
+
+
+def aspect_error(source_aspect: float | None, target_aspect: float | None) -> float:
+    if source_aspect is None or target_aspect is None:
+        return 1e9
+    return abs(math.log(source_aspect / target_aspect))
+
+
+def projection_state_for_body(geometry: dict, model_state: dict | None, target_bbox: tuple[float, float, float, float], overall_height_mm: float) -> dict | None:
+    if model_state is None or model_state.get("rotx") is None:
+        return model_state
+
+    current_extents = transformed_model_extents(geometry, model_state)
+    if current_extents is None:
+        return model_state
+
+    current_height_extent = current_extents[2]
+    height_threshold = max(overall_height_mm * HEIGHT_AXIS_MISMATCH_FACTOR, HEIGHT_AXIS_MISMATCH_MIN_MM)
+    if normalize_rotation_degrees(float(model_state.get("rotx") or 0.0)) != 0.0:
+        return model_state
+    if current_height_extent <= height_threshold:
+        return model_state
+
+    target_aspect = aspect_ratio_for_bbox(target_bbox)
+    base_rotz = float(model_state.get("rotz") or 0.0)
+    rotation_candidates = [270.0, 90.0, 0.0, 180.0]
+    candidates: list[tuple[float, float, float, dict]] = []
+
+    for rotz_delta in rotation_candidates:
+        candidate = dict(model_state)
+        candidate["rotx"] = 90.0
+        candidate["rotz"] = normalize_rotation_degrees(base_rotz + rotz_delta)
+        candidate["_projection_axis_override"] = True
+        extents = transformed_model_extents(geometry, candidate)
+        if extents is None:
+            continue
+
+        height_error = abs(math.log((extents[2] + 1e-9) / (overall_height_mm + 1e-9)))
+        projection = visible_edge_projection(geometry, candidate)
+        source_aspect = aspect_ratio_for_bbox(projection.get("source_bbox"))
+        projection_error = aspect_error(source_aspect, target_aspect)
+        visible_segments = float(projection.get("stats", {}).get("visible_projected_segments", 0))
+        candidates.append((height_error, projection_error, -visible_segments, candidate))
+
+    if not candidates:
+        return model_state
+
+    return min(candidates, key=lambda item: (item[0], item[1], item[2]))[3]
 
 
 def rotate_segments(
@@ -1577,18 +1684,28 @@ def main() -> int:
         if model_state is None:
             missing_rotation_metadata.append(footprint)
 
-        projection_rotation_deg = projection_rotation_from_model_state(model_state)
-        if model_state is not None:
+        projection_model_state = projection_state_for_body(
+            model_cache[model_path],
+            model_state,
+            normalized_bbox,
+            float(body.get("overall_height_mm") or 0.0),
+        )
+        projection_rotation_deg = projection_rotation_from_model_state(projection_model_state)
+        if projection_model_state is not None:
             model_rotation_metadata[footprint] = {
                 "projection_rotation_deg": round(projection_rotation_deg, 6),
-                "model_3d_rotx_deg": round(float(model_state["rotx"]), 6) if model_state.get("rotx") is not None else None,
-                "model_3d_roty_deg": round(float(model_state["roty"]), 6) if model_state.get("roty") is not None else None,
-                "model_3d_rotz_deg": round(float(model_state["rotz"]), 6),
-                "model_2d_rotation_deg": round(float(model_state.get("rotation_2d") or 0.0), 6),
-                "model_name": str(model_state["model_name"]),
+                "model_3d_rotx_deg": round(float(model_state["rotx"]), 6) if model_state and model_state.get("rotx") is not None else None,
+                "model_3d_roty_deg": round(float(model_state["roty"]), 6) if model_state and model_state.get("roty") is not None else None,
+                "model_3d_rotz_deg": round(float(model_state["rotz"]), 6) if model_state else None,
+                "model_2d_rotation_deg": round(float(model_state.get("rotation_2d") or 0.0), 6) if model_state else None,
+                "projection_rotx_deg": round(float(projection_model_state["rotx"]), 6) if projection_model_state.get("rotx") is not None else None,
+                "projection_rotz_deg": round(float(projection_model_state["rotz"]), 6) if projection_model_state.get("rotz") is not None else None,
+                "projection_state_overridden": projection_model_state != model_state,
+                "projection_axis_override": bool(projection_model_state.get("_projection_axis_override")),
+                "model_name": str(projection_model_state["model_name"]),
             }
 
-        projection = visible_edge_projection(model_cache[model_path], model_state)
+        projection = visible_edge_projection(model_cache[model_path], projection_model_state)
         source_segments = projection["segments"]
         source_bbox = projection["source_bbox"]
         hidden_line_stats[footprint] = projection["stats"]

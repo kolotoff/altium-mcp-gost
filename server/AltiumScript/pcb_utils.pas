@@ -4477,6 +4477,470 @@ begin
     end;
 end;
 
+function ParsePCBLibraryOpenCommand(MoveText: String; var LibraryPath: String): Boolean;
+var
+    CommandName : String;
+    SeparatorPos: Integer;
+begin
+    Result := False;
+    LibraryPath := '';
+
+    MoveText := Trim(MoveText);
+    SeparatorPos := Pos('|', MoveText);
+    if SeparatorPos <= 1 then
+        Exit;
+
+    CommandName := UpperCase(Trim(Copy(MoveText, 1, SeparatorPos - 1)));
+    if CommandName <> 'PCB_LIB_OPEN' then
+        Exit;
+
+    LibraryPath := Trim(Copy(MoveText, SeparatorPos + 1, Length(MoveText) - SeparatorPos));
+    Result := LibraryPath <> '';
+end;
+
+function FindPCBLibraryOpenCommand(LayerMoves: TStringList; var LibraryPath: String): Boolean;
+var
+    i: Integer;
+begin
+    Result := False;
+    LibraryPath := '';
+
+    for i := 0 to LayerMoves.Count - 1 do
+    begin
+        if ParsePCBLibraryOpenCommand(LayerMoves[i], LibraryPath) then
+        begin
+            Result := True;
+            Exit;
+        end;
+    end;
+end;
+
+function OpenPCBLibraryByPath(LibraryPath: String): String;
+var
+    PcbLib            : IPCB_Library;
+    Board             : IPCB_Board;
+    ServerDoc         : IServerDocument;
+    FootprintIterator : IPCB_LibraryIterator;
+    Footprint         : IPCB_LibComponent;
+    ResultProps       : TStringList;
+    OutputLines       : TStringList;
+    FootprintCount    : Integer;
+    WasAlreadyOpen    : Boolean;
+begin
+    ResultProps := TStringList.Create;
+    OutputLines := TStringList.Create;
+    FootprintCount := 0;
+    WasAlreadyOpen := False;
+
+    try
+        if Trim(LibraryPath) = '' then
+        begin
+            AddJSONBoolean(ResultProps, 'success', False);
+            AddJSONProperty(ResultProps, 'error', 'PcbLib path is empty.');
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := OutputLines.Text;
+            Exit;
+        end;
+
+        if not FileExists(LibraryPath) then
+        begin
+            AddJSONBoolean(ResultProps, 'success', False);
+            AddJSONProperty(ResultProps, 'error', 'PcbLib file not found: ' + LibraryPath);
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := OutputLines.Text;
+            Exit;
+        end;
+
+        if Client.IsDocumentOpen(LibraryPath) then
+        begin
+            ServerDoc := Client.GetDocumentByPath(LibraryPath);
+            WasAlreadyOpen := True;
+        end
+        else
+            ServerDoc := Client.OpenDocument('PcbLib', LibraryPath);
+
+        if ServerDoc = Nil then
+        begin
+            AddJSONBoolean(ResultProps, 'success', False);
+            AddJSONProperty(ResultProps, 'error', 'Failed to open PcbLib: ' + LibraryPath);
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := OutputLines.Text;
+            Exit;
+        end;
+
+        Client.ShowDocument(ServerDoc);
+        Sleep(500);
+
+        PcbLib := PCBServer.GetCurrentPCBLibrary;
+        if PcbLib = Nil then
+        begin
+            AddJSONBoolean(ResultProps, 'success', False);
+            AddJSONProperty(ResultProps, 'error', 'Opened document is not the active PCB library: ' + LibraryPath);
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := OutputLines.Text;
+            Exit;
+        end;
+
+        Board := PcbLib.Board;
+        FootprintIterator := PcbLib.LibraryIterator_Create;
+        if FootprintIterator <> Nil then
+        begin
+            try
+                FootprintIterator.SetState_FilterAll;
+                Footprint := FootprintIterator.FirstPCBObject;
+                while Footprint <> Nil do
+                begin
+                    FootprintCount := FootprintCount + 1;
+                    Footprint := FootprintIterator.NextPCBObject;
+                end;
+            finally
+                PcbLib.LibraryIterator_Destroy(FootprintIterator);
+            end;
+        end;
+
+        AddJSONBoolean(ResultProps, 'success', True);
+        AddJSONProperty(ResultProps, 'requested_path', LibraryPath);
+        if Board <> Nil then
+            AddJSONProperty(ResultProps, 'library_path', Board.FileName);
+        AddJSONBoolean(ResultProps, 'was_already_open', WasAlreadyOpen);
+        AddJSONInteger(ResultProps, 'footprint_count', FootprintCount);
+
+        OutputLines.Text := BuildJSONObject(ResultProps);
+        Result := OutputLines.Text;
+    finally
+        OutputLines.Free;
+        ResultProps.Free;
+    end;
+end;
+
+function MMKey(Value: TCoord): String;
+begin
+    Result := StringReplace(FormatFloat('0.######', CoordToMMs(Value)), ',', '.', REPLACEALL);
+end;
+
+procedure IncrementCount(Counts: TStringList; Key: String);
+var
+    CurrentValue: Integer;
+begin
+    Key := Trim(Key);
+    if Key = '' then
+        Key := '(blank)';
+
+    CurrentValue := StrToIntDef(Counts.Values[Key], 0) + 1;
+    Counts.Values[Key] := IntToStr(CurrentValue);
+end;
+
+procedure AddUniqueJSONString(Items: TStringList; Value: String);
+var
+    JSONValue: String;
+begin
+    JSONValue := '"' + JSONEscapeString(Value) + '"';
+    if Items.IndexOf(JSONValue) < 0 then
+        Items.Add(JSONValue);
+end;
+
+function BuildCountJSONArray(Counts: TStringList; ArrayName, KeyName: String): String;
+var
+    Items : TStringList;
+    Props : TStringList;
+    Line  : String;
+    Key   : String;
+    Value : String;
+    EqPos : Integer;
+    i     : Integer;
+begin
+    Items := TStringList.Create;
+    try
+        for i := 0 to Counts.Count - 1 do
+        begin
+            Line := Counts[i];
+            EqPos := Pos('=', Line);
+            if EqPos > 0 then
+            begin
+                Key := Copy(Line, 1, EqPos - 1);
+                Value := Copy(Line, EqPos + 1, Length(Line) - EqPos);
+            end
+            else
+            begin
+                Key := Line;
+                Value := '0';
+            end;
+
+            Props := TStringList.Create;
+            try
+                AddJSONProperty(Props, KeyName, Key);
+                AddJSONInteger(Props, 'count', StrToIntDef(Value, 0));
+                Items.Add(BuildJSONObject(Props, 1));
+            finally
+                Props.Free;
+            end;
+        end;
+
+        Result := BuildJSONArray(Items, ArrayName);
+    finally
+        Items.Free;
+    end;
+end;
+
+procedure AddPCBLibraryFootprintStats(PcbLib: IPCB_Library; Board: IPCB_Board; Footprint: IPCB_LibComponent; StatsArray: TStringList);
+var
+    PrimitiveIterator : IPCB_GroupIterator;
+    Primitive         : IPCB_Primitive;
+    Pad               : IPCB_Pad;
+    Track             : IPCB_Track;
+    Arc               : IPCB_Arc;
+    TextPrimitive     : IPCB_Text;
+    Body              : IPCB_ComponentBody;
+    Props             : TStringList;
+    PadLayerCounts    : TStringList;
+    PadShapeCounts    : TStringList;
+    PadSizeCounts     : TStringList;
+    TrackLayerCounts  : TStringList;
+    TrackWidthCounts  : TStringList;
+    ArcLayerCounts    : TStringList;
+    ArcWidthCounts    : TStringList;
+    BodyLayerCounts   : TStringList;
+    BodyHeightCounts  : TStringList;
+    TextValues        : TStringList;
+    PadCount          : Integer;
+    TrackCount        : Integer;
+    ArcCount          : Integer;
+    TextCount         : Integer;
+    BodyCount         : Integer;
+begin
+    if (PcbLib = Nil) or (Footprint = Nil) then
+        Exit;
+
+    PcbLib.CurrentComponent := Footprint;
+    Footprint := PcbLib.CurrentComponent;
+
+    Props := TStringList.Create;
+    PadLayerCounts := TStringList.Create;
+    PadShapeCounts := TStringList.Create;
+    PadSizeCounts := TStringList.Create;
+    TrackLayerCounts := TStringList.Create;
+    TrackWidthCounts := TStringList.Create;
+    ArcLayerCounts := TStringList.Create;
+    ArcWidthCounts := TStringList.Create;
+    BodyLayerCounts := TStringList.Create;
+    BodyHeightCounts := TStringList.Create;
+    TextValues := TStringList.Create;
+    PadCount := 0;
+    TrackCount := 0;
+    ArcCount := 0;
+    TextCount := 0;
+    BodyCount := 0;
+
+    try
+        PrimitiveIterator := Footprint.GroupIterator_Create;
+        if PrimitiveIterator <> Nil then
+        begin
+            try
+                PrimitiveIterator.SetState_FilterAll;
+                Primitive := PrimitiveIterator.FirstPCBObject;
+                while Primitive <> Nil do
+                begin
+                    if Primitive.ObjectId = ePadObject then
+                    begin
+                        Pad := Primitive;
+                        PadCount := PadCount + 1;
+                        IncrementCount(PadLayerCounts, Layer2String(Pad.Layer));
+                        IncrementCount(PadShapeCounts, IntToStr(Pad.TopShape));
+                        IncrementCount(PadSizeCounts, MMKey(Pad.TopXSize) + 'x' + MMKey(Pad.TopYSize));
+                    end
+                    else if Primitive.ObjectId = eTrackObject then
+                    begin
+                        Track := Primitive;
+                        TrackCount := TrackCount + 1;
+                        IncrementCount(TrackLayerCounts, Layer2String(Track.Layer));
+                        IncrementCount(TrackWidthCounts, MMKey(Track.Width));
+                    end
+                    else if Primitive.ObjectId = eArcObject then
+                    begin
+                        Arc := Primitive;
+                        ArcCount := ArcCount + 1;
+                        IncrementCount(ArcLayerCounts, Layer2String(Arc.Layer));
+                        IncrementCount(ArcWidthCounts, MMKey(Arc.LineWidth));
+                    end
+                    else if Primitive.ObjectId = eTextObject then
+                    begin
+                        TextPrimitive := Primitive;
+                        TextCount := TextCount + 1;
+                        AddUniqueJSONString(TextValues, TextPrimitive.Text + ' @ ' + Layer2String(TextPrimitive.Layer));
+                    end
+                    else if Primitive.ObjectId = eComponentBodyObject then
+                    begin
+                        Body := Primitive;
+                        BodyCount := BodyCount + 1;
+                        IncrementCount(BodyLayerCounts, Layer2String(Primitive.Layer));
+                        IncrementCount(
+                            BodyHeightCounts,
+                            'standoff ' + MMKey(Body.StandoffHeight) + ' overall ' + MMKey(Body.OverallHeight)
+                        );
+                    end;
+
+                    Primitive := PrimitiveIterator.NextPCBObject;
+                end;
+            finally
+                Footprint.GroupIterator_Destroy(PrimitiveIterator);
+            end;
+        end;
+
+        AddJSONProperty(Props, 'footprint', Footprint.Name);
+        AddJSONProperty(Props, 'description', Footprint.GetState_Description);
+        AddJSONInteger(Props, 'pad_count', PadCount);
+        AddJSONInteger(Props, 'track_count', TrackCount);
+        AddJSONInteger(Props, 'arc_count', ArcCount);
+        AddJSONInteger(Props, 'text_count', TextCount);
+        AddJSONInteger(Props, 'body_count', BodyCount);
+        Props.Add(BuildCountJSONArray(PadLayerCounts, 'pad_layers', 'layer'));
+        Props.Add(BuildCountJSONArray(PadShapeCounts, 'pad_shapes', 'shape'));
+        Props.Add(BuildCountJSONArray(PadSizeCounts, 'pad_sizes_mm', 'size'));
+        Props.Add(BuildCountJSONArray(TrackLayerCounts, 'track_layers', 'layer'));
+        Props.Add(BuildCountJSONArray(TrackWidthCounts, 'track_widths_mm', 'width'));
+        Props.Add(BuildCountJSONArray(ArcLayerCounts, 'arc_layers', 'layer'));
+        Props.Add(BuildCountJSONArray(ArcWidthCounts, 'arc_widths_mm', 'width'));
+        Props.Add(BuildCountJSONArray(BodyLayerCounts, 'body_layers', 'layer'));
+        Props.Add(BuildCountJSONArray(BodyHeightCounts, 'body_heights_mm', 'height'));
+        Props.Add(BuildJSONArray(TextValues, 'texts'));
+
+        StatsArray.Add(BuildJSONObject(Props, 1));
+    finally
+        TextValues.Free;
+        BodyHeightCounts.Free;
+        BodyLayerCounts.Free;
+        ArcWidthCounts.Free;
+        ArcLayerCounts.Free;
+        TrackWidthCounts.Free;
+        TrackLayerCounts.Free;
+        PadSizeCounts.Free;
+        PadShapeCounts.Free;
+        PadLayerCounts.Free;
+        Props.Free;
+    end;
+end;
+
+function ParsePCBLibraryStatsDumpCommand(MoveText: String; var FootprintName: String): Boolean;
+var
+    CommandName : String;
+    SeparatorPos: Integer;
+begin
+    Result := False;
+    FootprintName := '*';
+
+    SeparatorPos := Pos('|', MoveText);
+    if SeparatorPos > 0 then
+    begin
+        CommandName := UpperCase(Trim(Copy(MoveText, 1, SeparatorPos - 1)));
+        FootprintName := Trim(Copy(MoveText, SeparatorPos + 1, Length(MoveText) - SeparatorPos));
+    end
+    else
+        CommandName := UpperCase(Trim(MoveText));
+
+    if CommandName <> 'PCB_LIB_STATS_DUMP' then
+        Exit;
+
+    if FootprintName = '' then
+        FootprintName := '*';
+
+    Result := True;
+end;
+
+function FindPCBLibraryStatsDumpCommand(LayerMoves: TStringList; var FootprintName: String): Boolean;
+var
+    i: Integer;
+begin
+    Result := False;
+    FootprintName := '*';
+
+    for i := 0 to LayerMoves.Count - 1 do
+    begin
+        if ParsePCBLibraryStatsDumpCommand(LayerMoves[i], FootprintName) then
+        begin
+            Result := True;
+            Exit;
+        end;
+    end;
+end;
+
+function DumpPCBLibraryFootprintStats(FootprintName: String): String;
+var
+    PcbLib            : IPCB_Library;
+    Board             : IPCB_Board;
+    FootprintIterator : IPCB_LibraryIterator;
+    Footprint         : IPCB_LibComponent;
+    ResultProps       : TStringList;
+    StatsArray        : TStringList;
+    OutputLines       : TStringList;
+    MatchAll          : Boolean;
+    Count             : Integer;
+begin
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    if PcbLib = Nil then
+    begin
+        Result := '{"success": false, "error": "No PCB library document is currently active. Open a .PcbLib file first."}';
+        Exit;
+    end;
+
+    Board := PcbLib.Board;
+    ResultProps := TStringList.Create;
+    StatsArray := TStringList.Create;
+    OutputLines := TStringList.Create;
+    Count := 0;
+    MatchAll := (Trim(FootprintName) = '') or (Trim(FootprintName) = '*');
+
+    try
+        if MatchAll then
+        begin
+            FootprintIterator := PcbLib.LibraryIterator_Create;
+            if FootprintIterator = Nil then
+            begin
+                Result := '{"success": false, "error": "Failed to create PCB library iterator."}';
+                Exit;
+            end;
+
+            try
+                FootprintIterator.SetState_FilterAll;
+                Footprint := FootprintIterator.FirstPCBObject;
+                while Footprint <> Nil do
+                begin
+                    AddPCBLibraryFootprintStats(PcbLib, Board, Footprint, StatsArray);
+                    Count := Count + 1;
+                    Footprint := FootprintIterator.NextPCBObject;
+                end;
+            finally
+                PcbLib.LibraryIterator_Destroy(FootprintIterator);
+            end;
+        end
+        else
+        begin
+            Footprint := FindPCBLibraryFootprintByName(PcbLib, FootprintName);
+            if Footprint = Nil then
+            begin
+                Result := '{"success": false, "error": "Footprint not found."}';
+                Exit;
+            end;
+
+            AddPCBLibraryFootprintStats(PcbLib, Board, Footprint, StatsArray);
+            Count := 1;
+        end;
+
+        AddJSONBoolean(ResultProps, 'success', True);
+        if Board <> Nil then
+            AddJSONProperty(ResultProps, 'library_path', Board.FileName);
+        AddJSONProperty(ResultProps, 'footprint_filter', FootprintName);
+        AddJSONInteger(ResultProps, 'footprints_processed', Count);
+        ResultProps.Add(BuildJSONArray(StatsArray, 'footprints'));
+
+        OutputLines.Text := BuildJSONObject(ResultProps);
+        Result := OutputLines.Text;
+    finally
+        OutputLines.Free;
+        StatsArray.Free;
+        ResultProps.Free;
+    end;
+end;
+
 function ParsePCBLibrarySetDescriptionCommand(MoveText: String; var FootprintName, DescriptionText: String): Boolean;
 var
     CommandName: String;
@@ -8435,6 +8899,8 @@ var
     TextDumpFootprintName : String;
     PrimitiveDumpFootprintName : String;
     DescriptionDumpFootprintName : String;
+    OpenLibraryPath    : String;
+    StatsDumpFootprintName : String;
     SetDescriptionFootprintNames : TStringList;
     SetDescriptionTexts : TStringList;
     BatchCreateDataFileName : String;
@@ -8540,6 +9006,18 @@ begin
     if FindPCBLibraryDescriptionDumpCommand(LayerMoves, DescriptionDumpFootprintName) then
     begin
         Result := DumpPCBLibraryFootprintDescriptions(DescriptionDumpFootprintName);
+        Exit;
+    end;
+
+    if FindPCBLibraryOpenCommand(LayerMoves, OpenLibraryPath) then
+    begin
+        Result := OpenPCBLibraryByPath(OpenLibraryPath);
+        Exit;
+    end;
+
+    if FindPCBLibraryStatsDumpCommand(LayerMoves, StatsDumpFootprintName) then
+    begin
+        Result := DumpPCBLibraryFootprintStats(StatsDumpFootprintName);
         Exit;
     end;
 

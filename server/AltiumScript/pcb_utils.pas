@@ -1897,6 +1897,50 @@ begin
     end;
 end;
 
+function Parse3DBodyEditorDeleteCommand(MoveText: String; var FootprintName: String): Boolean;
+var
+    Fields: TStringList;
+begin
+    Result := False;
+    FootprintName := '*';
+
+    Fields := TStringList.Create;
+    try
+        Fields.Delimiter := '|';
+        Fields.StrictDelimiter := True;
+        Fields.DelimitedText := Trim(MoveText);
+
+        if Fields.Count < 1 then
+            Exit;
+        if UpperCase(Trim(Fields[0])) <> '3D_BODY_EDITOR_DELETE' then
+            Exit;
+
+        if (Fields.Count >= 2) and (Trim(Fields[1]) <> '') then
+            FootprintName := Trim(Fields[1]);
+
+        Result := True;
+    finally
+        Fields.Free;
+    end;
+end;
+
+function Find3DBodyEditorDeleteCommand(LayerMoves: TStringList; var FootprintName: String): Boolean;
+var
+    i: Integer;
+begin
+    Result := False;
+    FootprintName := '*';
+
+    for i := 0 to LayerMoves.Count - 1 do
+    begin
+        if Parse3DBodyEditorDeleteCommand(LayerMoves[i], FootprintName) then
+        begin
+            Result := True;
+            Exit;
+        end;
+    end;
+end;
+
 function Parse3DBodyImportCommand(MoveText: String; var FootprintName, StepPath: String; var LocalXMM, LocalYMM, RotX, RotY, RotZ, ModelZMM, StandoffMM, OverallHeightMM: Double): Boolean;
 var
     CommandName: String;
@@ -3052,6 +3096,36 @@ begin
                     Result := Result + 1;
                 end;
             end;
+            Primitive := PrimitiveIterator.NextPCBObject;
+        end;
+    finally
+        Footprint.GroupIterator_Destroy(PrimitiveIterator);
+    end;
+end;
+
+function Select3DBodiesForEditorDelete(Footprint: IPCB_LibComponent): Integer;
+var
+    PrimitiveIterator: IPCB_GroupIterator;
+    Primitive: IPCB_Primitive;
+begin
+    Result := 0;
+
+    if Footprint = Nil then
+        Exit;
+
+    PrimitiveIterator := Footprint.GroupIterator_Create;
+    if PrimitiveIterator = Nil then
+        Exit;
+
+    try
+        PrimitiveIterator.AddFilter_ObjectSet(MkSet(eComponentBodyObject));
+        PrimitiveIterator.AddFilter_LayerSet(AllLayers);
+
+        Primitive := PrimitiveIterator.FirstPCBObject;
+        while Primitive <> Nil do
+        begin
+            Primitive.Selected := True;
+            Result := Result + 1;
             Primitive := PrimitiveIterator.NextPCBObject;
         end;
     finally
@@ -4994,8 +5068,18 @@ begin
         Exit;
     end;
 
-    StepBody.Model := Model;
+    StepBody.SetModel(Model);
     StepBody.SetState_FromModel;
+    Model := StepBody.GetModel;
+    if Model <> Nil then
+    begin
+        if not ApplyGenericStepModelPlacement(Model, RotX, RotY, RotZ, ModelZMM, ModelError) then
+        begin
+            ErrorText := ModelError;
+            Exit;
+        end;
+        StepBody.SetModel(Model);
+    end;
     StepBody.Layer := ILayer.MechanicalLayer(1);
     TargetCenterX := Board.XOrigin + MMsToCoord(LocalXMM);
     TargetCenterY := Board.YOrigin + MMsToCoord(LocalYMM);
@@ -6572,6 +6656,136 @@ begin
     end;
 end;
 
+function DeletePCBLibrary3DBodiesWithEditor(ExcludeFootprints: TStringList; TargetFootprintName: String): String;
+var
+    PcbLib              : IPCB_Library;
+    Board               : IPCB_Board;
+    FootprintIterator   : IPCB_LibraryIterator;
+    Footprint           : IPCB_LibComponent;
+    FootprintNames      : TStringList;
+    ResultProps         : TStringList;
+    ModifiedFootprints  : TStringList;
+    SkippedFootprints   : TStringList;
+    OutputLines         : TStringList;
+    FootprintName       : String;
+    TargetName          : String;
+    MatchAll            : Boolean;
+    FootprintsSeen      : Integer;
+    FootprintsProcessed : Integer;
+    FootprintsModified  : Integer;
+    BodiesSelected      : Integer;
+    FootprintBodiesSelected : Integer;
+    i                   : Integer;
+begin
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    if PcbLib = Nil then
+    begin
+        Result := '{"success": false, "error": "No PCB library document is currently active. Open a .PcbLib file first."}';
+        Exit;
+    end;
+
+    Board := PcbLib.Board;
+    TargetName := Trim(TargetFootprintName);
+    MatchAll := (TargetName = '') or (TargetName = '*');
+    FootprintNames := TStringList.Create;
+    ResultProps := TStringList.Create;
+    ModifiedFootprints := TStringList.Create;
+    SkippedFootprints := TStringList.Create;
+    FootprintsSeen := 0;
+    FootprintsProcessed := 0;
+    FootprintsModified := 0;
+    BodiesSelected := 0;
+
+    try
+        FootprintIterator := PcbLib.LibraryIterator_Create;
+        if FootprintIterator = Nil then
+        begin
+            Result := '{"success": false, "error": "Failed to create PCB library footprint iterator."}';
+            Exit;
+        end;
+
+        FootprintIterator.SetState_FilterAll;
+        try
+            Footprint := FootprintIterator.FirstPCBObject;
+            while Footprint <> Nil do
+            begin
+                FootprintsSeen := FootprintsSeen + 1;
+                FootprintName := Footprint.Name;
+
+                if StringListContainsText(ExcludeFootprints, FootprintName) then
+                begin
+                    SkippedFootprints.Add('"' + JSONEscapeString(FootprintName) + '"');
+                end
+                else if MatchAll or (UpperCase(FootprintName) = UpperCase(TargetName)) then
+                begin
+                    FootprintsProcessed := FootprintsProcessed + 1;
+                    FootprintNames.Add(FootprintName);
+                end
+                else
+                    SkippedFootprints.Add('"' + JSONEscapeString(FootprintName) + '"');
+
+                Footprint := FootprintIterator.NextPCBObject;
+            end;
+        finally
+            PcbLib.LibraryIterator_Destroy(FootprintIterator);
+        end;
+
+        for i := 0 to FootprintNames.Count - 1 do
+        begin
+            FootprintName := FootprintNames[i];
+            Footprint := FindPCBLibraryFootprintByName(PcbLib, FootprintName);
+            if Footprint <> Nil then
+            begin
+                Client.SendMessage('PCB:DeSelect', 'Scope=All', 255, Client.CurrentView);
+                PcbLib.CurrentComponent := Footprint;
+                Footprint := PcbLib.CurrentComponent;
+                if Board <> Nil then
+                    Board.ViewManager_FullUpdate;
+
+                if Footprint <> Nil then
+                begin
+                    FootprintBodiesSelected := Select3DBodiesForEditorDelete(Footprint);
+                    if FootprintBodiesSelected > 0 then
+                    begin
+                        BodiesSelected := BodiesSelected + FootprintBodiesSelected;
+                        Client.SendMessage('PCB:DeleteObjects', 'Object=FOCUSED', 255, Client.CurrentView);
+                        FootprintsModified := FootprintsModified + 1;
+                        ModifiedFootprints.Add('"' + JSONEscapeString(FootprintName) + '"');
+                    end;
+                end;
+            end;
+        end;
+
+        Client.SendMessage('PCB:DeSelect', 'Scope=All', 255, Client.CurrentView);
+        if Board <> Nil then
+            Board.ViewManager_FullUpdate;
+        Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
+
+        AddJSONBoolean(ResultProps, 'success', True);
+        AddJSONProperty(ResultProps, 'cleanup_source', 'PCB editor DeleteObjects process');
+        AddJSONProperty(ResultProps, 'target_footprint', TargetFootprintName);
+        AddJSONInteger(ResultProps, 'footprints_seen', FootprintsSeen);
+        AddJSONInteger(ResultProps, 'footprints_processed', FootprintsProcessed);
+        AddJSONInteger(ResultProps, 'footprints_modified', FootprintsModified);
+        AddJSONInteger(ResultProps, 'bodies_selected_for_delete', BodiesSelected);
+        ResultProps.Add(BuildJSONArray(SkippedFootprints, 'skipped_footprints'));
+        ResultProps.Add(BuildJSONArray(ModifiedFootprints, 'modified_footprints'));
+
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := OutputLines.Text;
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        FootprintNames.Free;
+        ResultProps.Free;
+        ModifiedFootprints.Free;
+        SkippedFootprints.Free;
+    end;
+end;
+
 function CleanPCBLibraryPadsAndOverlayWithEditor(ExcludeFootprints: TStringList; TargetNameContains, PadNamePrefix, OverlayLayerName: String): String;
 var
     PcbLib              : IPCB_Library;
@@ -7621,6 +7835,7 @@ var
     CleanPadsOverlayTargetNameContains : String;
     CleanPadsOverlayPadNamePrefix : String;
     CleanPadsOverlayLayerName : String;
+    Delete3DBodyFootprintName : String;
     Batch3DBodyImportDataFileName : String;
     Batch3DBodyImportSkipExisting : Boolean;
     Batch3DBodySetPlacementDataFileName : String;
@@ -7737,6 +7952,12 @@ begin
     if FindPCBLibraryCleanPadsOverlayCommand(LayerMoves, CleanPadsOverlayTargetNameContains, CleanPadsOverlayPadNamePrefix, CleanPadsOverlayLayerName) then
     begin
         Result := CleanPCBLibraryPadsAndOverlayWithEditor(ExcludeFootprints, CleanPadsOverlayTargetNameContains, CleanPadsOverlayPadNamePrefix, CleanPadsOverlayLayerName);
+        Exit;
+    end;
+
+    if Find3DBodyEditorDeleteCommand(LayerMoves, Delete3DBodyFootprintName) then
+    begin
+        Result := DeletePCBLibrary3DBodiesWithEditor(ExcludeFootprints, Delete3DBodyFootprintName);
         Exit;
     end;
 

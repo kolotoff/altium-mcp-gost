@@ -56,6 +56,23 @@ begin
   Result := JSONUnescapeString(Result);
 end;
 
+function TrimJSONStringPreserveCommas(InputStr: String): String;
+begin
+  Result := Trim(InputStr);
+  if (Length(Result) > 0) and (Result[Length(Result)] = ',') then
+    Delete(Result, Length(Result), 1);
+  Result := Trim(Result);
+  if (Length(Result) >= 2) and (Result[1] = '"') and (Result[Length(Result)] = '"') then
+  begin
+    Delete(Result, Length(Result), 1);
+    Delete(Result, 1, 1);
+  end
+  else
+    Result := RemoveChar(Result, '"');
+  Result := Trim(Result);
+  Result := JSONUnescapeString(Result);
+end;
+
 // Helper function to escape JSON strings
 function JSONEscapeString(const S: String): String;
 begin

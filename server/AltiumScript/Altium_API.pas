@@ -231,7 +231,7 @@ begin
             begin
                 ValueStart := Pos(':', RequestData[i]) + 1;
                 ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
-                ParamValue := TrimJSON(ParamValue);
+                ParamValue := TrimJSONStringPreserveCommas(ParamValue);
                 PinsList.Add('Description=' + ParamValue);
             end;
         end;
@@ -750,6 +750,31 @@ begin
     end;
 end;
 
+function ExecuteGetPCBLibraryFootprintPrimitives(RequestData: TStringList): String;
+var
+    ParamValue: String;
+    i, ValueStart: Integer;
+    FootprintName: String;
+begin
+    FootprintName := '';
+
+    for i := 0 to RequestData.Count - 1 do
+    begin
+        if (Pos('"footprint_name"', RequestData[i]) > 0) then
+        begin
+            ValueStart := Pos(':', RequestData[i]) + 1;
+            ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
+            FootprintName := TrimJSON(ParamValue);
+            Break;
+        end;
+    end;
+
+    if FootprintName <> '' then
+        Result := DumpPCBLibraryFootprintPrimitives(FootprintName)
+    else
+        Result := '{"success": false, "error": "No footprint_name provided."}';
+end;
+
 // Extract the PCB library pad shape update logic
 function ExecuteSetPCBLibraryPadShapes(RequestData: TStringList): String;
 var
@@ -948,6 +973,8 @@ begin
             Result := SaveCurrentDocument(ROOT_DIR);
         'get_pcblib_footprints':
             Result := GetPCBLibraryFootprints(ROOT_DIR);
+        'get_pcblib_footprint_primitives':
+            Result := ExecuteGetPCBLibraryFootprintPrimitives(RequestData);
         'create_pcb_footprint':
             Result := ExecuteCreatePCBFootprint(RequestData);
         'set_pcb_library_pad_shapes':

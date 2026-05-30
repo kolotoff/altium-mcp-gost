@@ -662,6 +662,7 @@ async def create_schematic_symbol(ctx: Context, symbol_name: str, description: s
                                GroupDelimiter=RIGHT|-17.5, GroupDelimiter=BOTH|-42.5,
                                GroupDelimiter=FULL|-20.0, or GroupDelimiter=CENTER|-20.0.
                                GroupDelimiter Y values are in mm and snap to the 2.5 mm grid.
+                               Use Designator=XP? or similar to override the copied reference designator.
         part_count (int): Number of parts in the symbol (default 1).
                          Use >1 for multi-part symbols like quad op-amps or hex buffers.
 
@@ -1559,6 +1560,79 @@ async def run_output_jobs(ctx: Context, container_names: list) -> str:
     
     # Otherwise, convert to JSON
     return json_dumps(result_data, indent=2)
+
+@mcp.tool()
+async def save_current_document(ctx: Context) -> str:
+    """
+    Save the currently focused Altium document.
+
+    Returns:
+        str: JSON object with result
+    """
+    logger.info("Saving current Altium document")
+
+    response = await altium_bridge.execute_command("save_current_document", {})
+
+    if not response.get("success", False):
+        error_msg = response.get("error", "Unknown error")
+        logger.error(f"Error saving current document: {error_msg}")
+        return json_dumps({"success": False, "error": f"Failed to save current document: {error_msg}"})
+
+    result = response.get("result", {})
+    logger.info("Current Altium document saved successfully")
+    return json_dumps(result, indent=2)
+
+@mcp.tool()
+async def get_pcblib_footprints(ctx: Context) -> str:
+    """
+    Return every footprint name in the currently active PCB footprint library.
+
+    The PcbLib must be the focused document in Altium.
+
+    Returns:
+        str: JSON object with footprint_count and footprints
+    """
+    logger.info("Getting footprint names from active PCB library")
+
+    response = await altium_bridge.execute_command("get_pcblib_footprints", {})
+
+    if not response.get("success", False):
+        error_msg = response.get("error", "Unknown error")
+        logger.error(f"Error getting PCB library footprints: {error_msg}")
+        return json_dumps({"success": False, "error": f"Failed to get PCB library footprints: {error_msg}"})
+
+    result = response.get("result", {})
+    logger.info("PCB library footprint list retrieved successfully")
+    return json_dumps(result, indent=2)
+
+@mcp.tool()
+async def get_pcblib_footprint_primitives(ctx: Context, footprint_name: str) -> str:
+    """
+    Return pads, tracks, arcs, text, and 3D body primitives for one PcbLib footprint.
+
+    The PcbLib must be the focused document in Altium.
+
+    Args:
+        footprint_name (str): Footprint name to inspect
+
+    Returns:
+        str: JSON object with primitive arrays
+    """
+    logger.info(f"Getting PCB library footprint primitives for {footprint_name}")
+
+    response = await altium_bridge.execute_command(
+        "get_pcblib_footprint_primitives",
+        {"footprint_name": footprint_name},
+    )
+
+    if not response.get("success", False):
+        error_msg = response.get("error", "Unknown error")
+        logger.error(f"Error getting PCB library footprint primitives: {error_msg}")
+        return json_dumps({"success": False, "error": f"Failed to get PCB library footprint primitives: {error_msg}"})
+
+    result = response.get("result", {})
+    logger.info("PCB library footprint primitives retrieved successfully")
+    return json_dumps(result, indent=2)
 
 @mcp.tool()
 async def create_pcb_footprint(ctx: Context, footprint_name: str, description: str, pads: list, courtyard_x_mm: float = 0, courtyard_y_mm: float = 0) -> str:

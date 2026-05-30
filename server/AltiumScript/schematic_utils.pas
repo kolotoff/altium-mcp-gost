@@ -203,6 +203,7 @@ begin
               (Pos('CenterLabel=', Line) = 1) or
               (Pos('CenterLabelPosition=', Line) = 1) or
               (Pos('Comment=', Line) = 1) or
+              (Pos('Designator=', Line) = 1) or
               (Pos('Manufacturer=', Line) = 1) or
               (Pos('Footprint=', Line) = 1) or
               (Pos('FootprintLibrary=', Line) = 1) or
@@ -443,6 +444,7 @@ var
     CenterLabel      : String;
     CenterLabelPosition : String;
     CommentText      : String;
+    DesignatorText   : String;
     ManufacturerValue : String;
     FootprintName    : String;
     FootprintLibraryName : String;
@@ -553,10 +555,11 @@ begin
     CenterLabel := '';
     CenterLabelPosition := '';
     CommentText := SymbolName;
+    DesignatorText := '';
     ManufacturerValue := '';
     FootprintName := '';
     FootprintLibraryName := '';
-    VerticalSeparatorsEnabled := True;
+    VerticalSeparatorsEnabled := (ReferenceLine1 <> Nil) and (ReferenceLine2 <> Nil);
     GridSizeMM := 2.5;
     SideSectionWidthGrid := 0;
     RefSideSectionWidthGrid := 0;
@@ -587,6 +590,10 @@ begin
             else if (Pos('Comment=', PinsList[I]) = 1) then
             begin
                 CommentText := Copy(PinsList[I], 9, Length(PinsList[I]) - 8);
+            end
+            else if (Pos('Designator=', PinsList[I]) = 1) then
+            begin
+                DesignatorText := Copy(PinsList[I], 12, Length(PinsList[I]) - 11);
             end
             else if (Pos('Manufacturer=', PinsList[I]) = 1) then
             begin
@@ -712,7 +719,9 @@ begin
         SchComponent.ComponentDescription := Description;
         if (SchComponent.Comment <> Nil) then
             SchComponent.Comment.Text := CommentText;
-        if (ReferenceComponent <> Nil) then
+        if (DesignatorText <> '') then
+            SchComponent.Designator.Text := DesignatorText
+        else if (ReferenceComponent <> Nil) then
             SchComponent.Designator.Text := ReferenceComponent.Designator.Text
         else
             SchComponent.Designator.Text := 'U?';
@@ -1086,6 +1095,8 @@ begin
                 SchPin.Orientation := PinOrientation;
                 SchPin.Location := Point(GridIndexToCoord(PinX, GridSizeMM), GridIndexToCoord(PinY, GridSizeMM));
                 SchPin.Description := PinDescriptions.Values[PinNum];
+                if (Copy(UpperCase(PinNum), 1, 2) = 'MP') or (Copy(UpperCase(PinName), 1, 2) = 'MP') then
+                    SchPin.ShowDesignator := False;
 
                 // Set ownership to the specified part (0 = shared across all parts)
                 SchPin.OwnerPartId := PinOwnerPartId;

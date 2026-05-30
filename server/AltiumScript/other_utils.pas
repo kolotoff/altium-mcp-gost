@@ -134,6 +134,7 @@ begin
     end
     else if (CommandName = 'create_pcb_footprint') or
             (CommandName = 'get_pcblib_footprints') or
+            (CommandName = 'get_pcblib_footprint_primitives') or
             (CommandName = 'set_pcb_library_pad_shapes') or
             (CommandName = 'move_pcb_library_mechanical_layers') then
     begin

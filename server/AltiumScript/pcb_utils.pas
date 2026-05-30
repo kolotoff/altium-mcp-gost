@@ -2089,6 +2089,62 @@ begin
     end;
 end;
 
+function Parse3DBodySetIdentifierCommand(MoveText: String; var FootprintName, IdentifierText: String): Boolean;
+var
+    CommandName: String;
+    Fields     : TStringList;
+    Remainder  : String;
+    Separator  : Integer;
+begin
+    Result := False;
+    FootprintName := '';
+    IdentifierText := '';
+
+    MoveText := Trim(MoveText);
+    Separator := Pos('|', MoveText);
+    if Separator <= 1 then
+        Exit;
+
+    CommandName := UpperCase(Trim(Copy(MoveText, 1, Separator - 1)));
+    if CommandName <> '3D_BODY_SET_IDENTIFIER' then
+        Exit;
+
+    Remainder := Copy(MoveText, Separator + 1, Length(MoveText) - Separator);
+    Fields := TStringList.Create;
+    try
+        Fields.Delimiter := '|';
+        Fields.StrictDelimiter := True;
+        Fields.DelimitedText := Remainder;
+
+        if Fields.Count < 2 then
+            Exit;
+
+        FootprintName := Trim(Fields[0]);
+        IdentifierText := Trim(Fields[1]);
+        Result := (FootprintName <> '') and (IdentifierText <> '');
+    finally
+        Fields.Free;
+    end;
+end;
+
+function Find3DBodySetIdentifierCommand(LayerMoves: TStringList; var FootprintName, IdentifierText: String): Boolean;
+var
+    i: Integer;
+begin
+    Result := False;
+    FootprintName := '';
+    IdentifierText := '';
+
+    for i := 0 to LayerMoves.Count - 1 do
+    begin
+        if Parse3DBodySetIdentifierCommand(LayerMoves[i], FootprintName, IdentifierText) then
+        begin
+            Result := True;
+            Exit;
+        end;
+    end;
+end;
+
 function Parse3DBodyFixOriginOffsetCommand(MoveText: String; var FootprintName: String): Boolean;
 var
     CommandName: String;
@@ -4662,6 +4718,50 @@ begin
     end;
 end;
 
+function Parse3DBodyBatchSetIdentifierCommand(MoveText: String; var DataFileName: String): Boolean;
+var
+    Fields: TStringList;
+begin
+    Result := False;
+    DataFileName := ROOT_DIR + 'pcblib_3d_body_identifiers.txt';
+
+    Fields := TStringList.Create;
+    try
+        Fields.Delimiter := '|';
+        Fields.StrictDelimiter := True;
+        Fields.DelimitedText := Trim(MoveText);
+
+        if Fields.Count < 1 then
+            Exit;
+        if UpperCase(Trim(Fields[0])) <> '3D_BODY_BATCH_SET_IDENTIFIER' then
+            Exit;
+
+        if (Fields.Count >= 2) and (Trim(Fields[1]) <> '') then
+            DataFileName := Trim(Fields[1]);
+
+        Result := True;
+    finally
+        Fields.Free;
+    end;
+end;
+
+function Find3DBodyBatchSetIdentifierCommand(LayerMoves: TStringList; var DataFileName: String): Boolean;
+var
+    i: Integer;
+begin
+    Result := False;
+    DataFileName := ROOT_DIR + 'pcblib_3d_body_identifiers.txt';
+
+    for i := 0 to LayerMoves.Count - 1 do
+    begin
+        if Parse3DBodyBatchSetIdentifierCommand(LayerMoves[i], DataFileName) then
+        begin
+            Result := True;
+            Exit;
+        end;
+    end;
+end;
+
 function DumpPCBLibraryFootprintDescriptions(FootprintName: String): String;
 var
     PcbLib          : IPCB_Library;
@@ -5224,12 +5324,37 @@ begin
     Result := True;
 end;
 
+function StepIdentifierFromPath(StepPath: String): String;
+var
+    FileName : String;
+    DotIndex : Integer;
+    i        : Integer;
+begin
+    FileName := ExtractFileName(Trim(StepPath));
+    DotIndex := 0;
+
+    for i := Length(FileName) downto 1 do
+    begin
+        if Copy(FileName, i, 1) = '.' then
+        begin
+            DotIndex := i;
+            Break;
+        end;
+    end;
+
+    if DotIndex > 1 then
+        Result := Copy(FileName, 1, DotIndex - 1)
+    else
+        Result := FileName;
+end;
+
 function AddStepBodyToActiveComponentWithPlacement(PcbLib: IPCB_Library; Footprint: IPCB_LibComponent; StepPath: String; LocalXMM, LocalYMM, RotX, RotY, RotZ, ModelZMM, StandoffMM, OverallHeightMM: Double; var ErrorText: String): Boolean;
 var
     Board   : IPCB_Board;
     StepBody: IPCB_ComponentBody;
     Model   : IPCB_Model;
     ModelError : String;
+    IdentifierText : String;
     TargetCenterX : TCoord;
     TargetCenterY : TCoord;
 begin
@@ -5297,6 +5422,9 @@ begin
     StepBody.StandoffHeight := MMsToCoord(StandoffMM);
     if OverallHeightMM > 0 then
         StepBody.OverallHeight := MMsToCoord(OverallHeightMM);
+    IdentifierText := StepIdentifierFromPath(StepPath);
+    if IdentifierText <> '' then
+        StepBody.SetState_Identifier(IdentifierText);
 
     PCBServer.SendMessageToRobots(StepBody.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
     Board.AddPCBObject(StepBody);
@@ -5399,6 +5527,7 @@ begin
                     AddJSONBoolean(ResultProps, 'mutated', True);
                     AddJSONProperty(ResultProps, 'footprint', FootprintName);
                     AddJSONProperty(ResultProps, 'step_file', StepPath);
+                    AddJSONProperty(ResultProps, 'identifier', StepIdentifierFromPath(StepPath));
                     AddJSONNumber(ResultProps, 'local_x_mm', LocalXMM);
                     AddJSONNumber(ResultProps, 'local_y_mm', LocalYMM);
                     AddJSONNumber(ResultProps, 'model_rot_x_deg', RotX);
@@ -5731,6 +5860,137 @@ begin
         Result := OutputLines.Text;
     finally
         OutputLines.Free;
+        ResultProps.Free;
+    end;
+end;
+
+function Set3DBodyIdentifierForFootprint(PcbLib: IPCB_Library; Footprint: IPCB_LibComponent; IdentifierText: String; FootprintResults: TStringList): Integer;
+var
+    BodyIterator : IPCB_GroupIterator;
+    Primitive    : IPCB_Primitive;
+    Body         : IPCB_ComponentBody;
+    Props        : TStringList;
+    FootprintName: String;
+    BodiesSeen   : Integer;
+    BodiesUpdated: Integer;
+    OldIdentifier: String;
+begin
+    Result := 0;
+    if (PcbLib = Nil) or (Footprint = Nil) or (Trim(IdentifierText) = '') then
+        Exit;
+
+    FootprintName := Footprint.Name;
+    PcbLib.CurrentComponent := Footprint;
+    Footprint := PcbLib.CurrentComponent;
+    if Footprint = Nil then
+        Exit;
+
+    BodiesSeen := 0;
+    BodiesUpdated := 0;
+    BodyIterator := Footprint.GroupIterator_Create;
+    if BodyIterator = Nil then
+        Exit;
+
+    try
+        BodyIterator.AddFilter_ObjectSet(MkSet(eComponentBodyObject));
+        BodyIterator.AddFilter_LayerSet(AllLayers);
+
+        Primitive := BodyIterator.FirstPCBObject;
+        while Primitive <> Nil do
+        begin
+            BodiesSeen := BodiesSeen + 1;
+            Body := Primitive;
+            OldIdentifier := Primitive.Identifier;
+            if OldIdentifier <> IdentifierText then
+            begin
+                PCBServer.SendMessageToRobots(Body.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+                try
+                    Body.SetState_Identifier(IdentifierText);
+                    Primitive.GraphicallyInvalidate;
+                finally
+                    PCBServer.SendMessageToRobots(Body.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+                end;
+                BodiesUpdated := BodiesUpdated + 1;
+            end;
+
+            Primitive := BodyIterator.NextPCBObject;
+        end;
+    finally
+        Footprint.GroupIterator_Destroy(BodyIterator);
+    end;
+
+    if FootprintResults <> Nil then
+    begin
+        Props := TStringList.Create;
+        try
+            AddJSONProperty(Props, 'footprint', FootprintName);
+            AddJSONProperty(Props, 'identifier', IdentifierText);
+            AddJSONInteger(Props, 'bodies_seen', BodiesSeen);
+            AddJSONInteger(Props, 'bodies_updated', BodiesUpdated);
+            FootprintResults.Add(BuildJSONObject(Props, 1));
+        finally
+            Props.Free;
+        end;
+    end;
+
+    Result := BodiesUpdated;
+end;
+
+function SetPCBLibrary3DBodyIdentifier(FootprintName, IdentifierText: String): String;
+var
+    PcbLib          : IPCB_Library;
+    Board           : IPCB_Board;
+    TargetFootprint : IPCB_LibComponent;
+    ResultProps     : TStringList;
+    FootprintResults: TStringList;
+    OutputLines     : TStringList;
+    BodiesModified  : Integer;
+begin
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    if PcbLib = Nil then
+    begin
+        Result := '{"success": false, "error": "No PCB library document is currently active. Open a .PcbLib file first."}';
+        Exit;
+    end;
+
+    TargetFootprint := FindPCBLibraryFootprintByName(PcbLib, FootprintName);
+    if TargetFootprint = Nil then
+    begin
+        Result := '{"success": false, "error": "Footprint not found."}';
+        Exit;
+    end;
+
+    ResultProps := TStringList.Create;
+    FootprintResults := TStringList.Create;
+    OutputLines := TStringList.Create;
+    Board := PcbLib.Board;
+    BodiesModified := 0;
+
+    try
+        PCBServer.PreProcess;
+        try
+            BodiesModified := Set3DBodyIdentifierForFootprint(PcbLib, TargetFootprint, IdentifierText, FootprintResults);
+        finally
+            PCBServer.PostProcess;
+        end;
+
+        if Board <> Nil then
+            Board.ViewManager_FullUpdate;
+        Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
+
+        AddJSONBoolean(ResultProps, 'success', True);
+        AddJSONProperty(ResultProps, 'footprint', FootprintName);
+        AddJSONProperty(ResultProps, 'identifier', IdentifierText);
+        AddJSONInteger(ResultProps, 'bodies_modified', BodiesModified);
+        ResultProps.Add(BuildJSONArray(FootprintResults, 'footprint_results'));
+        if BodiesModified = 0 then
+            AddJSONProperty(ResultProps, 'message', 'No matching 3D bodies needed an Identifier update.');
+
+        OutputLines.Text := BuildJSONObject(ResultProps);
+        Result := OutputLines.Text;
+    finally
+        OutputLines.Free;
+        FootprintResults.Free;
         ResultProps.Free;
     end;
 end;
@@ -6106,6 +6366,144 @@ begin
         AddJSONProperty(ResultProps, 'data_file', DataFileName);
         AddJSONInteger(ResultProps, 'records_seen', RecordsSeen);
         AddJSONInteger(ResultProps, 'bodies_updated', BodiesUpdated);
+        AddJSONInteger(ResultProps, 'footprints_missing', FootprintsMissing);
+        ResultProps.Add(BuildJSONArray(UpdatedFootprints, 'updated_footprints'));
+        ResultProps.Add(BuildJSONArray(FootprintResults, 'footprint_results'));
+        ResultProps.Add(BuildJSONArray(ErrorArray, 'errors'));
+
+        OutputLines.Text := BuildJSONObject(ResultProps);
+        Result := OutputLines.Text;
+    finally
+        OutputLines.Free;
+        ErrorArray.Free;
+        UpdatedFootprints.Free;
+        FootprintResults.Free;
+        ResultProps.Free;
+        Fields.Free;
+        Lines.Free;
+    end;
+end;
+
+function SetPCBLibrary3DBodyIdentifiersFromBatchFile(DataFileName: String): String;
+var
+    PcbLib              : IPCB_Library;
+    Board               : IPCB_Board;
+    Lines               : TStringList;
+    Fields              : TStringList;
+    ResultProps         : TStringList;
+    FootprintResults    : TStringList;
+    UpdatedFootprints   : TStringList;
+    ErrorArray          : TStringList;
+    OutputLines         : TStringList;
+    LineText            : String;
+    CommandName         : String;
+    FootprintName       : String;
+    IdentifierText      : String;
+    Footprint           : IPCB_LibComponent;
+    UpdatedCount        : Integer;
+    RecordsSeen         : Integer;
+    BodiesUpdated       : Integer;
+    FootprintsMissing   : Integer;
+    i                   : Integer;
+begin
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    if PcbLib = Nil then
+    begin
+        Result := '{"success": false, "error": "No PCB library document is currently active. Open a .PcbLib file first."}';
+        Exit;
+    end;
+
+    if not FileExists(DataFileName) then
+    begin
+        Result := '{"success": false, "error": "3D body Identifier batch file not found."}';
+        Exit;
+    end;
+
+    Board := PcbLib.Board;
+    if Board = Nil then
+    begin
+        Result := '{"success": false, "error": "PcbLib board is nil."}';
+        Exit;
+    end;
+
+    Lines := TStringList.Create;
+    Fields := TStringList.Create;
+    ResultProps := TStringList.Create;
+    FootprintResults := TStringList.Create;
+    UpdatedFootprints := TStringList.Create;
+    ErrorArray := TStringList.Create;
+    OutputLines := TStringList.Create;
+    RecordsSeen := 0;
+    BodiesUpdated := 0;
+    FootprintsMissing := 0;
+
+    try
+        Fields.Delimiter := '|';
+        Fields.StrictDelimiter := True;
+        Lines.LoadFromFile(DataFileName);
+
+        PCBServer.PreProcess;
+        try
+            for i := 0 to Lines.Count - 1 do
+            begin
+                LineText := Trim(Lines[i]);
+                if LineText = '' then
+                    continue;
+                if Copy(LineText, 1, 1) = '#' then
+                    continue;
+
+                Fields.Clear;
+                Fields.DelimitedText := LineText;
+                if Fields.Count = 0 then
+                    continue;
+
+                CommandName := UpperCase(Trim(Fields[0]));
+                if CommandName <> 'IDENTIFIER' then
+                begin
+                    ErrorArray.Add('"' + JSONEscapeString('Line ' + IntToStr(i + 1) + ': expected IDENTIFIER record.') + '"');
+                    continue;
+                end;
+
+                if Fields.Count < 3 then
+                begin
+                    ErrorArray.Add('"' + JSONEscapeString('Line ' + IntToStr(i + 1) + ': IDENTIFIER requires footprint and identifier text.') + '"');
+                    continue;
+                end;
+
+                RecordsSeen := RecordsSeen + 1;
+                FootprintName := Trim(Fields[1]);
+                IdentifierText := Trim(Fields[2]);
+                if (FootprintName = '') or (IdentifierText = '') then
+                begin
+                    ErrorArray.Add('"' + JSONEscapeString('Line ' + IntToStr(i + 1) + ': empty footprint or identifier.') + '"');
+                    continue;
+                end;
+
+                Footprint := FindPCBLibraryFootprintByName(PcbLib, FootprintName);
+                if Footprint = Nil then
+                begin
+                    FootprintsMissing := FootprintsMissing + 1;
+                    ErrorArray.Add('"' + JSONEscapeString('Line ' + IntToStr(i + 1) + ': footprint not found: ' + FootprintName) + '"');
+                    continue;
+                end;
+
+                UpdatedCount := Set3DBodyIdentifierForFootprint(PcbLib, Footprint, IdentifierText, FootprintResults);
+                BodiesUpdated := BodiesUpdated + UpdatedCount;
+                if UpdatedCount > 0 then
+                    UpdatedFootprints.Add('"' + JSONEscapeString(FootprintName) + '"');
+            end;
+        finally
+            PCBServer.PostProcess;
+        end;
+
+        Board.ViewManager_FullUpdate;
+        Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
+
+        AddJSONBoolean(ResultProps, 'success', ErrorArray.Count = 0);
+        AddJSONProperty(ResultProps, 'data_file', DataFileName);
+        AddJSONInteger(ResultProps, 'records_seen', RecordsSeen);
+        AddJSONInteger(ResultProps, 'bodies_updated', BodiesUpdated);
+        AddJSONInteger(ResultProps, 'footprints_modified', UpdatedFootprints.Count);
         AddJSONInteger(ResultProps, 'footprints_missing', FootprintsMissing);
         ResultProps.Add(BuildJSONArray(UpdatedFootprints, 'updated_footprints'));
         ResultProps.Add(BuildJSONArray(FootprintResults, 'footprint_results'));
@@ -8048,6 +8446,7 @@ var
     Batch3DBodyImportDataFileName : String;
     Batch3DBodyImportSkipExisting : Boolean;
     Batch3DBodySetPlacementDataFileName : String;
+    Batch3DBodySetIdentifierDataFileName : String;
     Import3DBodyFootprintName : String;
     Import3DBodyStepPath : String;
     Import3DBodyLocalXMM : Double;
@@ -8061,6 +8460,8 @@ var
     Set3DBodyHeightsFootprintName : String;
     Set3DBodyHeightsStandoffMM : Double;
     Set3DBodyHeightsOverallHeightMM : Double;
+    Set3DBodyIdentifierFootprintName : String;
+    Set3DBodyIdentifierText : String;
     Fix3DBodyOriginFootprintName : String;
     ParamsDump3DBodyFootprintName : String;
     Set3DBodyPlacementFootprintName : String;
@@ -8185,6 +8586,12 @@ begin
         Exit;
     end;
 
+    if Find3DBodyBatchSetIdentifierCommand(LayerMoves, Batch3DBodySetIdentifierDataFileName) then
+    begin
+        Result := SetPCBLibrary3DBodyIdentifiersFromBatchFile(Batch3DBodySetIdentifierDataFileName);
+        Exit;
+    end;
+
     if Find3DBodyImportCommand(LayerMoves, Import3DBodyFootprintName, Import3DBodyStepPath, Import3DBodyLocalXMM, Import3DBodyLocalYMM, Import3DBodyRotX, Import3DBodyRotY, Import3DBodyRotZ, Import3DBodyModelZMM, Import3DBodyStandoffMM, Import3DBodyOverallHeightMM) then
     begin
         Result := Import3DBodyWithPlacement(Import3DBodyFootprintName, Import3DBodyStepPath, Import3DBodyLocalXMM, Import3DBodyLocalYMM, Import3DBodyRotX, Import3DBodyRotY, Import3DBodyRotZ, Import3DBodyModelZMM, Import3DBodyStandoffMM, Import3DBodyOverallHeightMM);
@@ -8194,6 +8601,12 @@ begin
     if Find3DBodySetHeightsCommand(LayerMoves, Set3DBodyHeightsFootprintName, Set3DBodyHeightsStandoffMM, Set3DBodyHeightsOverallHeightMM) then
     begin
         Result := SetPCBLibrary3DBodyHeights(Set3DBodyHeightsFootprintName, Set3DBodyHeightsStandoffMM, Set3DBodyHeightsOverallHeightMM);
+        Exit;
+    end;
+
+    if Find3DBodySetIdentifierCommand(LayerMoves, Set3DBodyIdentifierFootprintName, Set3DBodyIdentifierText) then
+    begin
+        Result := SetPCBLibrary3DBodyIdentifier(Set3DBodyIdentifierFootprintName, Set3DBodyIdentifierText);
         Exit;
     end;
 

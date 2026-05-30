@@ -213,12 +213,13 @@ The safe manual Altium flow is:
 
 1. Focus the target footprint in the `.PcbLib`.
 2. Place/import the original vendor STEP as a Generic 3D Body.
-3. Set X/Y, Rotation X/Y/Z, Model Z/Standoff Height, and Overall Height in Altium's 3D Body Properties panel.
-4. If scripted import left the body at raw local coordinates instead of origin-adjusted PcbLib coordinates, run `3D_BODY_FIX_ORIGIN_OFFSET|<footprint>` or `3D_BODY_FIX_ORIGIN_OFFSET|*`. This moves the Altium 3D body object by `Board.XOrigin`/`Board.YOrigin`; it does not edit STEP geometry or model rotation.
-5. Run `3D_BODY_DUMP` and verify the origin-corrected `left_mm`, `right_mm`, `bottom_mm`, and `top_mm` are centered around the footprint.
-6. After any scripted PcbLib modification, run `PCB_POSTPROCESS` before saving. Treat this as the standard end-of-job cleanup for PcbLib work, even when the command appeared to finish normally.
+3. Set the 3D Body `Identifier` to the STEP model file name without its extension, for example `DF40C-10DP-0.4V` for `DF40C-10DP-0.4V.stp`.
+4. Set X/Y, Rotation X/Y/Z, Model Z/Standoff Height, and Overall Height in Altium's 3D Body Properties panel.
+5. If scripted import left the body at raw local coordinates instead of origin-adjusted PcbLib coordinates, run `3D_BODY_FIX_ORIGIN_OFFSET|<footprint>` or `3D_BODY_FIX_ORIGIN_OFFSET|*`. This moves the Altium 3D body object by `Board.XOrigin`/`Board.YOrigin`; it does not edit STEP geometry or model rotation.
+6. Run `3D_BODY_DUMP` and verify the origin-corrected `left_mm`, `right_mm`, `bottom_mm`, and `top_mm` are centered around the footprint.
+7. After any scripted PcbLib modification, run `PCB_POSTPROCESS` before saving. Treat this as the standard end-of-job cleanup for PcbLib work, even when the command appeared to finish normally.
 
-The script may safely create a basic STEP body container and set supported `IPCB_ComponentBody` height fields:
+The script may safely create a basic STEP body container and set supported `IPCB_ComponentBody` identifier and height fields:
 
 ```pascal
 PcbLib.CurrentComponent := Footprint;
@@ -230,6 +231,7 @@ Model := StepBody.ModelFactory_FromFilename(StepPath, False);
 StepBody.Model := Model;
 StepBody.SetState_FromModel;
 StepBody.Layer := ILayer.MechanicalLayer(1);
+StepBody.SetState_Identifier(StepIdentifierFromPath(StepPath));
 StepBody.StandoffHeight := MMsToCoord(StandoffMm);
 StepBody.OverallHeight := MMsToCoord(OverallHeightMm);
 
@@ -242,11 +244,12 @@ Do not use DelphiScript to transform the STEP model data. Apply placement throug
 
 - assigning non-existent properties such as `Body.ModelRotationX` or `Model.ROTX`.
 - assigning `IPCB_ComponentBody.X`, `IPCB_ComponentBody.Y`, `RotationX`, `RotationY`, or `RotationZ` from the PcbLib script path, either before or after `Board.AddPCBObject`.
+- assigning `IPCB_Primitive.Identifier` directly. Use `IPCB_ComponentBody.SetState_Identifier(...)` instead.
 - using .NET/property-panel wrapper members from DelphiScript, such as `GetState_ModelDescriptorString`.
 - calling `IPCB_Model.SetState(...)` without pushing the model back onto the body and rebuilding the body from the model.
 - deleting existing 3D bodies and re-importing replacements in the same scripted operation.
 
-`3D_BODY_IMPORT|...` is therefore intentionally non-mutating in this MCP script. It returns the requested placement values for review, but it does not delete or re-add bodies.
+`3D_BODY_IMPORT|...` never deletes or replaces existing bodies. It imports only into an empty footprint, applies the filename-stem Identifier rule, and returns the resulting placement values for review.
 
 The generic scripted placement sequence for an existing body is:
 
@@ -263,6 +266,8 @@ Body.OverallHeight := MMsToCoord(OverallHeightMM);
 
 `SetState_FromModel` can reset the body reference point, so always set `SetState_SnapPointX/Y` after it. Reapply `Model.SetState` and `Body.SetModel` after `SetState_FromModel` if Altium clears the Generic model rotation or Z field. Add `Board.XOrigin`/`Board.YOrigin` when writing raw snap points so the 3D body stays in the footprint coordinate frame.
 
+3D Body Identifier rule: every Generic STEP 3D Body `Identifier` must equal the model file base name without the extension. New bodies created by `3D_BODY_IMPORT` and `3D_BODY_BATCH_IMPORT` apply this rule from `StepPath` automatically through `IPCB_ComponentBody.SetState_Identifier(...)`. For existing bodies, use `3D_BODY_SET_IDENTIFIER` or `3D_BODY_BATCH_SET_IDENTIFIER`; do not write `Primitive.Identifier` directly.
+
 When only the visible Generic model Z offset must change, preserve the current X/Y and rotations exactly, then write only the new `model_z_mm` through the model state. In this MCP helper that means using `3D_BODY_SET_PLACEMENT` with the captured current local X/Y and Rotation X/Y/Z values plus the new `model_z_mm`; do not use it to recalculate or "helpfully" change X/Y or rotations.
 
 Use `3D_BODY_SET_HEIGHTS|<footprint>|<standoff_mm>|<overall_height_mm>` only for `IPCB_ComponentBody.StandoffHeight`/`OverallHeight` metadata corrections. In Altium Designer 26.6 this may not update the Generic 3D Model panel's effective Z/Standoff field.
@@ -274,6 +279,10 @@ Avoid part-number-specific refresh or generator helpers in the common MCP script
 Supported generic helper commands:
 
 - `3D_BODY_DUMP`: reports body bounding boxes, raw coordinates, board origin, standoff height, and overall height.
+- `3D_BODY_SET_IDENTIFIER|<footprint>|<identifier>`: updates existing component-body Identifier metadata with `IPCB_ComponentBody.SetState_Identifier(...)`. Use the STEP model file base name without extension.
+- `3D_BODY_BATCH_SET_IDENTIFIER|<data_file>`: updates existing Generic 3D Body identifiers from a pipe-delimited batch file. Each non-comment line must be `IDENTIFIER|<footprint>|<identifier>`. This is the preferred helper when applying the filename-stem Identifier rule across a PcbLib.
+- `3D_BODY_IMPORT|<footprint>|<step_path>|<local_x_mm>|<local_y_mm>|<rot_x_deg>|<rot_y_deg>|<rot_z_deg>|<model_z_mm>|<standoff_mm>|<overall_height_mm>`: imports a STEP model into an empty footprint and automatically sets the body Identifier to the STEP file base name without extension.
+- `3D_BODY_BATCH_IMPORT|<data_file>|<skip_existing>`: imports STEP models from `BODY|...` records and applies the same automatic Identifier rule for each placed body.
 - `3D_BODY_SET_HEIGHTS|<footprint>|<standoff_mm>|<overall_height_mm>`: updates existing component-body standoff/overall-height metadata without touching STEP geometry, X/Y placement, snap point, or model rotation. Use `*` as the footprint name to update all footprints.
 - `3D_BODY_SET_PLACEMENT|<footprint>|<local_x_mm>|<local_y_mm>|<rot_x_deg>|<rot_y_deg>|<rot_z_deg>|<model_z_mm>|<standoff_mm>|<overall_height_mm>`: updates an existing Generic 3D Body's Altium placement state. It uses `IPCB_Model.SetState`, `IPCB_ComponentBody.SetModel`, `SetState_FromModel`, then `SetState_SnapPointX/Y` with `Board.XOrigin + local_x` and `Board.YOrigin + local_y`. It does not transform or rewrite the STEP file.
 - `3D_BODY_BATCH_SET_PLACEMENT|<data_file>`: updates existing Generic 3D Bodies from a pipe-delimited batch file. Each non-comment line must be `PLACE|<footprint>|<local_x_mm>|<local_y_mm>|<rot_x_deg>|<rot_y_deg>|<rot_z_deg>|<model_z_mm>|<standoff_mm>|<overall_height_mm>`. Use this for repeated Z-only repairs only after capturing each footprint's current X/Y and rotations; the command writes every field in the record.

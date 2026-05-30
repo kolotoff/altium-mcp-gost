@@ -15,6 +15,7 @@ Note: Having Claude place components on the PCB currently fails hard.
 - In the active PCB footprint library, set all pad shapes to rounded rectangle except footprint 53398-0271
 - In the active PCB footprint library, move all primitives from Mechanical 13 to Mechanical 1 and Mechanical 15 to Mechanical 3, except footprint 53398-0271
 - In the active PCB footprint library, create Draftsman-style projections of embedded 3D STEP bodies on Mechanical 2 with 0.1 mm tracks, except footprint 53398-0271
+- List every footprint in the active PCB footprint library
 - Duplicate my selected layout. (Will prompt user to now select destination components. Supports Component, Track, Arc, Via, Polygon, & Region)
 - Show all my inner layers. Show the top and bottom layer. Turn off solder paste.
 - Get me all parts on my design made by Molex
@@ -148,6 +149,9 @@ The server provides several tools to interact with Altium Designer:
 - `get_output_job_containers`: Using currently open .OutJob file, reads all available output containers
 - `run_output_jobs`: Pass a list of output job container names from the currently open .OutJob to run any number of them. `.OutJob` must be the currently focused document.
 
+### Document Utilities
+- `save_current_document`: Save the currently focused Altium document.
+
 ### Component Information
 - `get_all_designators`: Get a list of all component designators in the current board
 - `get_all_component_property_names`: Get a list of all available component property names
@@ -158,6 +162,7 @@ The server provides several tools to interact with Altium Designer:
 ### Schematic/Symbol
 - `get_schematic_data`: Get schematic data for specified components
 - `create_schematic_symbol` ([YouTube](https://youtu.be/MMP7ZfmbCMI)): Passes pin list with pin type & coordinates to Altium script. Supports multi-part symbols (e.g. quad op-amps) via a `part_count` parameter and an `owner_part_id` field on each pin (use 0 for shared power/GND pins). Also supports active-low pin name overbars by placing a backslash after each overbarred character (e.g. `R\E\S\E\T\` renders as `RESET` with overbar).
+- Before creating or editing schematic symbols, read [server/symbol_placement_rules.txt](server/symbol_placement_rules.txt). This is the project rule set future chats should use for pin placement, connector designators, descriptions, and symbol styling.
 - `get_symbol_placement_rules`: Create symbol's helper tool that reads `~\AppData\Roaming\Claude\Claude Extensions\local.dxt.altium-mcp\server\symbol_placement_rules.txt` to get pin placement rules for symbol creation.
 - `get_library_symbol_reference`: Create symbol's helper tool to use an open library symbol as an example to create the symbol
 - `search_library_symbol`: Search for a symbol by name in a schematic library (.SchLib) and navigate to it. Supports partial name matching. Will open the library file in Altium if a path is provided, or show a file picker if not.
@@ -180,6 +185,8 @@ The cool thing about layout duplication this way as opposed to with Altium's bui
 ![Placement Duplicator](assets/placement_duplicator.gif)
 
 ### PCB Footprint Library
+- `get_pcblib_footprints`: Return every footprint name in the currently active `.PcbLib` document. The `.PcbLib` must be the focused document in Altium.
+- `get_pcblib_footprint_primitives`: Return pads, tracks, arcs, text, and 3D body primitive data for one footprint in the active `.PcbLib` document.
 - `create_pcb_footprint`: Create a new PCB footprint in the currently active .PcbLib document. Supports SMD pads (Rect, Round, and Oval/rounded-rectangle shapes) defined in mm relative to the component origin. Auto-generates a courtyard on Mech 15 and silkscreen with a pin 1 indicator (gap in the top-left corner), or accepts explicit courtyard dimensions. Rounded-rectangle pads use Altium's `eRoundedRectangular` pad shape enum. Contributed by [coffeedust](https://github.com/coffeedust) ([PR #7](https://github.com/coffeenmusic/altium-mcp/pull/7)).
 - `set_pcb_library_pad_shapes`: Set all copper pad shapes in the currently active .PcbLib document to Rounded Rectangle, excluding any footprint names passed in `exclude_footprint_names` (for example `["53398-0271"]`). Uses Altium's `eRoundedRectangular` pad shape enum.
 - `move_pcb_library_mechanical_layers`: Move primitives between mechanical layers in the currently active .PcbLib document, excluding any footprint names passed in `exclude_footprint_names` (for example `["53398-0271"]`). Layer moves are passed as `source|destination` strings in `layer_moves`, for example `["13|1", "15|3"]`.

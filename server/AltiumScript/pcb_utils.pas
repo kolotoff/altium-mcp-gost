@@ -5455,6 +5455,12 @@ begin
                     Model.SetState(RotX, RotY, RotZ, MMsToCoord(ModelZMM));
                     Body.SetModel(Model);
                     Body.SetState_FromModel;
+                    Model := Body.GetModel;
+                    if Model <> Nil then
+                    begin
+                        Model.SetState(RotX, RotY, RotZ, MMsToCoord(ModelZMM));
+                        Body.SetModel(Model);
+                    end;
                     TargetCenterX := Board.XOrigin + MMsToCoord(LocalXMM);
                     TargetCenterY := Board.YOrigin + MMsToCoord(LocalYMM);
                     Body.SetState_SnapPointX(TargetCenterX);

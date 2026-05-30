@@ -929,15 +929,16 @@ def transformed_model_contact_plane_z(
 
     max_plane_count = max(z_counts.values())
     # The absolute minimum is often a sparse plastic/detail outlier. Use the
-    # first dense negative Z plane as the real pad/contact plane.
+    # lowest dense Z plane as the real pad/contact plane. The plane can be
+    # negative or positive depending on the STEP model's native origin.
     min_dense_count = max(8, int(max_plane_count * 0.5), int(len(transformed_points) * 0.08))
-    dense_negative_planes = [
+    dense_planes = [
         (z, count)
         for z, count in sorted(z_counts.items())
-        if z < -1e-9 and count >= min_dense_count
+        if count >= min_dense_count
     ]
-    if dense_negative_planes:
-        return dense_negative_planes[0][0]
+    if dense_planes:
+        return dense_planes[0][0]
 
     return min(point[2] for point in transformed_points)
 
@@ -1937,6 +1938,7 @@ def main() -> int:
         footprint_optimization_stats["placement_preserves_step_scale"] = True
         height_state = transformed_model_height_state(model_cache[model_path], projection_model_state)
         if height_state is not None:
+            footprint_optimization_stats["computed_z_offset_mm"] = round(height_state["standoff_height_mm"], 6)
             footprint_optimization_stats["computed_model_z_mm"] = round(height_state["standoff_height_mm"], 6)
             footprint_optimization_stats["computed_body_standoff_height_mm"] = 0.0
             footprint_optimization_stats["computed_standoff_height_mm"] = round(height_state["standoff_height_mm"], 6)

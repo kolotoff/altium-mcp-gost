@@ -196,9 +196,9 @@ The common placement state is:
 
 - body location: X/Y in the footprint/PcbLib coordinate system.
 - model orientation: Rotation X, Rotation Y, and Rotation Z in the Generic 3D Model properties.
-- vertical placement: Generic STEP model Z offset plus Overall Height. Keep the component-body standoff metadata at `0 mm` for this flow.
+- vertical placement: Generic STEP model Z offset plus Overall Height. Keep the component-body standoff metadata at `0 mm` unless the footprint has a documented reason to use it.
 
-Calculate vertical STEP placement from transformed model geometry, not from the absolute lowest STEP vertex alone. After applying the intended Altium model rotations, group transformed vertex Z values into 0.001 mm planes. Ignore sparse outlier planes and use the first negative plane whose count is significant for that model, for example at least half of the most populated Z plane and at least 8% of all transformed vertices. Use `model_z_mm = -contact_plane_z_mm` and keep the component body standoff field at `0 mm` unless there is a specific Altium UI requirement. This places the dense pad/contact plane on the board pad surface while avoiding isolated plastic or reference-geometry outliers. In generated diagnostics, `computed_model_z_mm` is the value to pass as the `3D_BODY_SET_PLACEMENT` model-Z argument; `computed_body_standoff_height_mm` should remain `0`.
+Calculate vertical STEP placement from transformed model geometry, not from the absolute lowest STEP vertex alone. After applying the intended Altium model rotations, group transformed vertex Z values into 0.001 mm planes. Ignore sparse outlier planes and use the lowest Z plane whose count is significant for that model, for example at least half of the most populated Z plane and at least 8% of all transformed vertices. The contact plane can be negative or positive depending on the vendor STEP origin. Use `model_z_mm = -contact_plane_z_mm` as the Generic 3D Model Z/Standoff Height value, and keep the existing X/Y placement and model rotations unchanged. This places the dense pad/contact plane on the board pad surface while avoiding isolated plastic or reference-geometry outliers. In generated diagnostics, `computed_model_z_mm` is the value to pass as the `3D_BODY_SET_PLACEMENT` model-Z argument; `computed_body_standoff_height_mm` should remain `0`.
 
 For documents with a non-zero PcbLib board origin, keep the correction in the body/model placement state. If code or a metadata tool writes raw PcbLib coordinates, calculate:
 
@@ -261,7 +261,11 @@ Body.StandoffHeight := MMsToCoord(StandoffMM);
 Body.OverallHeight := MMsToCoord(OverallHeightMM);
 ```
 
-`SetState_FromModel` can reset the body reference point, so always set `SetState_SnapPointX/Y` after it. Add `Board.XOrigin`/`Board.YOrigin` when writing raw snap points so the 3D body stays in the footprint coordinate frame.
+`SetState_FromModel` can reset the body reference point, so always set `SetState_SnapPointX/Y` after it. Reapply `Model.SetState` and `Body.SetModel` after `SetState_FromModel` if Altium clears the Generic model rotation or Z field. Add `Board.XOrigin`/`Board.YOrigin` when writing raw snap points so the 3D body stays in the footprint coordinate frame.
+
+When only the visible Generic model Z offset must change, preserve the current X/Y and rotations exactly, then write only the new `model_z_mm` through the model state. In this MCP helper that means using `3D_BODY_SET_PLACEMENT` with the captured current local X/Y and Rotation X/Y/Z values plus the new `model_z_mm`; do not use it to recalculate or "helpfully" change X/Y or rotations.
+
+Use `3D_BODY_SET_HEIGHTS|<footprint>|<standoff_mm>|<overall_height_mm>` only for `IPCB_ComponentBody.StandoffHeight`/`OverallHeight` metadata corrections. In Altium Designer 26.6 this may not update the Generic 3D Model panel's effective Z/Standoff field.
 
 Do not recenter a 3D body by its bounding rectangle after setting the snap point. The Generic STEP model reference point and the visible bounding-box center are not guaranteed to be the same, so snap-point plus bounding-box movement can drift X/Y placement.
 
@@ -270,7 +274,7 @@ Avoid part-number-specific refresh or generator helpers in the common MCP script
 Supported generic helper commands:
 
 - `3D_BODY_DUMP`: reports body bounding boxes, raw coordinates, board origin, standoff height, and overall height.
-- `3D_BODY_SET_HEIGHTS|<footprint>|<standoff_mm>|<overall_height_mm>`: updates existing 3D body height fields without touching STEP geometry or model rotation. Use `*` as the footprint name to update all footprints.
+- `3D_BODY_SET_HEIGHTS|<footprint>|<standoff_mm>|<overall_height_mm>`: updates existing component-body standoff/overall-height metadata without touching STEP geometry, X/Y placement, snap point, or model rotation. Use `*` as the footprint name to update all footprints.
 - `3D_BODY_SET_PLACEMENT|<footprint>|<local_x_mm>|<local_y_mm>|<rot_x_deg>|<rot_y_deg>|<rot_z_deg>|<model_z_mm>|<standoff_mm>|<overall_height_mm>`: updates an existing Generic 3D Body's Altium placement state. It uses `IPCB_Model.SetState`, `IPCB_ComponentBody.SetModel`, `SetState_FromModel`, then `SetState_SnapPointX/Y` with `Board.XOrigin + local_x` and `Board.YOrigin + local_y`. It does not transform or rewrite the STEP file.
 - `3D_BODY_FIX_ORIGIN_OFFSET|<footprint>`: moves existing 3D bodies whose raw bounding rectangle is still near local origin by the active PcbLib `Board.XOrigin`/`Board.YOrigin`. Use `*` as the footprint name to repair all unshifted bodies while skipping already-shifted bodies.
 - `FOOTPRINT_PRIMITIVE_DUMP|<footprint>`: dumps pads, tracks, arcs, regions, and body primitives for a single footprint.
@@ -280,7 +284,7 @@ Supported generic helper commands:
 - `PCB_LIB_BATCH_CREATE|<data_file>|<skip_existing>`: creates or populates PcbLib footprints from a pipe-delimited data file with `FOOTPRINT`, `PAD`, `TRACK`, `ARC`, `TEXT`, and `END` records. Use this for generic batch footprint work only; keep part-family tables in a task-local file, not in the common script or README. The helper writes raw primitive coordinates through the active PcbLib board using `Board.XOrigin + local_x` and `Board.YOrigin + local_y`, so it works with non-zero PcbLib origins.
 - `PCB_POSTPROCESS`: call after any PcbLib modification to close any leftover PCB server transaction and redraw the editor.
 
-When verifying a 3D placement update, run `3D_BODY_SET_PLACEMENT` and `PCB_POSTPROCESS` as separate MCP calls so the placement result is visible in the tool response before the refresh result.
+When verifying a 3D placement update, run the selected mutating command and `PCB_POSTPROCESS` as separate MCP calls so the placement result is visible in the tool response before the refresh result. For a Generic model Z-only update, use `3D_BODY_SET_PLACEMENT` with unchanged current X/Y and rotations.
 
 When sending descriptions through `layer_moves`, prefer semicolon-separated clauses instead of commas. The MCP command transport treats commas as list delimiters in some paths.
 

@@ -216,7 +216,7 @@ The safe manual Altium flow is:
 3. Set X/Y, Rotation X/Y/Z, Model Z/Standoff Height, and Overall Height in Altium's 3D Body Properties panel.
 4. If scripted import left the body at raw local coordinates instead of origin-adjusted PcbLib coordinates, run `3D_BODY_FIX_ORIGIN_OFFSET|<footprint>` or `3D_BODY_FIX_ORIGIN_OFFSET|*`. This moves the Altium 3D body object by `Board.XOrigin`/`Board.YOrigin`; it does not edit STEP geometry or model rotation.
 5. Run `3D_BODY_DUMP` and verify the origin-corrected `left_mm`, `right_mm`, `bottom_mm`, and `top_mm` are centered around the footprint.
-6. After any scripted PcbLib modification, run `PCB_POSTPROCESS` before saving.
+6. After any scripted PcbLib modification, run `PCB_POSTPROCESS` before saving. Treat this as the standard end-of-job cleanup for PcbLib work, even when the command appeared to finish normally.
 
 The script may safely create a basic STEP body container and set supported `IPCB_ComponentBody` height fields:
 
@@ -284,9 +284,11 @@ Supported generic helper commands:
 - `PCB_LIB_SET_DESCRIPTION|<footprint>|<description>`: updates a footprint description with datasheet/product-page facts. Pass one command per footprint; do not use it to write generation provenance.
 - `PCB_LIB_CLEAN_PADS_OVERLAY|<target_name_contains>|<pad_name_prefix>|<overlay_layer>`: selects matching footprints, deletes pads whose names start with the prefix, and deletes tracks/arcs on the named overlay layer through Altium's editor delete process. Use it before a `PCB_LIB_BATCH_CREATE|...|FALSE` refresh when replacing generated mounting pads and overlay graphics.
 - `PCB_LIB_BATCH_CREATE|<data_file>|<skip_existing>`: creates or populates PcbLib footprints from a pipe-delimited data file with `FOOTPRINT`, `PAD`, `TRACK`, `ARC`, `TEXT`, and `END` records. Use this for generic batch footprint work only; keep part-family tables in a task-local file, not in the common script or README. The helper writes raw primitive coordinates through the active PcbLib board using `Board.XOrigin + local_x` and `Board.YOrigin + local_y`, so it works with non-zero PcbLib origins.
-- `PCB_POSTPROCESS`: call after any PcbLib modification to close any leftover PCB server transaction and redraw the editor.
+- `PCB_POSTPROCESS`: call after any PcbLib modification to close any leftover PCB server transaction and redraw the editor. Use it as the final MCP call after scripted PcbLib work so Altium can save normally.
 
 When verifying a 3D placement update, run the selected mutating command and `PCB_POSTPROCESS` as separate MCP calls so the placement result is visible in the tool response before the refresh result. For a Generic model Z-only update, use `3D_BODY_SET_PLACEMENT` with unchanged current X/Y and rotations.
+
+For user-requested PcbLib edit sessions, finish the job by running `PCB_POSTPROCESS` after the last mutating command and before the final response. Do not save the library automatically unless the user explicitly asks for saving; leave the document dirty for user inspection.
 
 When sending descriptions through `layer_moves`, prefer semicolon-separated clauses instead of commas. The MCP command transport treats commas as list delimiters in some paths.
 
@@ -352,7 +354,7 @@ Use `3D_BODY_PROJECTION|<mechanical_layer>|<line_width_mm>` only as a fallback. 
 
 Do not save the PcbLib automatically after these operations. Leave the document dirty and let the user inspect the mechanical layer and save manually.
 
-If a PcbLib-modifying script hit an access violation or Altium later refuses to save with `A command is currently active and save cannot be completed at this time`, run the PcbLib save-state recovery command once:
+If a PcbLib-modifying script hit an access violation or Altium later refuses to save with `A command is currently active and save cannot be completed at this time`, first cancel any active interactive command with `Esc`, then run the PcbLib save-state recovery command once:
 
 ```text
 move_pcb_library_mechanical_layers(
@@ -361,7 +363,7 @@ move_pcb_library_mechanical_layers(
 )
 ```
 
-`PCB_POSTPROCESS` intentionally calls `PCBServer.PostProcess`, then sends `PCB:Cancel`, clears selection, and redraws the PCB editor. This is a recovery for an unmatched `PCBServer.PreProcess` left behind by a failed PcbLib script command. After any large scripted PcbLib modification, especially one that deleted/re-added footprint primitives or 3D bodies, call this recovery before trying to save if Altium still appears to be inside an active command.
+`PCB_POSTPROCESS` intentionally calls `PCBServer.PostProcess`, then sends `PCB:Cancel`, clears selection, and redraws the PCB editor. This is both the normal finishing step for scripted PcbLib edits and a recovery for an unmatched `PCBServer.PreProcess` left behind by a failed PcbLib script command. In the observed save-blocked state, sending `Esc` to Altium followed by `PCB_POSTPROCESS` released the active command and made the document saveable again.
 
 If normal `Ctrl+S` still shows the warning after recovery, save through Altium's workspace process:
 

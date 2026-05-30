@@ -49,9 +49,6 @@ CONTACT_COMPONENT_MAX_HEIGHT_MM = 1.5
 CONTACT_COMPONENT_EDGE_BAND_FRACTION = 0.15
 CONTACT_COMPONENT_EDGE_BAND_MIN_MM = 0.3
 CONTACT_COMPONENT_MIN_EDGE_RATIO = 0.5
-CONTACT_COMPONENT_ORIGIN_SHIFT_MARGIN_MM = 0.05
-CONTACT_COMPONENT_HIGH_PLANE_NUDGE_FRACTION = 0.2
-CONTACT_COMPONENT_HIGH_PLANE_NUDGE_MIN_DELTA_MM = 0.25
 
 
 NUM_RE = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][+-]?\d+)?"
@@ -783,6 +780,20 @@ def safe_float(value: str | None) -> float | None:
         return None
 
 
+def safe_coord_mm(value: str | None) -> float | None:
+    if value is None:
+        return None
+    text = value.strip()
+    multiplier = 1.0
+    if text.lower().endswith("mil"):
+        multiplier = 0.0254
+        text = text[:-3].strip()
+    try:
+        return float(text) * multiplier
+    except ValueError:
+        return None
+
+
 def decode_identifier(value: str) -> str:
     chars: list[str] = []
     for item in value.split(","):
@@ -818,9 +829,12 @@ def parse_pcb_library_model_state(record: str) -> dict | None:
         "model_name": model_name,
         "model_name_key": normalize_model_name(model_name),
         "identifier": decode_identifier(fields.get("IDENTIFIER", "")),
+        "model_x_mm": safe_coord_mm(fields.get("MODEL.2D.X")),
+        "model_y_mm": safe_coord_mm(fields.get("MODEL.2D.Y")),
         "rotx": safe_float(fields.get("MODEL.3D.ROTX")),
         "roty": safe_float(fields.get("MODEL.3D.ROTY")),
         "rotz": rotz,
+        "model_z_mm": safe_coord_mm(fields.get("MODEL.3D.DZ")),
         "rotation_2d": safe_float(fields.get("MODEL.2D.ROTATION")) or 0.0,
     }
 
@@ -915,6 +929,18 @@ def transformed_model_height_state(geometry: dict, state: dict | None) -> dict |
 
     min_z = min(point[2] for point in transformed)
     max_z = max(point[2] for point in transformed)
+    if state is not None and state.get("model_z_mm") is not None:
+        model_z = float(state["model_z_mm"])
+        return {
+            "min_z_mm": min_z,
+            "max_z_mm": max_z,
+            "overall_height_mm": max_z - min_z,
+            "absolute_min_standoff_height_mm": -min_z,
+            "contact_plane_z_mm": -model_z,
+            "contact_plane_method": "embedded_model_state",
+            "standoff_height_mm": model_z,
+        }
+
     component_contact = transformed_model_component_contact_plane_z(geometry, state)
     fallback_contact_plane = transformed_model_contact_plane_z(transformed)
     if component_contact is not None:
@@ -1991,94 +2017,6 @@ def footprint_name_matches(stem: str, footprint: str) -> bool:
     return re.search(rf"(^|[^A-Z0-9]){re.escape(footprint_upper)}($|[^A-Z0-9])", stem_upper) is not None
 
 
-def footprint_family_contact_key(footprint: str) -> str | None:
-    match = re.match(r"^(?P<prefix>.+?)-(?P<count>\d+)(?P<role>[A-Z]{1,4})(?P<suffix>[-_].*)?$", footprint)
-    if not match:
-        return None
-    suffix = match.group("suffix") or ""
-    prefix = re.sub(r"\([^)]+\)$", "", match.group("prefix"))
-    return f"{prefix}|{match.group('role')}|{suffix}"
-
-
-def apply_family_contact_z_consensus(optimization_stats: dict[str, dict]) -> None:
-    groups: dict[tuple[str, float], list[tuple[str, dict]]] = {}
-    family_records: dict[str, list[tuple[float, float, dict]]] = {}
-    for footprint, stats in optimization_stats.items():
-        if stats.get("computed_contact_plane_method") != "repeated_contact_components":
-            continue
-        family_key = stats.get("computed_contact_family_key")
-        if not family_key:
-            continue
-        overall_height = float(stats.get("computed_overall_height_mm") or 0.0)
-        body_overall_height = float(stats.get("computed_body_overall_height_mm") or overall_height)
-        group_height = round(max(overall_height, body_overall_height), 3)
-        groups.setdefault((str(family_key), group_height), []).append((footprint, stats))
-        raw_z = stats.get("computed_model_z_mm_raw", stats.get("computed_model_z_mm"))
-        if raw_z is not None:
-            family_records.setdefault(str(family_key), []).append((group_height, float(raw_z), stats))
-
-    family_offsets: dict[str, float] = {}
-    for family_key, records in family_records.items():
-        offset_counts: dict[float, int] = {}
-        for group_height, raw_z, _stats in records:
-            if abs(raw_z) > group_height + CONTACT_COMPONENT_ORIGIN_SHIFT_MARGIN_MM:
-                continue
-            offset = round(group_height - raw_z, 3)
-            offset_counts[offset] = offset_counts.get(offset, 0) + 1
-        if not offset_counts:
-            continue
-        best_offset, best_count = max(offset_counts.items(), key=lambda item: (item[1], -abs(item[0])))
-        if best_count >= 3:
-            family_offsets[family_key] = best_offset
-
-    for (_family_key, group_height), records in groups.items():
-        if len(records) < 3:
-            continue
-
-        family_offset = family_offsets.get(_family_key)
-        plausible: list[float] = []
-        for _footprint, stats in records:
-            model_z = stats.get("computed_model_z_mm_raw", stats.get("computed_model_z_mm"))
-            if model_z is None:
-                continue
-            model_z = float(model_z)
-            if abs(model_z) <= group_height + CONTACT_COMPONENT_ORIGIN_SHIFT_MARGIN_MM:
-                plausible.append(model_z)
-        if len(plausible) < 2 and family_offset is None:
-            continue
-
-        consensus_z = round(group_height - family_offset, 6) if family_offset is not None else round(max(plausible), 6)
-        highest_plausible_z = round(max(plausible), 6) if plausible else None
-        for _footprint, stats in records:
-            raw_z = stats.get("computed_model_z_mm_raw", stats.get("computed_model_z_mm"))
-            if raw_z is None:
-                continue
-            raw_z = float(raw_z)
-            if abs(raw_z) > group_height + CONTACT_COMPONENT_ORIGIN_SHIFT_MARGIN_MM:
-                stats["computed_model_z_source"] = "component_contact_shifted_origin"
-                continue
-            if highest_plausible_z is not None and abs(raw_z - highest_plausible_z) <= 0.001:
-                if consensus_z - raw_z >= CONTACT_COMPONENT_HIGH_PLANE_NUDGE_MIN_DELTA_MM:
-                    nudged_z = round(
-                        raw_z + (consensus_z - raw_z) * CONTACT_COMPONENT_HIGH_PLANE_NUDGE_FRACTION,
-                        6,
-                    )
-                    stats["computed_model_z_mm"] = nudged_z
-                    stats["computed_z_offset_mm"] = nudged_z
-                    stats["computed_standoff_height_mm"] = nudged_z
-                    stats["computed_model_z_source"] = "component_contact_group_high_plane_nudged"
-                else:
-                    stats["computed_model_z_source"] = "component_contact_group_high_plane"
-                continue
-            if abs(raw_z - consensus_z) <= 0.001:
-                stats["computed_model_z_source"] = "component_contact"
-                continue
-            stats["computed_model_z_mm"] = consensus_z
-            stats["computed_z_offset_mm"] = consensus_z
-            stats["computed_standoff_height_mm"] = consensus_z
-            stats["computed_model_z_source"] = "family_contact_consensus"
-
-
 def embedded_model_path(footprint: str, model_dir: Path, model_name: str | None = None) -> Path | None:
     if model_name:
         model_name_key = normalize_model_name(model_name)
@@ -2222,8 +2160,7 @@ def main() -> int:
             footprint_optimization_stats["computed_standoff_height_mm"] = round(height_state["standoff_height_mm"], 6)
             footprint_optimization_stats["computed_contact_plane_z_mm"] = round(height_state["contact_plane_z_mm"], 6)
             footprint_optimization_stats["computed_contact_plane_method"] = height_state["contact_plane_method"]
-            footprint_optimization_stats["computed_contact_family_key"] = footprint_family_contact_key(footprint)
-            footprint_optimization_stats["computed_model_z_source"] = "component_contact"
+            footprint_optimization_stats["computed_model_z_source"] = height_state["contact_plane_method"]
             footprint_optimization_stats["computed_absolute_min_standoff_height_mm"] = round(height_state["absolute_min_standoff_height_mm"], 6)
             footprint_optimization_stats["computed_overall_height_mm"] = round(height_state["overall_height_mm"], 6)
             if "contact_component_repetitions" in height_state:
@@ -2236,8 +2173,6 @@ def main() -> int:
         used_models[footprint] = str(model_path)
         for primitive in primitives:
             lines.append(primitive_record(footprint, primitive))
-
-    apply_family_contact_z_consensus(optimization_stats)
 
     output_file.parent.mkdir(parents=True, exist_ok=True)
     output_file.write_text("\n".join(lines) + "\n", encoding="utf-8")

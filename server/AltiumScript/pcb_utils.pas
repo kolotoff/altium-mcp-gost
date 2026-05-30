@@ -4335,6 +4335,50 @@ begin
     end;
 end;
 
+function Parse3DBodyBatchSetPlacementCommand(MoveText: String; var DataFileName: String): Boolean;
+var
+    Fields: TStringList;
+begin
+    Result := False;
+    DataFileName := ROOT_DIR + 'pcblib_3d_body_placements.txt';
+
+    Fields := TStringList.Create;
+    try
+        Fields.Delimiter := '|';
+        Fields.StrictDelimiter := True;
+        Fields.DelimitedText := Trim(MoveText);
+
+        if Fields.Count < 1 then
+            Exit;
+        if UpperCase(Trim(Fields[0])) <> '3D_BODY_BATCH_SET_PLACEMENT' then
+            Exit;
+
+        if (Fields.Count >= 2) and (Trim(Fields[1]) <> '') then
+            DataFileName := Trim(Fields[1]);
+
+        Result := True;
+    finally
+        Fields.Free;
+    end;
+end;
+
+function Find3DBodyBatchSetPlacementCommand(LayerMoves: TStringList; var DataFileName: String): Boolean;
+var
+    i: Integer;
+begin
+    Result := False;
+    DataFileName := ROOT_DIR + 'pcblib_3d_body_placements.txt';
+
+    for i := 0 to LayerMoves.Count - 1 do
+    begin
+        if Parse3DBodyBatchSetPlacementCommand(LayerMoves[i], DataFileName) then
+        begin
+            Result := True;
+            Exit;
+        end;
+    end;
+end;
+
 function DumpPCBLibraryFootprintDescriptions(FootprintName: String): String;
 var
     PcbLib          : IPCB_Library;
@@ -5623,6 +5667,167 @@ begin
         OutputLines.Free;
         FootprintResults.Free;
         ResultProps.Free;
+    end;
+end;
+
+function SetPCBLibrary3DBodyPlacementsFromBatchFile(DataFileName: String): String;
+var
+    PcbLib              : IPCB_Library;
+    Board               : IPCB_Board;
+    Lines               : TStringList;
+    Fields              : TStringList;
+    ResultProps         : TStringList;
+    FootprintResults    : TStringList;
+    UpdatedFootprints   : TStringList;
+    ErrorArray          : TStringList;
+    OutputLines         : TStringList;
+    LineText            : String;
+    CommandName         : String;
+    FootprintName       : String;
+    Footprint           : IPCB_LibComponent;
+    LocalXMM            : Double;
+    LocalYMM            : Double;
+    RotX                : Double;
+    RotY                : Double;
+    RotZ                : Double;
+    ModelZMM            : Double;
+    StandoffMM          : Double;
+    OverallHeightMM     : Double;
+    UpdatedCount        : Integer;
+    RecordsSeen         : Integer;
+    BodiesUpdated       : Integer;
+    FootprintsMissing   : Integer;
+    i                   : Integer;
+begin
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    if PcbLib = Nil then
+    begin
+        Result := '{"success": false, "error": "No PCB library document is currently active. Open a .PcbLib file first."}';
+        Exit;
+    end;
+
+    if not FileExists(DataFileName) then
+    begin
+        Result := '{"success": false, "error": "3D body placement batch file not found."}';
+        Exit;
+    end;
+
+    Board := PcbLib.Board;
+    if Board = Nil then
+    begin
+        Result := '{"success": false, "error": "PcbLib board is nil."}';
+        Exit;
+    end;
+
+    Lines := TStringList.Create;
+    Fields := TStringList.Create;
+    ResultProps := TStringList.Create;
+    FootprintResults := TStringList.Create;
+    UpdatedFootprints := TStringList.Create;
+    ErrorArray := TStringList.Create;
+    OutputLines := TStringList.Create;
+    RecordsSeen := 0;
+    BodiesUpdated := 0;
+    FootprintsMissing := 0;
+
+    try
+        Fields.Delimiter := '|';
+        Fields.StrictDelimiter := True;
+        Lines.LoadFromFile(DataFileName);
+
+        PCBServer.PreProcess;
+        try
+            for i := 0 to Lines.Count - 1 do
+            begin
+                LineText := Trim(Lines[i]);
+                if LineText = '' then
+                    continue;
+                if Copy(LineText, 1, 1) = '#' then
+                    continue;
+
+                Fields.Clear;
+                Fields.DelimitedText := LineText;
+                if Fields.Count = 0 then
+                    continue;
+
+                CommandName := UpperCase(Trim(Fields[0]));
+                if CommandName <> 'PLACE' then
+                begin
+                    ErrorArray.Add('"' + JSONEscapeString('Line ' + IntToStr(i + 1) + ': expected PLACE record.') + '"');
+                    continue;
+                end;
+
+                if Fields.Count < 10 then
+                begin
+                    ErrorArray.Add('"' + JSONEscapeString('Line ' + IntToStr(i + 1) + ': PLACE requires footprint, local X/Y, rotations, model Z, standoff, and overall height.') + '"');
+                    continue;
+                end;
+
+                RecordsSeen := RecordsSeen + 1;
+                FootprintName := Trim(Fields[1]);
+                LocalXMM := SafeStrToFloat(Trim(Fields[2]));
+                LocalYMM := SafeStrToFloat(Trim(Fields[3]));
+                RotX := SafeStrToFloat(Trim(Fields[4]));
+                RotY := SafeStrToFloat(Trim(Fields[5]));
+                RotZ := SafeStrToFloat(Trim(Fields[6]));
+                ModelZMM := SafeStrToFloat(Trim(Fields[7]));
+                StandoffMM := SafeStrToFloat(Trim(Fields[8]));
+                OverallHeightMM := SafeStrToFloat(Trim(Fields[9]));
+
+                Footprint := FindPCBLibraryFootprintByName(PcbLib, FootprintName);
+                if Footprint = Nil then
+                begin
+                    FootprintsMissing := FootprintsMissing + 1;
+                    ErrorArray.Add('"' + JSONEscapeString('Line ' + IntToStr(i + 1) + ': footprint not found: ' + FootprintName) + '"');
+                    continue;
+                end;
+
+                UpdatedCount := Set3DBodyPlacementForFootprint(
+                    PcbLib,
+                    Board,
+                    Footprint,
+                    LocalXMM,
+                    LocalYMM,
+                    RotX,
+                    RotY,
+                    RotZ,
+                    ModelZMM,
+                    StandoffMM,
+                    OverallHeightMM,
+                    FootprintResults
+                );
+                BodiesUpdated := BodiesUpdated + UpdatedCount;
+                if UpdatedCount > 0 then
+                    UpdatedFootprints.Add('"' + JSONEscapeString(FootprintName) + '"')
+                else
+                    ErrorArray.Add('"' + JSONEscapeString('Line ' + IntToStr(i + 1) + ': no matching 3D body with Generic model state: ' + FootprintName) + '"');
+            end;
+        finally
+            PCBServer.PostProcess;
+        end;
+
+        Board.ViewManager_FullUpdate;
+        Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
+
+        AddJSONBoolean(ResultProps, 'success', ErrorArray.Count = 0);
+        AddJSONProperty(ResultProps, 'data_file', DataFileName);
+        AddJSONInteger(ResultProps, 'records_seen', RecordsSeen);
+        AddJSONInteger(ResultProps, 'bodies_updated', BodiesUpdated);
+        AddJSONInteger(ResultProps, 'footprints_missing', FootprintsMissing);
+        ResultProps.Add(BuildJSONArray(UpdatedFootprints, 'updated_footprints'));
+        ResultProps.Add(BuildJSONArray(FootprintResults, 'footprint_results'));
+        ResultProps.Add(BuildJSONArray(ErrorArray, 'errors'));
+
+        OutputLines.Text := BuildJSONObject(ResultProps);
+        Result := OutputLines.Text;
+    finally
+        OutputLines.Free;
+        ErrorArray.Free;
+        UpdatedFootprints.Free;
+        FootprintResults.Free;
+        ResultProps.Free;
+        Fields.Free;
+        Lines.Free;
     end;
 end;
 
@@ -7418,6 +7623,7 @@ var
     CleanPadsOverlayLayerName : String;
     Batch3DBodyImportDataFileName : String;
     Batch3DBodyImportSkipExisting : Boolean;
+    Batch3DBodySetPlacementDataFileName : String;
     Import3DBodyFootprintName : String;
     Import3DBodyStepPath : String;
     Import3DBodyLocalXMM : Double;
@@ -7537,6 +7743,12 @@ begin
     if Find3DBodyBatchImportCommand(LayerMoves, Batch3DBodyImportDataFileName, Batch3DBodyImportSkipExisting) then
     begin
         Result := Import3DBodiesFromBatchFile(Batch3DBodyImportDataFileName, Batch3DBodyImportSkipExisting);
+        Exit;
+    end;
+
+    if Find3DBodyBatchSetPlacementCommand(LayerMoves, Batch3DBodySetPlacementDataFileName) then
+    begin
+        Result := SetPCBLibrary3DBodyPlacementsFromBatchFile(Batch3DBodySetPlacementDataFileName);
         Exit;
     end;
 

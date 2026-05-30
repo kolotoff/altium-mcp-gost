@@ -276,6 +276,7 @@ Supported generic helper commands:
 - `3D_BODY_DUMP`: reports body bounding boxes, raw coordinates, board origin, standoff height, and overall height.
 - `3D_BODY_SET_HEIGHTS|<footprint>|<standoff_mm>|<overall_height_mm>`: updates existing component-body standoff/overall-height metadata without touching STEP geometry, X/Y placement, snap point, or model rotation. Use `*` as the footprint name to update all footprints.
 - `3D_BODY_SET_PLACEMENT|<footprint>|<local_x_mm>|<local_y_mm>|<rot_x_deg>|<rot_y_deg>|<rot_z_deg>|<model_z_mm>|<standoff_mm>|<overall_height_mm>`: updates an existing Generic 3D Body's Altium placement state. It uses `IPCB_Model.SetState`, `IPCB_ComponentBody.SetModel`, `SetState_FromModel`, then `SetState_SnapPointX/Y` with `Board.XOrigin + local_x` and `Board.YOrigin + local_y`. It does not transform or rewrite the STEP file.
+- `3D_BODY_BATCH_SET_PLACEMENT|<data_file>`: updates existing Generic 3D Bodies from a pipe-delimited batch file. Each non-comment line must be `PLACE|<footprint>|<local_x_mm>|<local_y_mm>|<rot_x_deg>|<rot_y_deg>|<rot_z_deg>|<model_z_mm>|<standoff_mm>|<overall_height_mm>`. Use this for repeated Z-only repairs only after capturing each footprint's current X/Y and rotations; the command writes every field in the record.
 - `3D_BODY_FIX_ORIGIN_OFFSET|<footprint>`: moves existing 3D bodies whose raw bounding rectangle is still near local origin by the active PcbLib `Board.XOrigin`/`Board.YOrigin`. Use `*` as the footprint name to repair all unshifted bodies while skipping already-shifted bodies.
 - `FOOTPRINT_PRIMITIVE_DUMP|<footprint>`: dumps pads, tracks, arcs, regions, and body primitives for a single footprint.
 - `PCB_LIB_DESCRIPTION_DUMP|<footprint>`: dumps footprint descriptions. Use `*` as the footprint name to inspect all footprints in the active PcbLib.
@@ -294,6 +295,21 @@ Example placement repair after a body imported with the right STEP file but defa
 move_pcb_library_mechanical_layers(
   exclude_footprint_names=[],
   layer_moves=["3D_BODY_SET_PLACEMENT|<footprint>|<local_x_mm>|<local_y_mm>|<rot_x_deg>|<rot_y_deg>|<rot_z_deg>|<model_z_mm>|<standoff_mm>|<overall_height_mm>"]
+)
+```
+
+Example batch placement file:
+
+```text
+# PLACE|footprint|local_x_mm|local_y_mm|rot_x|rot_y|rot_z|model_z_mm|body_standoff_mm|overall_height_mm
+PLACE|CONN_A|1.25|-0.5|90|0|270|0.65|0|3.46
+PLACE|CONN_B|2.5|-0.5|90|0|270|-1.95|0|3.46
+```
+
+```text
+move_pcb_library_mechanical_layers(
+  exclude_footprint_names=[],
+  layer_moves=["3D_BODY_BATCH_SET_PLACEMENT|D:\path\pcblib_3d_body_placements.txt"]
 )
 ```
 

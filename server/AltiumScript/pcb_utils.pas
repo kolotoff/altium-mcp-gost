@@ -2168,6 +2168,215 @@ begin
     end;
 end;
 
+function Parse3DBodySetColorCommand(MoveText: String; var RedValue, GreenValue, BlueValue: Integer): Boolean;
+var
+    CommandName: String;
+    Separator  : Integer;
+    Remainder  : String;
+    Fields     : TStringList;
+begin
+    Result := False;
+    RedValue := 0;
+    GreenValue := 0;
+    BlueValue := 0;
+
+    MoveText := Trim(MoveText);
+    Separator := Pos('|', MoveText);
+    if Separator <= 1 then
+        Exit;
+
+    CommandName := UpperCase(Trim(Copy(MoveText, 1, Separator - 1)));
+    if CommandName <> '3D_BODY_SET_COLOR' then
+        Exit;
+
+    Remainder := Copy(MoveText, Separator + 1, Length(MoveText) - Separator);
+    Fields := TStringList.Create;
+    try
+        Fields.Delimiter := '|';
+        Fields.StrictDelimiter := True;
+        Fields.DelimitedText := Remainder;
+
+        if Fields.Count < 3 then
+            Exit;
+
+        RedValue := StrToIntDef(Trim(Fields[0]), -1);
+        GreenValue := StrToIntDef(Trim(Fields[1]), -1);
+        BlueValue := StrToIntDef(Trim(Fields[2]), -1);
+
+        Result := (RedValue >= 0) and (RedValue <= 255) and
+                  (GreenValue >= 0) and (GreenValue <= 255) and
+                  (BlueValue >= 0) and (BlueValue <= 255);
+    finally
+        Fields.Free;
+    end;
+end;
+
+function Find3DBodySetColorCommand(LayerMoves: TStringList; var RedValue, GreenValue, BlueValue: Integer): Boolean;
+var
+    i: Integer;
+begin
+    Result := False;
+    RedValue := 0;
+    GreenValue := 0;
+    BlueValue := 0;
+
+    for i := 0 to LayerMoves.Count - 1 do
+    begin
+        if Parse3DBodySetColorCommand(LayerMoves[i], RedValue, GreenValue, BlueValue) then
+        begin
+            Result := True;
+            Exit;
+        end;
+    end;
+end;
+
+function SetPCBLibrary3DBodyColor(ExcludeFootprints: TStringList; RedValue, GreenValue, BlueValue: Integer): String;
+var
+    PcbLib              : IPCB_Library;
+    Board               : IPCB_Board;
+    FootprintIterator   : IPCB_LibraryIterator;
+    Footprint           : IPCB_LibComponent;
+    ActiveFootprint     : IPCB_LibComponent;
+    BodyIterator        : IPCB_GroupIterator;
+    Primitive           : IPCB_Primitive;
+    Body                : IPCB_ComponentBody;
+    ResultProps         : TStringList;
+    ModifiedFootprints  : TStringList;
+    SkippedFootprints   : TStringList;
+    OutputLines         : TStringList;
+    FootprintName       : String;
+    FootprintsSeen      : Integer;
+    FootprintsProcessed : Integer;
+    FootprintsModified  : Integer;
+    BodiesSeen          : Integer;
+    BodiesUpdated       : Integer;
+    FootprintBodiesUpdated : Integer;
+    PackedColor         : Integer;
+begin
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    if PcbLib = Nil then
+    begin
+        Result := '{"success": false, "error": "No PCB library document is currently active. Open a .PcbLib file first."}';
+        Exit;
+    end;
+
+    Board := PcbLib.Board;
+    ResultProps := TStringList.Create;
+    ModifiedFootprints := TStringList.Create;
+    SkippedFootprints := TStringList.Create;
+    OutputLines := TStringList.Create;
+    FootprintsSeen := 0;
+    FootprintsProcessed := 0;
+    FootprintsModified := 0;
+    BodiesSeen := 0;
+    BodiesUpdated := 0;
+    PackedColor := RedValue + (GreenValue * 256) + (BlueValue * 65536);
+
+    try
+        PCBServer.PreProcess;
+        try
+            FootprintIterator := PcbLib.LibraryIterator_Create;
+            if FootprintIterator = Nil then
+            begin
+                Result := '{"success": false, "error": "Failed to create PCB library footprint iterator."}';
+                Exit;
+            end;
+
+            try
+                FootprintIterator.SetState_FilterAll;
+                Footprint := FootprintIterator.FirstPCBObject;
+                while Footprint <> Nil do
+                begin
+                    FootprintsSeen := FootprintsSeen + 1;
+                    FootprintName := Footprint.Name;
+
+                    if StringListContainsText(ExcludeFootprints, FootprintName) then
+                    begin
+                        SkippedFootprints.Add('"' + JSONEscapeString(FootprintName) + '"');
+                    end
+                    else
+                    begin
+                        FootprintsProcessed := FootprintsProcessed + 1;
+                        PcbLib.CurrentComponent := Footprint;
+                        ActiveFootprint := PcbLib.CurrentComponent;
+                        FootprintBodiesUpdated := 0;
+
+                        BodyIterator := Nil;
+                        if ActiveFootprint <> Nil then
+                            BodyIterator := ActiveFootprint.GroupIterator_Create;
+
+                        if BodyIterator <> Nil then
+                        begin
+                            try
+                                BodyIterator.AddFilter_ObjectSet(MkSet(eComponentBodyObject));
+                                BodyIterator.AddFilter_LayerSet(AllLayers);
+
+                                Primitive := BodyIterator.FirstPCBObject;
+                                while Primitive <> Nil do
+                                begin
+                                    BodiesSeen := BodiesSeen + 1;
+                                    Body := Primitive;
+                                    PCBServer.SendMessageToRobots(Primitive.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+                                    try
+                                        Body.BodyColor3D := PackedColor;
+                                        Body.OverrideColor := True;
+                                        Primitive.GraphicallyInvalidate;
+                                        BodiesUpdated := BodiesUpdated + 1;
+                                        FootprintBodiesUpdated := FootprintBodiesUpdated + 1;
+                                    finally
+                                        PCBServer.SendMessageToRobots(Primitive.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+                                    end;
+
+                                    Primitive := BodyIterator.NextPCBObject;
+                                end;
+                            finally
+                                ActiveFootprint.GroupIterator_Destroy(BodyIterator);
+                            end;
+                        end;
+
+                        if FootprintBodiesUpdated > 0 then
+                        begin
+                            FootprintsModified := FootprintsModified + 1;
+                            ModifiedFootprints.Add('"' + JSONEscapeString(FootprintName) + '"');
+                        end;
+                    end;
+
+                    Footprint := FootprintIterator.NextPCBObject;
+                end;
+            finally
+                PcbLib.LibraryIterator_Destroy(FootprintIterator);
+            end;
+        finally
+            PCBServer.PostProcess;
+        end;
+
+        if Board <> Nil then
+            Board.ViewManager_FullUpdate;
+        Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
+
+        AddJSONBoolean(ResultProps, 'success', True);
+        AddJSONInteger(ResultProps, 'red', RedValue);
+        AddJSONInteger(ResultProps, 'green', GreenValue);
+        AddJSONInteger(ResultProps, 'blue', BlueValue);
+        AddJSONInteger(ResultProps, 'body_color_3d', PackedColor);
+        AddJSONInteger(ResultProps, 'footprints_seen', FootprintsSeen);
+        AddJSONInteger(ResultProps, 'footprints_processed', FootprintsProcessed);
+        AddJSONInteger(ResultProps, 'footprints_modified', FootprintsModified);
+        AddJSONInteger(ResultProps, 'bodies_seen', BodiesSeen);
+        AddJSONInteger(ResultProps, 'bodies_updated', BodiesUpdated);
+        ResultProps.Add(BuildJSONArray(SkippedFootprints, 'skipped_footprints'));
+        ResultProps.Add(BuildJSONArray(ModifiedFootprints, 'modified_footprints'));
+
+        OutputLines.Text := BuildJSONObject(ResultProps);
+        Result := OutputLines.Text;
+    finally
+        OutputLines.Free;
+        SkippedFootprints.Free;
+        ModifiedFootprints.Free;
+        ResultProps.Free;
+    end;
+end;
+
 function Parse3DBodySetPlacementCommand(MoveText: String; var FootprintName: String; var LocalXMM, LocalYMM, RotX, RotY, RotZ, ModelZMM, StandoffMM, OverallHeightMM: Double): Boolean;
 var
     CommandName: String;
@@ -7863,6 +8072,9 @@ var
     Set3DBodyPlacementModelZMM : Double;
     Set3DBodyPlacementStandoffMM : Double;
     Set3DBodyPlacementOverallHeightMM : Double;
+    Set3DBodyColorRed : Integer;
+    Set3DBodyColorGreen : Integer;
+    Set3DBodyColorBlue : Integer;
 begin
     if Find3DBodyDumpCommand(LayerMoves) then
     begin
@@ -8021,6 +8233,12 @@ begin
     if Find3DBodyParamsDumpCommand(LayerMoves, ParamsDump3DBodyFootprintName) then
     begin
         Result := Dump3DBodyParametersForFootprint(ParamsDump3DBodyFootprintName);
+        Exit;
+    end;
+
+    if Find3DBodySetColorCommand(LayerMoves, Set3DBodyColorRed, Set3DBodyColorGreen, Set3DBodyColorBlue) then
+    begin
+        Result := SetPCBLibrary3DBodyColor(ExcludeFootprints, Set3DBodyColorRed, Set3DBodyColorGreen, Set3DBodyColorBlue);
         Exit;
     end;
 

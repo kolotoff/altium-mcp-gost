@@ -32,12 +32,13 @@ ARC_MIN_SWEEP_DEG = 3.0
 ARC_MAX_SWEEP_DEG = 355.0
 ARC_MERGE_ANGLE_TOLERANCE_DEG = 0.5
 ARC_BBOX_TOLERANCE_MM = 0.05
-MIN_VISIBLE_LINE_LENGTH_FACTOR = 1.0
+MIN_VISIBLE_LINE_LENGTH_FACTOR = 0.5
 MIN_VISIBLE_ARC_LENGTH_FACTOR = 1.0
 MIN_VISIBLE_ARC_RADIUS_FACTOR = 1.0
 STROKE_COVERAGE_DISTANCE_FACTOR = 0.5
 STROKE_COVERAGE_MAX_LENGTH_FACTOR = 4.0
 STROKE_COVERAGE_SAMPLE_STEP_FACTOR = 0.33
+LINE_GAP_BRIDGE_MAX_FACTOR = 2.5
 HEIGHT_AXIS_MISMATCH_FACTOR = 4.0
 HEIGHT_AXIS_MISMATCH_MIN_MM = 5.0
 
@@ -1621,6 +1622,103 @@ def remove_stroke_covered_primitives(primitives: list[dict]) -> tuple[list[dict]
     return result, stats
 
 
+def line_gap_bridge_key(primitive: dict) -> tuple[str, int] | None:
+    if primitive.get("kind") != "LINE":
+        return None
+
+    x1 = float(primitive["x1"])
+    y1 = float(primitive["y1"])
+    x2 = float(primitive["x2"])
+    y2 = float(primitive["y2"])
+    if abs(x1 - x2) <= POINT_EPSILON_MM:
+        return ("V", int(round(x1 / OPTIMIZE_POINT_GRID_MM)))
+    if abs(y1 - y2) <= POINT_EPSILON_MM:
+        return ("H", int(round(y1 / OPTIMIZE_POINT_GRID_MM)))
+    return None
+
+
+def add_line_gap_bridges(primitives: list[dict]) -> tuple[list[dict], int]:
+    max_gap = PROJECTION_LINE_WIDTH_MM * LINE_GAP_BRIDGE_MAX_FACTOR
+    grouped: dict[tuple[str, int], list[tuple[float, float, float, dict]]] = {}
+    for primitive in primitives:
+        key = line_gap_bridge_key(primitive)
+        if key is None:
+            continue
+
+        if key[0] == "V":
+            a = float(primitive["y1"])
+            b = float(primitive["y2"])
+        else:
+            a = float(primitive["x1"])
+            b = float(primitive["x2"])
+        start = min(a, b)
+        end = max(a, b)
+        grouped.setdefault(key, []).append((start, end, end - start, primitive))
+
+    bridged = list(primitives)
+    existing_keys: set[tuple[tuple[int, int], tuple[int, int]]] = set()
+    for primitive in primitives:
+        if primitive.get("kind") == "LINE":
+            existing_keys.add(
+                canonical_segment_key(
+                    (
+                        float(primitive["x1"]),
+                        float(primitive["y1"]),
+                        float(primitive["x2"]),
+                        float(primitive["y2"]),
+                    )
+                )
+            )
+
+    bridges_created = 0
+    for key, spans in grouped.items():
+        spans.sort(key=lambda item: (item[0], item[1]))
+        axis, fixed_key = key
+        fixed = fixed_key * OPTIMIZE_POINT_GRID_MM
+        for index in range(len(spans) - 1):
+            _current_start, current_end, current_length, _current_primitive = spans[index]
+            next_start, _next_end, next_length, _next_primitive = spans[index + 1]
+            gap = next_start - current_end
+            if gap <= POINT_EPSILON_MM or gap > max_gap + POINT_EPSILON_MM:
+                continue
+            if gap > max(current_length, next_length) + POINT_EPSILON_MM:
+                continue
+
+            if axis == "V":
+                bridge = {
+                    "kind": "LINE",
+                    "x1": fixed,
+                    "y1": current_end,
+                    "x2": fixed,
+                    "y2": next_start,
+                }
+            else:
+                bridge = {
+                    "kind": "LINE",
+                    "x1": current_end,
+                    "y1": fixed,
+                    "x2": next_start,
+                    "y2": fixed,
+                }
+
+            bridge_key = canonical_segment_key(
+                (
+                    float(bridge["x1"]),
+                    float(bridge["y1"]),
+                    float(bridge["x2"]),
+                    float(bridge["y2"]),
+                )
+            )
+            if bridge_key in existing_keys:
+                continue
+
+            existing_keys.add(bridge_key)
+            bridged.append(bridge)
+            bridges_created += 1
+
+    return bridged, bridges_created
+
+
 def optimize_segments_to_primitives(
     segments: list[tuple[float, float, float, float]],
 ) -> tuple[list[dict], dict]:
@@ -1634,6 +1732,7 @@ def optimize_segments_to_primitives(
     pre_prune_primitive_count = len(primitives)
     primitives, small_visible_stats = remove_small_visible_primitives(primitives)
     primitives, stroke_coverage_stats = remove_stroke_covered_primitives(primitives)
+    primitives, line_gap_bridges_created = add_line_gap_bridges(primitives)
 
     line_keys: set[tuple[tuple[int, int], tuple[int, int]]] = set()
     arc_keys: set[tuple[int, int, int, int, int]] = set()
@@ -1675,6 +1774,7 @@ def optimize_segments_to_primitives(
         "optimized_arcs": sum(1 for primitive in result if primitive.get("kind") == "ARC"),
         **small_visible_stats,
         **stroke_coverage_stats,
+        "line_gap_bridges_created": line_gap_bridges_created,
     }
 
 

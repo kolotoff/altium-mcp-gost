@@ -3566,7 +3566,7 @@ end;
 
 function ProjectionTextGap: TCoord;
 begin
-    Result := MMsToCoord(0.45);
+    Result := MMsToCoord(0.2);
 end;
 
 function ProjectionCommentGap: TCoord;
@@ -3751,14 +3751,14 @@ function ProjectionDesignatorAnchorIsClear(Board: IPCB_Board; Footprint: IPCB_Li
 var
     Left, Bottom, Right, Top: TCoord;
     AnchorWidth: TCoord;
-    AnchorHeight: TCoord;
+    TextY: TCoord;
 begin
     AnchorWidth := ProjectionDesignatorAnchorWidth;
-    AnchorHeight := ProjectionDesignatorAnchorOverlapHeight;
     Left := CenterX - (AnchorWidth div 2);
     Right := CenterX + (AnchorWidth div 2);
-    Bottom := CenterY - (AnchorHeight div 2);
-    Top := CenterY + (AnchorHeight div 2);
+    TextY := CenterY - (TextHeight div 2);
+    Bottom := TextY;
+    Top := TextY + ProjectionTrueTypeVisibleHeight;
     Result := not ProjectionTracksIntersectRect(Board, Footprint, DestinationLayer, LineWidth, Left, Bottom, Right, Top);
 end;
 
@@ -6728,7 +6728,11 @@ begin
                 FootprintsSeen := FootprintsSeen + 1;
                 FootprintName := Footprint.Name;
 
-                if StringListContainsText(ExcludeFootprints, FootprintName) then
+                if (ReferenceFootprintName <> '') and (UpperCase(FootprintName) <> UpperCase(ReferenceFootprintName)) then
+                begin
+                    SkippedFootprints.Add('"' + JSONEscapeString(FootprintName) + '"');
+                end
+                else if StringListContainsText(ExcludeFootprints, FootprintName) then
                 begin
                     SkippedFootprints.Add('"' + JSONEscapeString(FootprintName) + '"');
                 end
@@ -6815,6 +6819,7 @@ begin
         AddJSONNumber(ResultProps, 'comment_gap_mm', CoordToMMs(ProjectionCommentGap));
         AddJSONNumber(ResultProps, 'projection_line_width_mm', CoordToMMs(ProjectionLineWidth));
         AddJSONInteger(ResultProps, 'mechanical_layer', DestinationLayerNumber);
+        AddJSONProperty(ResultProps, 'target_footprint', ReferenceFootprintName);
         AddJSONInteger(ResultProps, 'footprints_seen', FootprintsSeen);
         AddJSONInteger(ResultProps, 'footprints_processed', FootprintsProcessed);
         AddJSONInteger(ResultProps, 'footprints_modified', FootprintsModified);

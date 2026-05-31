@@ -372,6 +372,7 @@ begin
         AddJSONProperty(Props, 'component_name', SchComponent.LibReference);
         AddJSONProperty(Props, 'description', SchComponent.ComponentDescription);
         AddJSONProperty(Props, 'primitive_scope', 'pins, rectangles, lines, labels, parameters');
+        AddJSONProperty(Props, 'body_rectangle_style_note', 'Rectangle records expose line_width for the border stroke, color/outline_color for the border colour, area_color/fill_color for the fill colour, and is_solid for whether the fill is active. GOST generated body rectangles use eSmall line_width, black outline_color 0, light gray fill_color #F8F8F8 / 16316664, and is_solid true.');
         AddJSONProperty(Props, 'pin_font_note', 'The legacy ISch_Pin API exposes pin geometry and visibility, but not separate pin-name/pin-designator FontId fields. create_schematic_symbol preserves those by replicating the active reference pin.');
         AddJSONInteger(Props, 'part_count', SchComponent.PartCount);
 
@@ -429,7 +430,9 @@ begin
                     AddJSONNumber(RectProps, 'y2_mm', CoordToMMs(SchRect.Corner.Y));
                     AddJSONInteger(RectProps, 'line_width', SchRect.LineWidth);
                     AddJSONInteger(RectProps, 'color', SchRect.Color);
+                    AddJSONInteger(RectProps, 'outline_color', SchRect.Color);
                     AddJSONInteger(RectProps, 'area_color', SchRect.AreaColor);
+                    AddJSONInteger(RectProps, 'fill_color', SchRect.AreaColor);
                     AddJSONBoolean(RectProps, 'is_solid', SchRect.IsSolid);
                     AddJSONInteger(RectProps, 'owner_part_id', SchRect.OwnerPartId);
                     AddJSONInteger(RectProps, 'owner_part_display_mode', SchRect.OwnerPartDisplayMode);
@@ -1160,16 +1163,12 @@ begin
             R := SchServer.SchObjectFactory(eRectangle, eCreate_Default);
         if (R <> Nil) Then
         begin
-            if (ReferenceRect = Nil) then
-                R.LineWidth := eSmall;
+            R.LineWidth := eSmall;
             R.Location := Point(GridIndexToCoord(MinX, GridSizeMM), GridIndexToCoord(MinY - 1, GridSizeMM));
             R.Corner := Point(GridIndexToCoord(MaxX, GridSizeMM), GridIndexToCoord(MaxY + 1, GridSizeMM));
-            if (ReferenceRect = Nil) then
-            begin
-                R.AreaColor := $00B0FFFF; // Yellow (BGR format)
-                R.Color := $00FF0000;     // Blue (BGR format)
-                R.IsSolid := True;
-            end;
+            R.AreaColor := $00F8F8F8; // #F8F8F8 light gray fill (BGR format)
+            R.Color := $00000000;     // Black outline (BGR format)
+            R.IsSolid := True;
             R.OwnerPartId := J;
             R.OwnerPartDisplayMode := 0;
             SchComponent.AddSchObject(R);

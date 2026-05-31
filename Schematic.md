@@ -131,10 +131,11 @@ Never use Altium default styling for GOST schematic-library symbols. Always appl
 - text style: regular upright text, not bold, not italic, not underlined.
 - line width: Altium `eSmall` schematic line width for body rectangles, vertical splitters, horizontal delimiters, and pin strokes.
 - color: black
+- body rectangle: black outline color (`$00000000` / integer `0`), light gray fill color from Altium UI `#F8F8F8` (`$00F8F8F8` / integer `16316664`), and solid fill enabled.
 - pin length
 - body and delimiter style
 
-The MCP reference dump exposes pin placement and metadata. For exact primitive/font auditing, use the MCP read-only `get_library_symbol_primitive_font_dump` on the active SchLib symbol rather than reading `.SchLib` files directly. Generated symbols still must use the fixed GOST defaults: `GOST type B`, font size 12, regular style, Altium `eSmall` line width, black drawing primitives, and a 5.0 mm fixed pin length.
+The MCP reference dump exposes pin placement and metadata. For exact primitive/font auditing, use the MCP read-only `get_library_symbol_primitive_font_dump` on the active SchLib symbol rather than reading `.SchLib` files directly. Generated symbols still must use the fixed GOST defaults: `GOST type B`, font size 12, regular style, Altium `eSmall` line width, black drawing primitives, `#F8F8F8` solid body fill, and a 5.0 mm fixed pin length.
 
 ## Pin Names and Pin Style
 

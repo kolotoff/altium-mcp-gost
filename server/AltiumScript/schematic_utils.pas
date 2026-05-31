@@ -197,6 +197,374 @@ begin
     end;
 end;
 
+function RotationToString(Orient: TRotationBy90): String;
+begin
+    case Orient of
+        eRotate0: Result := 'eRotate0';
+        eRotate90: Result := 'eRotate90';
+        eRotate180: Result := 'eRotate180';
+        eRotate270: Result := 'eRotate270';
+        else Result := 'eRotate0';
+    end;
+end;
+
+function PinElectricalToString(Elec: TPinElectrical): String;
+begin
+    case Elec of
+        eElectricHiZ: Result := 'eElectricHiZ';
+        eElectricInput: Result := 'eElectricInput';
+        eElectricIO: Result := 'eElectricIO';
+        eElectricOpenCollector: Result := 'eElectricOpenCollector';
+        eElectricOpenEmitter: Result := 'eElectricOpenEmitter';
+        eElectricOutput: Result := 'eElectricOutput';
+        eElectricPassive: Result := 'eElectricPassive';
+        eElectricPower: Result := 'eElectricPower';
+        else Result := 'eElectricPassive';
+    end;
+end;
+
+procedure RememberFontId(UsedFontIds: TStringList; FontId: Integer);
+var
+    FontIdText : String;
+begin
+    if (UsedFontIds = Nil) then
+        Exit;
+
+    FontIdText := IntToStr(FontId);
+    if (UsedFontIds.IndexOf(FontIdText) < 0) then
+        UsedFontIds.Add(FontIdText);
+end;
+
+procedure AddResolvedFontFields(Props: TStringList; Prefix: String; FontId: Integer; UsedFontIds: TStringList);
+var
+    FontSize      : Integer;
+    FontRotation  : Integer;
+    FontUnderline : Boolean;
+    FontItalic    : Boolean;
+    FontBold      : Boolean;
+    FontStrikeOut : Boolean;
+    FontName      : WideString;
+begin
+    AddJSONInteger(Props, Prefix + '_id', FontId);
+    RememberFontId(UsedFontIds, FontId);
+
+    try
+        SchServer.FontManager.GetFontSpec(FontId, FontSize, FontRotation, FontUnderline, FontItalic, FontBold, FontStrikeOut, FontName);
+        AddJSONBoolean(Props, Prefix + '_resolved', True);
+        AddJSONProperty(Props, Prefix + '_name', FontName);
+        AddJSONInteger(Props, Prefix + '_size', FontSize);
+        AddJSONInteger(Props, Prefix + '_rotation', FontRotation);
+        AddJSONBoolean(Props, Prefix + '_underline', FontUnderline);
+        AddJSONBoolean(Props, Prefix + '_italic', FontItalic);
+        AddJSONBoolean(Props, Prefix + '_bold', FontBold);
+        AddJSONBoolean(Props, Prefix + '_strikeout', FontStrikeOut);
+    except
+        AddJSONBoolean(Props, Prefix + '_resolved', False);
+        AddJSONProperty(Props, Prefix + '_error', 'FontManager.GetFontSpec failed for FontId ' + IntToStr(FontId));
+    end;
+end;
+
+procedure AddFontRecord(FontRecords: TStringList; FontId: Integer);
+var
+    FontProps     : TStringList;
+    FontSize      : Integer;
+    FontRotation  : Integer;
+    FontUnderline : Boolean;
+    FontItalic    : Boolean;
+    FontBold      : Boolean;
+    FontStrikeOut : Boolean;
+    FontName      : WideString;
+begin
+    FontProps := TStringList.Create;
+    try
+        AddJSONInteger(FontProps, 'font_id', FontId);
+        try
+            SchServer.FontManager.GetFontSpec(FontId, FontSize, FontRotation, FontUnderline, FontItalic, FontBold, FontStrikeOut, FontName);
+            AddJSONBoolean(FontProps, 'resolved', True);
+            AddJSONProperty(FontProps, 'font_name', FontName);
+            AddJSONInteger(FontProps, 'size', FontSize);
+            AddJSONInteger(FontProps, 'rotation', FontRotation);
+            AddJSONBoolean(FontProps, 'underline', FontUnderline);
+            AddJSONBoolean(FontProps, 'italic', FontItalic);
+            AddJSONBoolean(FontProps, 'bold', FontBold);
+            AddJSONBoolean(FontProps, 'strikeout', FontStrikeOut);
+        except
+            AddJSONBoolean(FontProps, 'resolved', False);
+            AddJSONProperty(FontProps, 'error', 'FontManager.GetFontSpec failed');
+        end;
+        FontRecords.Add(BuildJSONObject(FontProps, 1));
+    finally
+        FontProps.Free;
+    end;
+end;
+
+procedure AddLocationFields(Props: TStringList; XCoord, YCoord: Integer);
+begin
+    AddJSONNumber(Props, 'x_mils', CoordToMils(XCoord));
+    AddJSONNumber(Props, 'y_mils', CoordToMils(YCoord));
+    AddJSONNumber(Props, 'x_mm', CoordToMMs(XCoord));
+    AddJSONNumber(Props, 'y_mm', CoordToMMs(YCoord));
+end;
+
+function GetLibrarySymbolPrimitiveFontDump(ROOT_DIR: String): String;
+var
+    CurrentLib        : ISch_Lib;
+    SchComponent      : ISch_Component;
+    PinIterator       : ISch_Iterator;
+    LineIterator      : ISch_Iterator;
+    RectIterator      : ISch_Iterator;
+    LabelIterator     : ISch_Iterator;
+    ParameterIterator : ISch_Iterator;
+    Pin               : ISch_Pin;
+    SchLine           : ISch_Line;
+    SchRect           : ISch_Rectangle;
+    SchLabel          : ISch_Label;
+    Parameter         : ISch_Parameter;
+    Props             : TStringList;
+    PinProps          : TStringList;
+    LineProps         : TStringList;
+    RectProps         : TStringList;
+    LabelProps        : TStringList;
+    ParameterProps    : TStringList;
+    PinsArray         : TStringList;
+    LinesArray        : TStringList;
+    RectanglesArray   : TStringList;
+    LabelsArray       : TStringList;
+    ParametersArray   : TStringList;
+    FontsArray        : TStringList;
+    UsedFontIds       : TStringList;
+    OutputLines       : TStringList;
+    I                 : Integer;
+begin
+    Result := '';
+
+    CurrentLib := SchServer.GetCurrentSchDocument;
+    if (CurrentLib.ObjectID <> eSchLib) Then
+    begin
+        Result := 'ERROR: Please open a schematic library document';
+        Exit;
+    end;
+
+    SchComponent := CurrentLib.CurrentSchComponent;
+    if SchComponent = Nil Then
+    begin
+        Result := 'ERROR: No component is currently selected in the library';
+        Exit;
+    end;
+
+    Props := TStringList.Create;
+    PinsArray := TStringList.Create;
+    LinesArray := TStringList.Create;
+    RectanglesArray := TStringList.Create;
+    LabelsArray := TStringList.Create;
+    ParametersArray := TStringList.Create;
+    FontsArray := TStringList.Create;
+    UsedFontIds := TStringList.Create;
+
+    try
+        UsedFontIds.Sorted := True;
+        UsedFontIds.Duplicates := dupIgnore;
+
+        AddJSONBoolean(Props, 'success', True);
+        AddJSONBoolean(Props, 'read_only', True);
+        AddJSONProperty(Props, 'dump_source', 'active_schlib_component_api');
+        AddJSONProperty(Props, 'library_name', ExtractFileName(CurrentLib.DocumentName));
+        AddJSONProperty(Props, 'component_name', SchComponent.LibReference);
+        AddJSONProperty(Props, 'description', SchComponent.ComponentDescription);
+        AddJSONProperty(Props, 'primitive_scope', 'pins, rectangles, lines, labels, parameters');
+        AddJSONProperty(Props, 'pin_font_note', 'The legacy ISch_Pin API exposes pin geometry and visibility, but not separate pin-name/pin-designator FontId fields. create_schematic_symbol preserves those by replicating the active reference pin.');
+        AddJSONInteger(Props, 'part_count', SchComponent.PartCount);
+
+        PinIterator := SchComponent.SchIterator_Create;
+        try
+            PinIterator.AddFilter_ObjectSet(MkSet(ePin));
+            Pin := PinIterator.FirstSchObject;
+            while (Pin <> Nil) do
+            begin
+                PinProps := TStringList.Create;
+                try
+                    AddJSONProperty(PinProps, 'kind', 'pin');
+                    AddJSONProperty(PinProps, 'pin_number', Pin.Designator);
+                    AddJSONProperty(PinProps, 'pin_name', Pin.Name);
+                    AddJSONProperty(PinProps, 'description', Pin.Description);
+                    AddJSONProperty(PinProps, 'pin_type', PinElectricalToString(Pin.Electrical));
+                    AddJSONProperty(PinProps, 'orientation', RotationToString(Pin.Orientation));
+                    AddLocationFields(PinProps, Pin.Location.X, Pin.Location.Y);
+                    AddJSONNumber(PinProps, 'pin_length_mils', CoordToMils(Pin.PinLength));
+                    AddJSONNumber(PinProps, 'pin_length_mm', CoordToMMs(Pin.PinLength));
+                    AddJSONInteger(PinProps, 'width', Pin.Width);
+                    AddJSONInteger(PinProps, 'color', Pin.Color);
+                    AddJSONBoolean(PinProps, 'show_name', Pin.ShowName);
+                    AddJSONBoolean(PinProps, 'show_designator', Pin.ShowDesignator);
+                    AddJSONBoolean(PinProps, 'is_hidden', Pin.IsHidden);
+                    AddJSONProperty(PinProps, 'hidden_net_name', Pin.HiddenNetName);
+                    AddJSONInteger(PinProps, 'owner_part_id', Pin.OwnerPartId);
+                    AddJSONInteger(PinProps, 'owner_part_display_mode', Pin.OwnerPartDisplayMode);
+                    PinsArray.Add(BuildJSONObject(PinProps, 1));
+                finally
+                    PinProps.Free;
+                end;
+                Pin := PinIterator.NextSchObject;
+            end;
+        finally
+            SchComponent.SchIterator_Destroy(PinIterator);
+        end;
+
+        RectIterator := SchComponent.SchIterator_Create;
+        try
+            RectIterator.AddFilter_ObjectSet(MkSet(eRectangle));
+            SchRect := RectIterator.FirstSchObject;
+            while (SchRect <> Nil) do
+            begin
+                RectProps := TStringList.Create;
+                try
+                    AddJSONProperty(RectProps, 'kind', 'rectangle');
+                    AddJSONNumber(RectProps, 'x1_mils', CoordToMils(SchRect.Location.X));
+                    AddJSONNumber(RectProps, 'y1_mils', CoordToMils(SchRect.Location.Y));
+                    AddJSONNumber(RectProps, 'x2_mils', CoordToMils(SchRect.Corner.X));
+                    AddJSONNumber(RectProps, 'y2_mils', CoordToMils(SchRect.Corner.Y));
+                    AddJSONNumber(RectProps, 'x1_mm', CoordToMMs(SchRect.Location.X));
+                    AddJSONNumber(RectProps, 'y1_mm', CoordToMMs(SchRect.Location.Y));
+                    AddJSONNumber(RectProps, 'x2_mm', CoordToMMs(SchRect.Corner.X));
+                    AddJSONNumber(RectProps, 'y2_mm', CoordToMMs(SchRect.Corner.Y));
+                    AddJSONInteger(RectProps, 'line_width', SchRect.LineWidth);
+                    AddJSONInteger(RectProps, 'color', SchRect.Color);
+                    AddJSONInteger(RectProps, 'area_color', SchRect.AreaColor);
+                    AddJSONBoolean(RectProps, 'is_solid', SchRect.IsSolid);
+                    AddJSONInteger(RectProps, 'owner_part_id', SchRect.OwnerPartId);
+                    AddJSONInteger(RectProps, 'owner_part_display_mode', SchRect.OwnerPartDisplayMode);
+                    RectanglesArray.Add(BuildJSONObject(RectProps, 1));
+                finally
+                    RectProps.Free;
+                end;
+                SchRect := RectIterator.NextSchObject;
+            end;
+        finally
+            SchComponent.SchIterator_Destroy(RectIterator);
+        end;
+
+        LineIterator := SchComponent.SchIterator_Create;
+        try
+            LineIterator.AddFilter_ObjectSet(MkSet(eLine));
+            SchLine := LineIterator.FirstSchObject;
+            while (SchLine <> Nil) do
+            begin
+                LineProps := TStringList.Create;
+                try
+                    AddJSONProperty(LineProps, 'kind', 'line');
+                    AddJSONNumber(LineProps, 'x1_mils', CoordToMils(SchLine.Location.X));
+                    AddJSONNumber(LineProps, 'y1_mils', CoordToMils(SchLine.Location.Y));
+                    AddJSONNumber(LineProps, 'x2_mils', CoordToMils(SchLine.Corner.X));
+                    AddJSONNumber(LineProps, 'y2_mils', CoordToMils(SchLine.Corner.Y));
+                    AddJSONNumber(LineProps, 'x1_mm', CoordToMMs(SchLine.Location.X));
+                    AddJSONNumber(LineProps, 'y1_mm', CoordToMMs(SchLine.Location.Y));
+                    AddJSONNumber(LineProps, 'x2_mm', CoordToMMs(SchLine.Corner.X));
+                    AddJSONNumber(LineProps, 'y2_mm', CoordToMMs(SchLine.Corner.Y));
+                    AddJSONInteger(LineProps, 'line_width', SchLine.LineWidth);
+                    AddJSONInteger(LineProps, 'line_style', SchLine.LineStyle);
+                    AddJSONInteger(LineProps, 'color', SchLine.Color);
+                    AddJSONInteger(LineProps, 'owner_part_id', SchLine.OwnerPartId);
+                    AddJSONInteger(LineProps, 'owner_part_display_mode', SchLine.OwnerPartDisplayMode);
+                    LinesArray.Add(BuildJSONObject(LineProps, 1));
+                finally
+                    LineProps.Free;
+                end;
+                SchLine := LineIterator.NextSchObject;
+            end;
+        finally
+            SchComponent.SchIterator_Destroy(LineIterator);
+        end;
+
+        LabelIterator := SchComponent.SchIterator_Create;
+        try
+            LabelIterator.AddFilter_ObjectSet(MkSet(eLabel));
+            SchLabel := LabelIterator.FirstSchObject;
+            while (SchLabel <> Nil) do
+            begin
+                LabelProps := TStringList.Create;
+                try
+                    AddJSONProperty(LabelProps, 'kind', 'label');
+                    AddJSONProperty(LabelProps, 'text', SchLabel.Text);
+                    AddLocationFields(LabelProps, SchLabel.Location.X, SchLabel.Location.Y);
+                    AddJSONProperty(LabelProps, 'orientation', RotationToString(SchLabel.Orientation));
+                    AddJSONInteger(LabelProps, 'justification', SchLabel.Justification);
+                    AddJSONInteger(LabelProps, 'color', SchLabel.Color);
+                    AddJSONInteger(LabelProps, 'owner_part_id', SchLabel.OwnerPartId);
+                    AddJSONInteger(LabelProps, 'owner_part_display_mode', SchLabel.OwnerPartDisplayMode);
+                    AddResolvedFontFields(LabelProps, 'font', SchLabel.FontId, UsedFontIds);
+                    LabelsArray.Add(BuildJSONObject(LabelProps, 1));
+                finally
+                    LabelProps.Free;
+                end;
+                SchLabel := LabelIterator.NextSchObject;
+            end;
+        finally
+            SchComponent.SchIterator_Destroy(LabelIterator);
+        end;
+
+        ParameterIterator := SchComponent.SchIterator_Create;
+        try
+            ParameterIterator.AddFilter_ObjectSet(MkSet(eParameter));
+            Parameter := ParameterIterator.FirstSchObject;
+            while (Parameter <> Nil) do
+            begin
+                ParameterProps := TStringList.Create;
+                try
+                    AddJSONProperty(ParameterProps, 'kind', 'parameter');
+                    AddJSONProperty(ParameterProps, 'name', Parameter.Name);
+                    AddJSONProperty(ParameterProps, 'text', Parameter.Text);
+                    AddLocationFields(ParameterProps, Parameter.Location.X, Parameter.Location.Y);
+                    AddJSONProperty(ParameterProps, 'orientation', RotationToString(Parameter.Orientation));
+                    AddJSONInteger(ParameterProps, 'color', Parameter.Color);
+                    AddJSONBoolean(ParameterProps, 'show_name', Parameter.ShowName);
+                    AddJSONInteger(ParameterProps, 'owner_part_id', Parameter.OwnerPartId);
+                    AddJSONInteger(ParameterProps, 'owner_part_display_mode', Parameter.OwnerPartDisplayMode);
+                    AddResolvedFontFields(ParameterProps, 'font', Parameter.FontId, UsedFontIds);
+                    ParametersArray.Add(BuildJSONObject(ParameterProps, 1));
+                finally
+                    ParameterProps.Free;
+                end;
+                Parameter := ParameterIterator.NextSchObject;
+            end;
+        finally
+            SchComponent.SchIterator_Destroy(ParameterIterator);
+        end;
+
+        for I := 0 to UsedFontIds.Count - 1 do
+            AddFontRecord(FontsArray, StrToInt(UsedFontIds[I]));
+
+        AddJSONInteger(Props, 'pin_count', PinsArray.Count);
+        AddJSONInteger(Props, 'rectangle_count', RectanglesArray.Count);
+        AddJSONInteger(Props, 'line_count', LinesArray.Count);
+        AddJSONInteger(Props, 'label_count', LabelsArray.Count);
+        AddJSONInteger(Props, 'parameter_count', ParametersArray.Count);
+        AddJSONInteger(Props, 'resolved_font_count', FontsArray.Count);
+        Props.Add('"fonts": ' + BuildJSONArray(FontsArray));
+        Props.Add('"pins": ' + BuildJSONArray(PinsArray));
+        Props.Add('"rectangles": ' + BuildJSONArray(RectanglesArray));
+        Props.Add('"lines": ' + BuildJSONArray(LinesArray));
+        Props.Add('"labels": ' + BuildJSONArray(LabelsArray));
+        Props.Add('"parameters": ' + BuildJSONArray(ParametersArray));
+
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(Props);
+            Result := WriteJSONToFile(OutputLines, ROOT_DIR+'temp_symbol_primitive_font_dump.json');
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        Props.Free;
+        PinsArray.Free;
+        LinesArray.Free;
+        RectanglesArray.Free;
+        LabelsArray.Free;
+        ParametersArray.Free;
+        FontsArray.Free;
+        UsedFontIds.Free;
+    end;
+end;
+
 function IsSymbolMetadataLine(Line: String): Boolean;
 begin
     Result := (Pos('Description=', Line) = 1) or

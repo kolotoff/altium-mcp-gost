@@ -32,8 +32,9 @@ Recommended workflow:
 2. Load the project placement baseline with `get_symbol_placement_rules`.
 3. For each source library, open or navigate to representative symbols with `search_library_symbol`.
 4. Capture the active symbol style with `get_library_symbol_reference`.
-5. Create new symbols only after the rules and a reference style are known, using `create_schematic_symbol`.
-6. Save the focused document with `save_current_document` only when the user explicitly asks to save.
+5. When exact primitive/font auditing is needed, capture the active symbol with `get_library_symbol_primitive_font_dump`.
+6. Create new symbols only after the rules and a reference style are known, using `create_schematic_symbol`.
+7. Save the focused document with `save_current_document` only when the user explicitly asks to save.
 
 Common command pattern:
 
@@ -44,6 +45,7 @@ search_library_symbol(
   symbol_name="<representative symbol or family>"
 )
 get_library_symbol_reference()
+get_library_symbol_primitive_font_dump()  // optional exact primitive/font audit
 create_schematic_symbol(...)
 ```
 
@@ -132,7 +134,7 @@ Never use Altium default styling for GOST schematic-library symbols. Always appl
 - pin length
 - body and delimiter style
 
-The current MCP reference dump exposes pin placement and metadata but not exact font-family fields. If exact font auditing is required, add a future MCP read-only primitive/font dump rather than reading `.SchLib` files directly. Generated symbols still must use the fixed GOST defaults: `GOST type B`, font size 12, regular style, Altium `eSmall` line width, black drawing primitives, and a 5.0 mm fixed pin length.
+The MCP reference dump exposes pin placement and metadata. For exact primitive/font auditing, use the MCP read-only `get_library_symbol_primitive_font_dump` on the active SchLib symbol rather than reading `.SchLib` files directly. Generated symbols still must use the fixed GOST defaults: `GOST type B`, font size 12, regular style, Altium `eSmall` line width, black drawing primitives, and a 5.0 mm fixed pin length.
 
 ## Pin Names and Pin Style
 
@@ -244,10 +246,11 @@ Before calling `create_schematic_symbol`:
 1. Run `get_symbol_placement_rules`.
 2. Open a close reference with `search_library_symbol`.
 3. Capture style with `get_library_symbol_reference`.
-4. Decide the symbol name, designator prefix, description, and core parameters.
-5. Build pin groups, side assignment, and delimiter plan.
-6. Explain pin-placement choices before creation.
-7. Pass exact 2.5 mm-grid coordinates and owner part IDs.
+4. Run `get_library_symbol_primitive_font_dump` when an exact primitive/font audit is needed.
+5. Decide the symbol name, designator prefix, description, and core parameters.
+6. Build pin groups, side assignment, and delimiter plan.
+7. Explain pin-placement choices before creation.
+8. Pass exact 2.5 mm-grid coordinates and owner part IDs.
 
 After creation:
 

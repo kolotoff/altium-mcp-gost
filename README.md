@@ -166,6 +166,7 @@ The server provides several tools to interact with Altium Designer:
 - The default workflow for GOST schematic-library symbol creation is documented in [Schematic.md](Schematic.md). Use it by default for GOST schematic-library symbol creation, update, and review tasks. The standard MCP flow is `get_symbol_placement_rules` -> `search_library_symbol` -> `get_library_symbol_reference` -> `create_schematic_symbol`.
 - `get_symbol_placement_rules`: Create symbol's helper tool that reads `~\AppData\Roaming\Claude\Claude Extensions\local.dxt.altium-mcp\server\symbol_placement_rules.txt` to get pin placement rules for symbol creation.
 - `get_library_symbol_reference`: Create symbol's helper tool to use an open library symbol as an example to create the symbol
+- `get_library_symbol_primitive_font_dump`: Read-only active SchLib symbol primitive/font audit. Dumps pins, rectangles, lines, labels, parameters, and FontManager-resolved fonts from the active in-memory library component; use this instead of reading `.SchLib` files directly when exact style/font auditing is needed.
 - `search_library_symbol`: Search for a symbol by name in a schematic library (.SchLib) and navigate to it. Supports partial name matching. Will open the library file in Altium if a path is provided, or show a file picker if not.
 
 ![Symbol Creator](assets/symbol_creator.gif)

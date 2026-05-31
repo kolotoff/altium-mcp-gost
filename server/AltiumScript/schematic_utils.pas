@@ -765,6 +765,58 @@ begin
     end;
 end;
 
+procedure SetStringListNameValue(List: TStringList; Name: String; Value: String);
+var
+    I, EqPos       : Integer;
+    EntryName      : String;
+begin
+    if (List = Nil) then
+        Exit;
+
+    for I := 0 to List.Count - 1 do
+    begin
+        EqPos := Pos('=', List[I]);
+        if (EqPos > 0) then
+        begin
+            EntryName := Copy(List[I], 1, EqPos - 1);
+            if (UpperCase(EntryName) = UpperCase(Name)) then
+            begin
+                List[I] := Name + '=' + Value;
+                Exit;
+            end;
+        end;
+    end;
+
+    List.Add(Name + '=' + Value);
+end;
+
+function TryGetStringListNameValue(List: TStringList; Name: String; var Value: String): Boolean;
+var
+    I, EqPos       : Integer;
+    EntryName      : String;
+begin
+    Result := False;
+    Value := '';
+
+    if (List = Nil) then
+        Exit;
+
+    for I := 0 to List.Count - 1 do
+    begin
+        EqPos := Pos('=', List[I]);
+        if (EqPos > 0) then
+        begin
+            EntryName := Copy(List[I], 1, EqPos - 1);
+            if (UpperCase(EntryName) = UpperCase(Name)) then
+            begin
+                Value := Copy(List[I], EqPos + 1, Length(List[I]) - EqPos);
+                Result := True;
+                Exit;
+            end;
+        end;
+    end;
+end;
+
 function CreateSchematicSymbol(SymbolName: String; PinsList: TStringList; PartCount: Integer = 1): String;
 var
     CurrentLib       : ISch_Lib;
@@ -829,6 +881,7 @@ var
     LabelYCoord      : Integer;
     ParameterName    : String;
     ParameterValue   : String;
+    ParameterOverrideValue : String;
     ParameterLine    : String;
     DelimiterSpec, DelimiterSide, DelimiterYText : String;
     PipePos          : Integer;
@@ -969,7 +1022,7 @@ begin
             else if (Pos('Manufacturer=', PinsList[I]) = 1) then
             begin
                 ManufacturerValue := Copy(PinsList[I], 14, Length(PinsList[I]) - 13);
-                ParameterOverrides.Values['Manufacturer'] := ManufacturerValue;
+                SetStringListNameValue(ParameterOverrides, 'Manufacturer', ManufacturerValue);
             end
             else if (Pos('Footprint=', PinsList[I]) = 1) then
             begin
@@ -1024,7 +1077,7 @@ begin
                     ParameterName := Copy(ParameterLine, 1, PipePos - 1);
                     ParameterValue := Copy(ParameterLine, PipePos + 1, Length(ParameterLine) - PipePos);
                     if (ParameterName <> '') then
-                        ParameterOverrides.Values[ParameterName] := ParameterValue;
+                        SetStringListNameValue(ParameterOverrides, ParameterName, ParameterValue);
                 end;
             end
             else
@@ -1048,8 +1101,9 @@ begin
 
         if (CenterLabel <> '') and (CenterLabelPosition = '') then
             CenterLabelPosition := 'TOPCENTER';
-        CommentText := SymbolName;
-        ParameterOverrides.Values['PartNumber'] := '=Comment';
+        if (CommentText = '') then
+            CommentText := SymbolName;
+        SetStringListNameValue(ParameterOverrides, 'PartNumber', '=Comment');
 
     // Find an existing symbol with the same library reference so it can be
     // replaced after the new component has copied all style primitives. This
@@ -1494,8 +1548,8 @@ begin
                     ParameterValue := ManufacturerValue;
                 if (UpperCase(ParameterName) = 'COMMENT') and (CommentText <> '') then
                     ParameterValue := CommentText;
-                if (ParameterOverrides.Values[ParameterName] <> '') then
-                    ParameterValue := ParameterOverrides.Values[ParameterName];
+                if (TryGetStringListNameValue(ParameterOverrides, ParameterName, ParameterOverrideValue)) then
+                    ParameterValue := ParameterOverrideValue;
 
                 SchParameter := SourceParameter.Replicate;
                 if (SchParameter = Nil) then
@@ -1541,9 +1595,38 @@ begin
         if (SchParameter <> Nil) then
         begin
             SchParameter.Name := 'PartNumber';
-            SchParameter.Text := '=Comment';
+            ParameterValue := '=Comment';
+            if (TryGetStringListNameValue(ParameterOverrides, 'PartNumber', ParameterOverrideValue)) then
+                ParameterValue := ParameterOverrideValue;
+            SchParameter.Text := ParameterValue;
             SchComponent.AddSchObject(SchParameter);
             CopiedParameterNames.Add('PARTNUMBER');
+        end;
+    end;
+
+    for I := 0 to ParameterOverrides.Count - 1 do
+    begin
+        ParameterLine := ParameterOverrides[I];
+        PipePos := Pos('=', ParameterLine);
+        if (PipePos > 0) then
+        begin
+            ParameterName := Copy(ParameterLine, 1, PipePos - 1);
+            ParameterValue := Copy(ParameterLine, PipePos + 1, Length(ParameterLine) - PipePos);
+            if (ParameterName <> '') and (CopiedParameterNames.IndexOf(UpperCase(ParameterName)) < 0) then
+            begin
+                SchParameter := Nil;
+                if (ReferenceParameter <> Nil) then
+                    SchParameter := ReferenceParameter.Replicate;
+                if (SchParameter = Nil) then
+                    SchParameter := SchServer.SchObjectFactory(eParameter, eCreate_Default);
+                if (SchParameter <> Nil) then
+                begin
+                    SchParameter.Name := ParameterName;
+                    SchParameter.Text := ParameterValue;
+                    SchComponent.AddSchObject(SchParameter);
+                    CopiedParameterNames.Add(UpperCase(ParameterName));
+                end;
+            end;
         end;
     end;
 

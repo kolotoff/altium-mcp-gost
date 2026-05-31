@@ -95,6 +95,50 @@ Use `Mezzanine`, not `Mezzanine Connector`, in connector descriptions.
 
 For existing JST GH, FFC-FPC, and USB connector families, preserve the family wording already used by the target library when updating sibling symbols, for example `GH series 1.25 mm pitch SMT top entry header 8 circuits` or `USB 2.0 Connector Type C 16P SMT Horizontal Receptacle`. For new connector families, prefer the structured comma-separated style unless the destination library already has a clearer local pattern.
 
+## Custom Properties
+
+Every GOST schematic symbol must have a populated component-property set. Do not rely on Altium default parameters and do not add library metadata as graphical text. Use an existing symbol from the same target family as the reference whenever possible so `create_schematic_symbol` can copy the local parameter schema, visibility, and text style before applying overrides.
+
+Populate properties through `create_schematic_symbol` metadata entries in the `pins` list:
+
+```text
+Comment=<symbol_name>
+Designator=<prefix?>
+Manufacturer=<manufacturer_name>
+Parameter=PartNumber|=Comment
+Parameter=ValueType|<family_value_type>
+Parameter=PartDenotation|<project_or_local_denotation_or_blank>
+Parameter=PartNote|<brief_ordering_or_variant_note_or_blank>
+Parameter=TU|<technical_specification_or_blank>
+Parameter=AlternateManufacturer|<approved_drop_in_alternate_manufacturer_or_blank>
+Parameter=AlternatePartNumber|<approved_drop_in_alternate_part_number_or_blank>
+Footprint=<primary_footprint_name>
+FootprintLibrary=<pcb_library_name_or_path>
+PinDescription=<pin_number>|<datasheet_pin_description>
+```
+
+Standard property rules:
+
+- `Comment`: always equal to the Design Item ID / LibReference / symbol name.
+- `PartNumber`: always exactly `=Comment`.
+- `Manufacturer`: exact manufacturer name from the datasheet, vendor catalog, or ordering page. Leave blank only when the target-family reference intentionally keeps it blank or the manufacturer is genuinely unknown.
+- `ValueType`: copy the vocabulary from the target family. Sampled values include `Разъём` for generic connectors, `Разъём USB` for USB connectors, and `Микросхема` for MCU, MPU, interface, isolation, and op-amp symbols. For unusual families such as RF Active, keep the value used by the closest sampled reference instead of inventing a new category.
+- `Description`: concise selection facts only; no manufacturer, part number, generation provenance, or workflow notes.
+- `PartDenotation`: use for a short project/local denotation only when provided by the project or reference family; otherwise keep it blank if the schema contains it.
+- `PartNote`: use for a brief ordering, assembly, or variant note only when useful; otherwise keep it blank.
+- `TU`: use for the applicable technical specification, standard, or document number only when known; otherwise keep it blank.
+- `AlternateManufacturer` and `AlternatePartNumber`: populate only for approved drop-in alternates. Keep both blank if no alternate is approved; do not add speculative substitutes.
+- `PINTYPE`, `Name`, and other legacy properties: preserve them only when the target-family reference already contains them or the user explicitly requests them.
+
+Property source priority:
+
+- Use the datasheet, vendor catalog, or official ordering data for manufacturer, description, package, pin descriptions, and footprint-relevant facts.
+- Use the sampled GOST reference symbol for property names, blank fields, visibility, style, and `ValueType` vocabulary.
+- Use project/user data for `TU`, `PartDenotation`, `PartNote`, and approved alternate fields.
+- Never write assumptions, source URLs, creation dates, or generation notes into component properties.
+
+When a required custom property is absent from the reference symbol, create it with a `Parameter=<name>|<value>` metadata entry. Blank-but-required fields must still be passed as `Parameter=<name>|` so the parameter exists and can be filled later.
+
 ## Designators
 
 Default designators:
@@ -248,7 +292,7 @@ Before calling `create_schematic_symbol`:
 2. Open a close reference with `search_library_symbol`.
 3. Capture style with `get_library_symbol_reference`.
 4. Run `get_library_symbol_primitive_font_dump` when an exact primitive/font audit is needed.
-5. Decide the symbol name, designator prefix, description, and core parameters.
+5. Decide the symbol name, designator prefix, description, custom property set, and footprint metadata.
 6. Build pin groups, side assignment, and delimiter plan.
 7. Explain pin-placement choices before creation.
 8. Pass exact 2.5 mm-grid coordinates and owner part IDs.
@@ -259,5 +303,5 @@ After creation:
 2. Check long pin names against borders and splitters.
 3. Check hidden connector mounting-pin designators.
 4. Check active-low overbars.
-5. Check `Comment`, `PartNumber`, `Description`, footprint parameters, and pin descriptions.
+5. Check `Comment`, `PartNumber`, `Manufacturer`, `ValueType`, `Description`, all required custom properties, footprint parameters, and pin descriptions.
 6. Save only when requested.

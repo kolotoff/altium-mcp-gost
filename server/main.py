@@ -697,6 +697,12 @@ async def create_schematic_symbol(ctx: Context, symbol_name: str, description: s
                                GroupDelimiter=FULL|-20.0, or GroupDelimiter=CENTER|-20.0.
                                GroupDelimiter Y values are in mm and snap to the 2.5 mm grid.
                                Use Designator=XP? or similar to override the copied reference designator.
+                               Component properties and model links may also be populated with
+                               Comment=<symbol_name>, Manufacturer=<name>,
+                               Parameter=PartNumber|=Comment, Parameter=ValueType|Микросхема,
+                               Parameter=<custom_name>|<custom_value_or_blank>,
+                               Footprint=<footprint_name>, FootprintLibrary=<library_name_or_path>,
+                               and PinDescription=<pin>|<datasheet description>.
         part_count (int): Number of parts in the symbol (default 1).
                          Use >1 for multi-part symbols like quad op-amps or hex buffers.
 

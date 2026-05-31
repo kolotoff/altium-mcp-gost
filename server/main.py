@@ -582,6 +582,40 @@ async def get_library_symbol_reference(ctx: Context) -> str:
     return json_dumps(symbol_data, indent=2, ensure_ascii=False)
 
 @mcp.tool()
+async def get_library_symbol_primitive_font_dump(ctx: Context) -> str:
+    """
+    Return a read-only primitive and font dump for the currently open schematic library symbol.
+
+    The active SchLib document must be focused in Altium. This inspects the active
+    in-memory library component through Altium's schematic API; it does not read
+    .SchLib files directly from disk.
+
+    Returns:
+        str: JSON object with component metadata, pins, text primitives, drawing primitives,
+             and FontManager-resolved font records for text-bearing primitives.
+    """
+    logger.info("Getting library symbol primitive/font dump")
+
+    response = await altium_bridge.execute_command(
+        "get_library_symbol_primitive_font_dump",
+        {}
+    )
+
+    if not response.get("success", False):
+        error_msg = response.get("error", "Unknown error")
+        logger.error(f"Error getting symbol primitive/font dump: {error_msg}")
+        return json_dumps({"error": f"Failed to get symbol primitive/font dump: {error_msg}"}, ensure_ascii=False)
+
+    symbol_data = response.get("result", {})
+
+    if not symbol_data:
+        logger.info("No symbol primitive/font dump returned")
+        return json_dumps({"error": "No symbol primitive/font dump returned or no symbol is currently selected in the library"}, ensure_ascii=False)
+
+    logger.info("Retrieved symbol primitive/font dump")
+    return json_dumps(symbol_data, indent=2, ensure_ascii=False)
+
+@mcp.tool()
 async def search_library_symbol(ctx: Context, symbol_name: str, library_path: str = "") -> str:
     """
     Search for a symbol by name in a schematic library (.SchLib) and navigate to it.

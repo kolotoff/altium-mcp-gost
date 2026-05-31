@@ -936,7 +936,9 @@ begin
         'take_view_screenshot':
             Result := ExecuteTakeViewScreenshot(RequestData);            
         'get_library_symbol_reference':
-            Result := GetLibrarySymbolReference(ROOT_DIR);            
+            Result := GetLibrarySymbolReference(ROOT_DIR);
+        'get_library_symbol_primitive_font_dump':
+            Result := GetLibrarySymbolPrimitiveFontDump(ROOT_DIR);
         'create_schematic_symbol':
             Result := ExecuteCreateSchematicSymbol(RequestData);            
         'get_schematic_data':

@@ -1144,11 +1144,11 @@ begin
         SchComponent.DisplayMode := 0;
         SchComponent.PartCount := PartCount;
 
-        // Define the LibReference, description, and comment
+        // Define the LibReference and description. Do not populate the default
+        // component Comment primitive; generated GOST symbols should not carry
+        // a visible part-number/comment text primitive unless explicitly added.
         SchComponent.LibReference := SymbolName;
         SchComponent.ComponentDescription := Description;
-        if (SchComponent.Comment <> Nil) then
-            SchComponent.Comment.Text := CommentText;
         if (DesignatorText <> '') then
             SchComponent.Designator.Text := DesignatorText
         else if (ReferenceComponent <> Nil) then

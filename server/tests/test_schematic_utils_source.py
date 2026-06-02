@@ -57,6 +57,21 @@ class SchematicUtilsSourceTest(unittest.TestCase):
             "Component Comment is set directly and must not be copied again as a custom parameter.",
         )
 
+    def test_generated_component_comment_primitive_is_not_populated_by_default(self):
+        source_path = Path(__file__).resolve().parents[1] / "AltiumScript" / "schematic_utils.pas"
+        source = source_path.read_text(encoding="utf-8")
+
+        self.assertNotIn(
+            "SchComponent.Comment.Text := CommentText",
+            source,
+            "Generated symbols must not create/populate the default part-number Comment primitive.",
+        )
+        self.assertNotIn(
+            "SchComponent.Comment.IsHidden := True",
+            source,
+            "Do not hide the default Comment primitive as a workaround; avoid populating it by default.",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

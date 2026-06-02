@@ -602,6 +602,7 @@ begin
 
         PinData := TStringList.Create;
         try
+            PinData.StrictDelimiter := True;
             PinData.Delimiter := '|';
             PinData.DelimitedText := PinsList[I];
             if (PinData.Count >= 1) then
@@ -876,6 +877,7 @@ var
     SideSectionWidthGrid : Integer;
     RefSideSectionWidthGrid : Integer;
     DesiredSideSectionWidthGrid : Integer;
+    BodyWidthGrid   : Integer;
     BodyCenterXCoord : Integer;
     LabelCenterOffsetX : Integer;
     LabelYCoord      : Integer;
@@ -894,6 +896,8 @@ var
     GroupDelimiters  : TStringList;
     OutputLines      : TStringList;
     VerticalSeparatorsEnabled : Boolean;
+    HasLeftSidePins  : Boolean;
+    HasRightSidePins : Boolean;
 begin
     // Check if we have a schematic library document
     CurrentLib := SchServer.GetCurrentSchDocument;
@@ -1085,6 +1089,7 @@ begin
                 // Check for owner_part_id in pin data to auto-detect PartCount
                 PinData := TStringList.Create;
                 try
+                    PinData.StrictDelimiter := True;
                     PinData.Delimiter := '|';
                     PinData.DelimitedText := PinsList[I];
                     if (PinData.Count >= 7) then
@@ -1158,6 +1163,8 @@ begin
         // Compute bounding box for this part's pins (including shared pins with OwnerPartId=0)
         MinX := 9999; MaxX := -9999; MinY := 9999; MaxY := -9999;
         HasPins := False;
+        HasLeftSidePins := False;
+        HasRightSidePins := False;
         RequiredSideSectionWidthGrid := 0;
 
         for I := 0 to PinsList.Count - 1 do
@@ -1166,6 +1173,7 @@ begin
 
             PinData := TStringList.Create;
             try
+                PinData.StrictDelimiter := True;
                 PinData.Delimiter := '|';
                 PinData.DelimitedText := PinsList[I];
 
@@ -1191,6 +1199,10 @@ begin
                         MaxY := Max(MaxY, PinY);
                         if (PinOrient = 'eRotate0') or (PinOrient = 'eRotate180') then
                         begin
+                            if (PinOrient = 'eRotate180') then
+                                HasLeftSidePins := True;
+                            if (PinOrient = 'eRotate0') then
+                                HasRightSidePins := True;
                             PinNameWidthGrid := PinNameLabelWidthGrid(PinName, ReferenceLabel, ReferencePin, PinOrient, GridSizeMM);
                             if (PinNameWidthGrid > RequiredSideSectionWidthGrid) then
                                 RequiredSideSectionWidthGrid := PinNameWidthGrid;
@@ -1207,6 +1219,24 @@ begin
         if not HasPins then
         begin
             MinX := 3; MinY := 0; MaxX := 10; MaxY := 10;
+        end;
+
+        if (MaxX = MinX) then
+        begin
+            BodyWidthGrid := 6;
+            if (ReferenceRect <> Nil) then
+            begin
+                RefMinX := CoordToGridIndex(ReferenceRect.Location.X, GridSizeMM);
+                RefMaxX := CoordToGridIndex(ReferenceRect.Corner.X, GridSizeMM);
+                BodyWidthGrid := Abs(RefMaxX - RefMinX);
+                if (BodyWidthGrid <= 0) then
+                    BodyWidthGrid := 6;
+            end;
+
+            if HasRightSidePins and (not HasLeftSidePins) then
+                MinX := MaxX - BodyWidthGrid
+            else
+                MaxX := MinX + BodyWidthGrid;
         end;
 
         // Create a rectangle for this part's body
@@ -1479,6 +1509,7 @@ begin
 
         PinData := TStringList.Create;
         try
+            PinData.StrictDelimiter := True;
             PinData.Delimiter := '|';
             PinData.DelimitedText := PinsList[I];
 
@@ -1551,15 +1582,20 @@ begin
                 if (TryGetStringListNameValue(ParameterOverrides, ParameterName, ParameterOverrideValue)) then
                     ParameterValue := ParameterOverrideValue;
 
-                SchParameter := SourceParameter.Replicate;
-                if (SchParameter = Nil) then
-                    SchParameter := SchServer.SchObjectFactory(eParameter, eCreate_Default);
-                if (SchParameter <> Nil) then
+                if (ParameterName <> '') and
+                   (UpperCase(ParameterName) <> 'COMMENT') and
+                   (CopiedParameterNames.IndexOf(UpperCase(ParameterName)) < 0) then
                 begin
-                    SchParameter.Name := ParameterName;
-                    SchParameter.Text := ParameterValue;
-                    SchComponent.AddSchObject(SchParameter);
-                    CopiedParameterNames.Add(UpperCase(ParameterName));
+                    SchParameter := SourceParameter.Replicate;
+                    if (SchParameter = Nil) then
+                        SchParameter := SchServer.SchObjectFactory(eParameter, eCreate_Default);
+                    if (SchParameter <> Nil) then
+                    begin
+                        SchParameter.Name := ParameterName;
+                        SchParameter.Text := ParameterValue;
+                        SchComponent.AddSchObject(SchParameter);
+                        CopiedParameterNames.Add(UpperCase(ParameterName));
+                    end;
                 end;
 
                 SourceParameter := ParameterIterator.NextSchObject;

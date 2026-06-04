@@ -1149,6 +1149,8 @@ begin
         // a visible part-number/comment text primitive unless explicitly added.
         SchComponent.LibReference := SymbolName;
         SchComponent.ComponentDescription := Description;
+        if (SchComponent.Comment <> Nil) then
+            SchComponent.Comment.Text := CommentText;
         if (DesignatorText <> '') then
             SchComponent.Designator.Text := DesignatorText
         else if (ReferenceComponent <> Nil) then

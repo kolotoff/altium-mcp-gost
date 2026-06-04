@@ -113,7 +113,7 @@ Parameter=TU|<technical_specification_or_blank>
 Parameter=AlternateManufacturer|<approved_drop_in_alternate_manufacturer_or_blank>
 Parameter=AlternatePartNumber|<approved_drop_in_alternate_part_number_or_blank>
 Footprint=<primary_footprint_name>
-FootprintLibrary=<pcb_library_name_or_path>
+FootprintLibrary=<pcb_library_file_name>
 PinDescription=<pin_number>|<datasheet_pin_description>
 ```
 
@@ -124,6 +124,7 @@ Standard property rules:
 - `Manufacturer`: exact manufacturer name from the datasheet, vendor catalog, or ordering page. Leave blank only when the target-family reference intentionally keeps it blank or the manufacturer is genuinely unknown.
 - `ValueType`: copy the vocabulary from the target family. Sampled values include `Разъём` for generic connectors, `Разъём USB` for USB connectors, and `Микросхема` for MCU, MPU, interface, isolation, and op-amp symbols. For unusual families such as RF Active, keep the value used by the closest sampled reference instead of inventing a new category.
 - `Description`: concise selection facts only; no manufacturer, part number, generation provenance, or workflow notes.
+- `FootprintLibrary`: use the PCB library file name only, for example `Connector Microcoaxial.PcbLib`. Do not store absolute library paths in schematic symbols unless the user explicitly requests a path.
 - `PartDenotation`: use for a short project/local denotation only when provided by the project or reference family; otherwise keep it blank if the schema contains it.
 - `PartNote`: use for a brief ordering, assembly, or variant note only when useful; otherwise keep it blank.
 - `TU`: use for the applicable technical specification, standard, or document number only when known; otherwise keep it blank.
@@ -267,22 +268,14 @@ For CH334P-style grouped symbols, keep the body top and bottom one 2.5 mm grid s
 
 ## Footprint Parameters
 
-Schematic symbols should carry footprint links as parameters rather than graphical text.
+Schematic symbols should carry footprint model links, not duplicate footprint-selection facts as custom parameters.
 
-Recommended parameter fields:
+Required footprint metadata:
 
 - `Footprint`: primary footprint model name used by the integrated library flow.
-- `Package`: package or connector form factor when useful for selection.
-- `Pitch`: connector contact pitch or package pitch when relevant.
-- `Positions`: connector contact count when relevant.
-- `Rows`: row count for connectors when relevant.
-- `Orientation`: top-entry, side-entry, right-angle, vertical, horizontal, or equivalent vendor wording.
-- `Mounting`: SMT, through-hole, hybrid, locating pegs, mounting pads, or shield tabs when relevant.
-- `StackingHeight`: board-to-board connector stacking height when relevant.
-- `MatingPart`: mating connector family or part when this is critical for board-to-board and wire-to-board selection.
-- `Value`: only when the library family uses it for schematic presentation.
+- `FootprintLibrary`: PCB library file name only, for example `Connector Microcoaxial.PcbLib`.
 
-Keep footprint names and parameters aligned with the PcbLib naming rules in `Footrpint.md` and the README's footprint-description guidance.
+Do not add optional footprint fact parameters such as `Package`, `Pitch`, `Positions`, `Rows`, `Orientation`, `Mounting`, `StackingHeight`, `MatingPart`, or `Value` unless the same-family reference symbol already uses that parameter or the user explicitly requests it. Put selection facts in the symbol `Description` instead.
 
 ## Creation Checklist
 

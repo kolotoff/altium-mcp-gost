@@ -4515,6 +4515,189 @@ begin
     end;
 end;
 
+function ParseSchLibrarySetFootprintLibraryCommand(MoveText: String; var LibraryName, LibraryPath: String): Boolean;
+var
+    Fields     : TStringList;
+begin
+    Result := False;
+    LibraryName := '';
+    LibraryPath := '';
+
+    Fields := TStringList.Create;
+    try
+        Fields.Delimiter := '|';
+        Fields.StrictDelimiter := True;
+        Fields.DelimitedText := Trim(MoveText);
+
+        if Fields.Count < 2 then
+            Exit;
+        if UpperCase(Trim(Fields[0])) <> 'SCH_LIB_SET_FOOTPRINT_LIBRARY' then
+            Exit;
+
+        LibraryName := Trim(Fields[1]);
+        if Fields.Count >= 3 then
+            LibraryPath := Trim(Fields[2]);
+
+        Result := LibraryName <> '';
+    finally
+        Fields.Free;
+    end;
+end;
+
+function FindSchLibrarySetFootprintLibraryCommand(LayerMoves: TStringList; var LibraryName, LibraryPath: String): Boolean;
+var
+    i: Integer;
+begin
+    Result := False;
+    LibraryName := '';
+    LibraryPath := '';
+
+    for i := 0 to LayerMoves.Count - 1 do
+    begin
+        if ParseSchLibrarySetFootprintLibraryCommand(LayerMoves[i], LibraryName, LibraryPath) then
+        begin
+            Result := True;
+            Exit;
+        end;
+    end;
+end;
+
+function SetSchLibraryFootprintLibraryName(LibraryName, LibraryPath: String): String;
+var
+    CurrentLib             : ISch_Lib;
+    ComponentIterator      : ISch_Iterator;
+    ImplementationIterator : ISch_Iterator;
+    SchComponent           : ISch_Component;
+    SchImplementation      : ISch_Implementation;
+    ResultProps            : TStringList;
+    ModifiedArray          : TStringList;
+    ComponentProps         : TStringList;
+    OutputLines            : TStringList;
+    ComponentsSeen         : Integer;
+    ComponentsWithModels   : Integer;
+    ImplementationsSeen    : Integer;
+    ImplementationsModified: Integer;
+    ComponentModified      : Boolean;
+    ServerDoc              : IServerDocument;
+begin
+    ResultProps := TStringList.Create;
+    ModifiedArray := TStringList.Create;
+    OutputLines := TStringList.Create;
+    ComponentsSeen := 0;
+    ComponentsWithModels := 0;
+    ImplementationsSeen := 0;
+    ImplementationsModified := 0;
+
+    try
+        if (Trim(LibraryPath) <> '') then
+        begin
+            if not FileExists(LibraryPath) then
+            begin
+                AddJSONBoolean(ResultProps, 'success', False);
+                AddJSONProperty(ResultProps, 'error', 'Schematic library file not found: ' + LibraryPath);
+                OutputLines.Text := BuildJSONObject(ResultProps);
+                Result := OutputLines.Text;
+                Exit;
+            end;
+
+            ServerDoc := Client.OpenDocument('SchLib', LibraryPath);
+            if ServerDoc = Nil then
+            begin
+                AddJSONBoolean(ResultProps, 'success', False);
+                AddJSONProperty(ResultProps, 'error', 'Failed to open schematic library: ' + LibraryPath);
+                OutputLines.Text := BuildJSONObject(ResultProps);
+                Result := OutputLines.Text;
+                Exit;
+            end;
+            Client.ShowDocument(ServerDoc);
+            Sleep(500);
+        end;
+
+        CurrentLib := SchServer.GetCurrentSchDocument;
+        if (CurrentLib = Nil) or (CurrentLib.ObjectID <> eSchLib) then
+        begin
+            AddJSONBoolean(ResultProps, 'success', False);
+            AddJSONProperty(ResultProps, 'error', 'Please open or focus a schematic library document.');
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := OutputLines.Text;
+            Exit;
+        end;
+
+        if (Trim(LibraryName) = '') then
+        begin
+            AddJSONBoolean(ResultProps, 'success', False);
+            AddJSONProperty(ResultProps, 'error', 'Footprint library name is empty.');
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := OutputLines.Text;
+            Exit;
+        end;
+
+        ComponentIterator := CurrentLib.SchLibIterator_Create;
+        try
+            ComponentIterator.AddFilter_ObjectSet(MkSet(eSchComponent));
+            SchComponent := ComponentIterator.FirstSchObject;
+            while (SchComponent <> Nil) do
+            begin
+                ComponentsSeen := ComponentsSeen + 1;
+                ComponentModified := False;
+
+                ImplementationIterator := SchComponent.SchIterator_Create;
+                try
+                    ImplementationIterator.AddFilter_ObjectSet(MkSet(eImplementation));
+                    SchImplementation := ImplementationIterator.FirstSchObject;
+                    while (SchImplementation <> Nil) do
+                    begin
+                        ImplementationsSeen := ImplementationsSeen + 1;
+                        if UpperCase(SchImplementation.ModelType) = 'PCBLIB' then
+                        begin
+                            SchImplementation.ClearAllDatafileLinks;
+                            SchImplementation.AddDataFileLink(SchImplementation.ModelName, LibraryName, 'PCBLIB');
+                            ImplementationsModified := ImplementationsModified + 1;
+                            ComponentModified := True;
+                        end;
+                        SchImplementation := ImplementationIterator.NextSchObject;
+                    end;
+                finally
+                    SchComponent.SchIterator_Destroy(ImplementationIterator);
+                end;
+
+                if ComponentModified then
+                begin
+                    ComponentsWithModels := ComponentsWithModels + 1;
+                    ComponentProps := TStringList.Create;
+                    try
+                        AddJSONProperty(ComponentProps, 'name', SchComponent.LibReference);
+                        AddJSONProperty(ComponentProps, 'footprint_library', LibraryName);
+                        ModifiedArray.Add(BuildJSONObject(ComponentProps, 1));
+                    finally
+                        ComponentProps.Free;
+                    end;
+                end;
+
+                SchComponent := ComponentIterator.NextSchObject;
+            end;
+        finally
+            CurrentLib.SchIterator_Destroy(ComponentIterator);
+        end;
+
+        AddJSONBoolean(ResultProps, 'success', True);
+        AddJSONProperty(ResultProps, 'library_name', ExtractFileName(CurrentLib.DocumentName));
+        AddJSONProperty(ResultProps, 'footprint_library', LibraryName);
+        AddJSONInteger(ResultProps, 'components_seen', ComponentsSeen);
+        AddJSONInteger(ResultProps, 'components_with_pcblib_models', ComponentsWithModels);
+        AddJSONInteger(ResultProps, 'implementations_seen', ImplementationsSeen);
+        AddJSONInteger(ResultProps, 'implementations_modified', ImplementationsModified);
+        ResultProps.Add(BuildJSONArray(ModifiedArray, 'modified_components'));
+
+        OutputLines.Text := BuildJSONObject(ResultProps);
+        Result := OutputLines.Text;
+    finally
+        OutputLines.Free;
+        ModifiedArray.Free;
+        ResultProps.Free;
+    end;
+end;
+
 function OpenPCBLibraryByPath(LibraryPath: String): String;
 var
     PcbLib            : IPCB_Library;
@@ -8901,6 +9084,8 @@ var
     DescriptionDumpFootprintName : String;
     OpenLibraryPath    : String;
     StatsDumpFootprintName : String;
+    SchFootprintLibraryName : String;
+    SchFootprintLibraryPath : String;
     SetDescriptionFootprintNames : TStringList;
     SetDescriptionTexts : TStringList;
     BatchCreateDataFileName : String;
@@ -9012,6 +9197,12 @@ begin
     if FindPCBLibraryOpenCommand(LayerMoves, OpenLibraryPath) then
     begin
         Result := OpenPCBLibraryByPath(OpenLibraryPath);
+        Exit;
+    end;
+
+    if FindSchLibrarySetFootprintLibraryCommand(LayerMoves, SchFootprintLibraryName, SchFootprintLibraryPath) then
+    begin
+        Result := SetSchLibraryFootprintLibraryName(SchFootprintLibraryName, SchFootprintLibraryPath);
         Exit;
     end;
 

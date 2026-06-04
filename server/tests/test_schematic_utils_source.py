@@ -57,19 +57,41 @@ class SchematicUtilsSourceTest(unittest.TestCase):
             "Component Comment is set directly and must not be copied again as a custom parameter.",
         )
 
-    def test_generated_component_comment_primitive_is_not_populated_by_default(self):
+    def test_generated_component_comment_is_set_from_metadata(self):
         source_path = Path(__file__).resolve().parents[1] / "AltiumScript" / "schematic_utils.pas"
         source = source_path.read_text(encoding="utf-8")
 
-        self.assertNotIn(
+        self.assertIn(
             "SchComponent.Comment.Text := CommentText",
             source,
-            "Generated symbols must not create/populate the default part-number Comment primitive.",
+            "Generated symbols must set the component Comment so =Comment parameters resolve correctly.",
         )
         self.assertNotIn(
             "SchComponent.Comment.IsHidden := True",
             source,
-            "Do not hide the default Comment primitive as a workaround; avoid populating it by default.",
+            "Do not hide the default Comment primitive as a workaround.",
+        )
+
+
+class PcbUtilsSourceTest(unittest.TestCase):
+    def test_schlib_footprint_library_patch_uses_library_name_only(self):
+        source_path = Path(__file__).resolve().parents[1] / "AltiumScript" / "pcb_utils.pas"
+        source = source_path.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "SCH_LIB_SET_FOOTPRINT_LIBRARY",
+            source,
+            "SchLib footprint library patch command must stay available through the maintenance channel.",
+        )
+        self.assertIn(
+            "FindSchLibrarySetFootprintLibraryCommand(LayerMoves, SchFootprintLibraryName, SchFootprintLibraryPath)",
+            source,
+            "The SchLib patch command must dispatch before normal PCB-library maintenance.",
+        )
+        self.assertIn(
+            "SchImplementation.AddDataFileLink(SchImplementation.ModelName, LibraryName, 'PCBLIB')",
+            source,
+            "Footprint links must use the provided library file name, not an absolute path.",
         )
 
 

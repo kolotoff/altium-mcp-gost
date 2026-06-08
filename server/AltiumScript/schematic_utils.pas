@@ -863,6 +863,8 @@ var
     RequiredSideSectionWidthGrid : Integer;
     PinNameWidthGrid : Integer;
     HasPins          : Boolean;
+    CurrentView      : IServerDocumentView;
+    ServerDocument   : IServerDocument;
     ResultProps      : TStringList;
     Description      : String;
     CenterLabel      : String;
@@ -1689,20 +1691,32 @@ begin
         end;
     end;
 
-    // Replace the old component only after all reference style objects have
-    // been replicated into the new component.
-    if (ExistingComponentToRemove <> Nil) then
-        CurrentLib.RemoveSchComponent(ExistingComponentToRemove);
+    SchServer.ProcessControl.PreProcess(CurrentLib, '');
+    try
+        // Replace the old component only after all reference style objects have
+        // been replicated into the new component.
+        if (ExistingComponentToRemove <> Nil) then
+            CurrentLib.RemoveSchComponent(ExistingComponentToRemove);
 
-    // Add the component to the library
-    CurrentLib.AddSchComponent(SchComponent);
+        // Add the component to the library
+        CurrentLib.AddSchComponent(SchComponent);
 
-    // Send a system notification that a new component has been added to the library
-    SchServer.RobotManager.SendMessage(nil, c_BroadCast, SCHM_PrimitiveRegistration, SchComponent.I_ObjectAddress);
-    CurrentLib.CurrentSchComponent := SchComponent;
+        // Send a system notification that a new component has been added to the library
+        SchServer.RobotManager.SendMessage(nil, c_BroadCast, SCHM_PrimitiveRegistration, SchComponent.I_ObjectAddress);
+        CurrentLib.CurrentSchComponent := SchComponent;
+    finally
+        SchServer.ProcessControl.PostProcess(CurrentLib, '');
+    end;
 
     // Refresh library
     CurrentLib.GraphicallyInvalidate;
+    CurrentView := Client.GetCurrentView;
+    if (CurrentView <> Nil) then
+    begin
+        ServerDocument := CurrentView.OwnerDocument;
+        if (ServerDocument <> Nil) then
+            ServerDocument.Modified := True;
+    end;
 
     // Create result JSON
     ResultProps := TStringList.Create;
@@ -1711,6 +1725,8 @@ begin
         AddJSONProperty(ResultProps, 'component_name', SymbolName);
         AddJSONInteger(ResultProps, 'pins_count', PinCount);
         AddJSONInteger(ResultProps, 'part_count', PartCount);
+        AddJSONBoolean(ResultProps, 'document_saved', False);
+        AddJSONBoolean(ResultProps, 'document_dirty', True);
 
         // Build final JSON
         OutputLines := TStringList.Create;

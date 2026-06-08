@@ -150,7 +150,7 @@ The server provides several tools to interact with Altium Designer:
 - `run_output_jobs`: Pass a list of output job container names from the currently open .OutJob to run any number of them. `.OutJob` must be the currently focused document.
 
 ### Document Utilities
-- `save_current_document`: Save the currently focused Altium document.
+- `save_current_document`: Save the currently focused Altium document. Requires `user_requested=true`; use it only when the user explicitly asks to save.
 
 ### Component Information
 - `get_all_designators`: Get a list of all component designators in the current board
@@ -390,7 +390,7 @@ If normal `Ctrl+S` still shows the warning after recovery, save through Altium's
 ```text
 move_pcb_library_mechanical_layers(
   exclude_footprint_names=[],
-  layer_moves=["SAVE_DOCUMENT"]
+  layer_moves=["SAVE_DOCUMENT_CONFIRMED"]
 )
 ```
 

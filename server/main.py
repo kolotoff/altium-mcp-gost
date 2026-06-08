@@ -668,6 +668,8 @@ async def create_schematic_symbol(ctx: Context, symbol_name: str, description: s
     r"""
     Before executing, run get_symbol_placement_rules first.
     Create a new schematic symbol in the current library with the specified pins
+    This tool does not save the schematic library document; leave it dirty for
+    user inspection unless the user explicitly asks to save.
     Instructions: pins should be grouped together via function and only placed on
                   the left and right side in 100 mil increments
 
@@ -1602,13 +1604,26 @@ async def run_output_jobs(ctx: Context, container_names: list) -> str:
     return json_dumps(result_data, indent=2)
 
 @mcp.tool()
-async def save_current_document(ctx: Context) -> str:
+async def save_current_document(ctx: Context, user_requested: bool = False) -> str:
     """
     Save the currently focused Altium document.
+    Set user_requested=true only when the current user message explicitly asks
+    to save. Calls without that confirmation are refused so create/update
+    workflows cannot accidentally save inspection changes.
+
+    Args:
+        user_requested (bool): Must be true for the save to run.
 
     Returns:
         str: JSON object with result
     """
+    if not user_requested:
+        logger.warning("Refusing to save current document without explicit user_requested=true")
+        return json_dumps({
+            "success": False,
+            "error": "Refusing to save without explicit user_requested=true"
+        })
+
     logger.info("Saving current Altium document")
 
     response = await altium_bridge.execute_command("save_current_document", {})
@@ -1679,6 +1694,8 @@ async def create_pcb_footprint(ctx: Context, footprint_name: str, description: s
     """
     Create a new PCB footprint in the currently active PcbLib document.
     The PcbLib (e.g. Discrete.PcbLib) must be the focused document in Altium.
+    This tool does not save the PCB library document; leave it dirty for user
+    inspection unless the user explicitly asks to save.
 
     Pad format: each element is "pad_number|x_mm|y_mm|width_mm|height_mm|shape"
                 shape options: Rect (default), Round, Oval

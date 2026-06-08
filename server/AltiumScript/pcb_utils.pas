@@ -1591,12 +1591,15 @@ end;
 function FindSaveDocumentCommand(LayerMoves: TStringList): Boolean;
 var
     i: Integer;
+    MoveText: String;
 begin
     Result := False;
 
     for i := 0 to LayerMoves.Count - 1 do
     begin
-        if UpperCase(Trim(LayerMoves[i])) = 'SAVE_DOCUMENT' then
+        MoveText := UpperCase(Trim(LayerMoves[i]));
+        if (MoveText = 'SAVE_DOCUMENT_CONFIRMED') or
+           (MoveText = 'SAVE_DOCUMENT|CONFIRMED') then
         begin
             Result := True;
             Exit;
@@ -9597,6 +9600,8 @@ var
     FieldStart  : Integer;
     Fields      : TStringList;
     SilkLayer   : TLayer;
+    CurrentView  : IServerDocumentView;
+    ServerDocument : IServerDocument;
 begin
     PcbLib := PCBServer.GetCurrentPCBLibrary;
     if PcbLib = nil then
@@ -9613,15 +9618,17 @@ begin
     SilkLayer := String2Layer('Top Overlay');
 
     try
-        LibComp := PCBServer.CreatePCBLibComp;
-        LibComp.Name := FootprintName;
+        PCBServer.PreProcess;
+        try
+            LibComp := PCBServer.CreatePCBLibComp;
+            LibComp.Name := FootprintName;
 
-        PcbLib.RegisterComponent(LibComp);
+            PcbLib.RegisterComponent(LibComp);
 
-        for i := 0 to PadsList.Count - 1 do
-        begin
-            PadData := Trim(PadsList[i]);
-            if (PadData = '') then continue;
+            for i := 0 to PadsList.Count - 1 do
+            begin
+                PadData := Trim(PadsList[i]);
+                if (PadData = '') then continue;
 
             // Parse pipe-delimited fields manually
             Fields.Clear;
@@ -9674,8 +9681,8 @@ begin
             if (XMM + WMM/2) > MaxX then MaxX := XMM + WMM/2;
             if (YMM + HMM/2) > MaxY then MaxY := YMM + HMM/2;
 
-            PadCount := PadCount + 1;
-        end;
+                PadCount := PadCount + 1;
+            end;
 
         // Compute courtyard extents
         if (CourtyardXMM > 0) and (CourtyardYMM > 0) then
@@ -9759,16 +9766,28 @@ begin
         LibComp.AddPCBObject(Track);
         PCBServer.SendMessageToRobots(Track.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
 
-        // Register with library board, navigate, and refresh
-        PCBServer.SendMessageToRobots(PcbLib.Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, LibComp.I_ObjectAddress);
-        PcbLib.CurrentComponent := LibComp;
-        PcbLib.Board.ViewManager_FullUpdate;
+            // Register with library board, navigate, and refresh
+            PCBServer.SendMessageToRobots(PcbLib.Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, LibComp.I_ObjectAddress);
+            PcbLib.CurrentComponent := LibComp;
+            PcbLib.Board.ViewManager_FullUpdate;
+        finally
+            PCBServer.PostProcess;
+        end;
 
         AddJSONBoolean(ResultProps, 'success', True);
         AddJSONProperty(ResultProps, 'footprint_name', FootprintName);
         AddJSONInteger(ResultProps, 'pad_count', PadCount);
         AddJSONNumber(ResultProps, 'courtyard_width_mm', CrtX2 - CrtX1);
         AddJSONNumber(ResultProps, 'courtyard_height_mm', CrtY2 - CrtY1);
+        AddJSONBoolean(ResultProps, 'document_saved', False);
+        AddJSONBoolean(ResultProps, 'document_dirty', True);
+        CurrentView := Client.GetCurrentView;
+        if (CurrentView <> Nil) then
+        begin
+            ServerDocument := CurrentView.OwnerDocument;
+            if (ServerDocument <> Nil) then
+                ServerDocument.Modified := True;
+        end;
 
         OutputLines := TStringList.Create;
         try

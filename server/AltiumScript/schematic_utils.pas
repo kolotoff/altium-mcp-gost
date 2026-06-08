@@ -312,29 +312,34 @@ var
     SchComponent      : ISch_Component;
     PinIterator       : ISch_Iterator;
     LineIterator      : ISch_Iterator;
+    PolylineIterator  : ISch_Iterator;
     RectIterator      : ISch_Iterator;
     LabelIterator     : ISch_Iterator;
     ParameterIterator : ISch_Iterator;
     Pin               : ISch_Pin;
     SchLine           : ISch_Line;
+    SchPolyline       : ISch_Polyline;
     SchRect           : ISch_Rectangle;
     SchLabel          : ISch_Label;
     Parameter         : ISch_Parameter;
     Props             : TStringList;
     PinProps          : TStringList;
     LineProps         : TStringList;
+    VertexProps       : TStringList;
     RectProps         : TStringList;
     LabelProps        : TStringList;
     ParameterProps    : TStringList;
     PinsArray         : TStringList;
     LinesArray        : TStringList;
+    VerticesArray     : TStringList;
     RectanglesArray   : TStringList;
     LabelsArray       : TStringList;
     ParametersArray   : TStringList;
     FontsArray        : TStringList;
     UsedFontIds       : TStringList;
     OutputLines       : TStringList;
-    I                 : Integer;
+    I, VertexIndex    : Integer;
+    VertexLocation    : TLocation;
 begin
     Result := '';
 
@@ -371,7 +376,7 @@ begin
         AddJSONProperty(Props, 'library_name', ExtractFileName(CurrentLib.DocumentName));
         AddJSONProperty(Props, 'component_name', SchComponent.LibReference);
         AddJSONProperty(Props, 'description', SchComponent.ComponentDescription);
-        AddJSONProperty(Props, 'primitive_scope', 'pins, rectangles, lines, labels, parameters');
+        AddJSONProperty(Props, 'primitive_scope', 'pins, rectangles, lines, polylines, labels, parameters');
         AddJSONProperty(Props, 'body_rectangle_style_note', 'Rectangle records expose line_width for the border stroke, color/outline_color for the border colour, area_color/fill_color for the fill colour, and is_solid for whether the fill is active. GOST generated body rectangles use eSmall line_width, black outline_color 0, light gray fill_color #F8F8F8 / 16316664, and is_solid true.');
         AddJSONProperty(Props, 'pin_font_note', 'The legacy ISch_Pin API exposes pin geometry and visibility, but not separate pin-name/pin-designator FontId fields. create_schematic_symbol preserves those by replicating the active reference pin.');
         AddJSONInteger(Props, 'part_count', SchComponent.PartCount);
@@ -476,6 +481,46 @@ begin
             end;
         finally
             SchComponent.SchIterator_Destroy(LineIterator);
+        end;
+
+        PolylineIterator := SchComponent.SchIterator_Create;
+        try
+            PolylineIterator.AddFilter_ObjectSet(MkSet(ePolyline));
+            SchPolyline := PolylineIterator.FirstSchObject;
+            while (SchPolyline <> Nil) do
+            begin
+                LineProps := TStringList.Create;
+                VerticesArray := TStringList.Create;
+                try
+                    AddJSONProperty(LineProps, 'kind', 'polyline');
+                    AddJSONInteger(LineProps, 'vertices_count', SchPolyline.VerticesCount);
+                    AddJSONInteger(LineProps, 'line_width', SchPolyline.LineWidth);
+                    AddJSONInteger(LineProps, 'line_style', SchPolyline.LineStyle);
+                    AddJSONInteger(LineProps, 'color', SchPolyline.Color);
+                    AddJSONInteger(LineProps, 'owner_part_id', SchPolyline.OwnerPartId);
+                    AddJSONInteger(LineProps, 'owner_part_display_mode', SchPolyline.OwnerPartDisplayMode);
+                    for VertexIndex := 1 to SchPolyline.VerticesCount do
+                    begin
+                        VertexLocation := SchPolyline.Vertex[VertexIndex];
+                        VertexProps := TStringList.Create;
+                        try
+                            AddJSONInteger(VertexProps, 'index', VertexIndex);
+                            AddLocationFields(VertexProps, VertexLocation.X, VertexLocation.Y);
+                            VerticesArray.Add(BuildJSONObject(VertexProps, 1));
+                        finally
+                            VertexProps.Free;
+                        end;
+                    end;
+                    LineProps.Add('"vertices": ' + BuildJSONArray(VerticesArray));
+                    LinesArray.Add(BuildJSONObject(LineProps, 1));
+                finally
+                    VerticesArray.Free;
+                    LineProps.Free;
+                end;
+                SchPolyline := PolylineIterator.NextSchObject;
+            end;
+        finally
+            SchComponent.SchIterator_Destroy(PolylineIterator);
         end;
 
         LabelIterator := SchComponent.SchIterator_Create;
@@ -827,6 +872,9 @@ var
     ReferenceLine1   : ISch_Line;
     ReferenceLine2   : ISch_Line;
     ReferenceHorizontalLine : ISch_Line;
+    ReferencePolyline1 : ISch_Polyline;
+    ReferencePolyline2 : ISch_Polyline;
+    ReferenceHorizontalPolyline : ISch_Polyline;
     ReferenceLabel   : ISch_Label;
     ReferenceParameter : ISch_Parameter;
     SourceParameter  : ISch_Parameter;
@@ -840,11 +888,15 @@ var
     SchPin           : ISch_Pin;
     SchParameter      : ISch_Parameter;
     SchLine          : ISch_Line;
+    SchPolyline      : ISch_Polyline;
     SchLabel         : ISch_Label;
     R                : ISch_Rectangle;
     LabelRect        : TCoordRect;
+    PolylineStart    : TLocation;
+    PolylineEnd      : TLocation;
     I, J, PinCount   : Integer;
     ReferenceLineCount : Integer;
+    ReferencePolylineCount : Integer;
     PinData          : TStringList;
     PinName, PinNum  : String;
     PinType          : String;
@@ -857,6 +909,7 @@ var
     MinX, MaxX, MinY, MaxY : Integer;
     RefMinX, RefMaxX : Integer;
     RefLine1X, RefLine2X : Integer;
+    ReferenceDivider1X, ReferenceDivider2X : Integer;
     Divider1X, Divider2X : Integer;
     CenterLabelX, CenterLabelY : Integer;
     DelimiterY, DelimiterX1, DelimiterX2 : Integer;
@@ -900,6 +953,7 @@ var
     VerticalSeparatorsEnabled : Boolean;
     HasLeftSidePins  : Boolean;
     HasRightSidePins : Boolean;
+    HasReferenceDividerGeometry : Boolean;
 begin
     // Check if we have a schematic library document
     CurrentLib := SchServer.GetCurrentSchDocument;
@@ -918,8 +972,15 @@ begin
     ReferenceLine1 := Nil;
     ReferenceLine2 := Nil;
     ReferenceHorizontalLine := Nil;
+    ReferencePolyline1 := Nil;
+    ReferencePolyline2 := Nil;
+    ReferenceHorizontalPolyline := Nil;
     ReferenceLabel := Nil;
     ReferenceParameter := Nil;
+    HasReferenceDividerGeometry := False;
+    ReferenceDivider1X := 0;
+    ReferenceDivider2X := 0;
+    GridSizeMM := 2.5;
     if (ReferenceComponent <> Nil) then
     begin
         StyleIterator := ReferenceComponent.SchIterator_Create;
@@ -964,6 +1025,51 @@ begin
             ReferenceComponent.SchIterator_Destroy(StyleIterator);
         end;
 
+        if (ReferenceLine1 <> Nil) and (ReferenceLine2 <> Nil) then
+        begin
+            ReferenceDivider1X := CoordToGridIndex(ReferenceLine1.Location.X, GridSizeMM);
+            ReferenceDivider2X := CoordToGridIndex(ReferenceLine2.Location.X, GridSizeMM);
+            HasReferenceDividerGeometry := True;
+        end;
+
+        StyleIterator := ReferenceComponent.SchIterator_Create;
+        try
+            StyleIterator.AddFilter_ObjectSet(MkSet(ePolyline));
+            ReferencePolylineCount := 0;
+            SchPolyline := StyleIterator.FirstSchObject;
+            while (SchPolyline <> Nil) do
+            begin
+                if (SchPolyline.VerticesCount >= 2) then
+                begin
+                    PolylineStart := SchPolyline.Vertex[1];
+                    PolylineEnd := SchPolyline.Vertex[2];
+                    if (Round(CoordToMils(PolylineStart.X)) = Round(CoordToMils(PolylineEnd.X))) then
+                    begin
+                        ReferencePolylineCount := ReferencePolylineCount + 1;
+                        if (ReferencePolylineCount = 1) then
+                            ReferencePolyline1 := SchPolyline
+                        else if (ReferencePolylineCount = 2) then
+                            ReferencePolyline2 := SchPolyline;
+                    end
+                    else if (Round(CoordToMils(PolylineStart.Y)) = Round(CoordToMils(PolylineEnd.Y))) and
+                            (ReferenceHorizontalPolyline = Nil) then
+                    begin
+                        ReferenceHorizontalPolyline := SchPolyline;
+                    end;
+                end;
+                SchPolyline := StyleIterator.NextSchObject;
+            end;
+        finally
+            ReferenceComponent.SchIterator_Destroy(StyleIterator);
+        end;
+
+        if (not HasReferenceDividerGeometry) and (ReferencePolyline1 <> Nil) and (ReferencePolyline2 <> Nil) then
+        begin
+            ReferenceDivider1X := CoordToGridIndex(ReferencePolyline1.Vertex[1].X, GridSizeMM);
+            ReferenceDivider2X := CoordToGridIndex(ReferencePolyline2.Vertex[1].X, GridSizeMM);
+            HasReferenceDividerGeometry := True;
+        end;
+
         StyleIterator := ReferenceComponent.SchIterator_Create;
         try
             StyleIterator.AddFilter_ObjectSet(MkSet(eLabel));
@@ -989,8 +1095,7 @@ begin
     ManufacturerValue := '';
     FootprintName := '';
     FootprintLibraryName := '';
-    VerticalSeparatorsEnabled := (ReferenceLine1 <> Nil) and (ReferenceLine2 <> Nil);
-    GridSizeMM := 2.5;
+    VerticalSeparatorsEnabled := HasReferenceDividerGeometry;
     SideSectionWidthGrid := 0;
     RefSideSectionWidthGrid := 0;
     ParameterOverrides := TStringList.Create;
@@ -1277,12 +1382,12 @@ begin
             Divider1X := MinX + DesiredSideSectionWidthGrid;
             Divider2X := MaxX - DesiredSideSectionWidthGrid;
         end
-        else if (ReferenceLine1 <> Nil) and (ReferenceLine2 <> Nil) and (ReferenceRect <> Nil) then
+        else if HasReferenceDividerGeometry and (ReferenceRect <> Nil) then
         begin
             RefMinX := Min(CoordToGridIndex(ReferenceRect.Location.X, GridSizeMM), CoordToGridIndex(ReferenceRect.Corner.X, GridSizeMM));
             RefMaxX := Max(CoordToGridIndex(ReferenceRect.Location.X, GridSizeMM), CoordToGridIndex(ReferenceRect.Corner.X, GridSizeMM));
-            RefLine1X := CoordToGridIndex(ReferenceLine1.Location.X, GridSizeMM);
-            RefLine2X := CoordToGridIndex(ReferenceLine2.Location.X, GridSizeMM);
+            RefLine1X := ReferenceDivider1X;
+            RefLine2X := ReferenceDivider2X;
             if (RefLine1X > RefLine2X) then
             begin
                 Divider1X := RefLine1X;
@@ -1329,8 +1434,17 @@ begin
             begin
                 if (ReferenceLine1 = Nil) and (ReferenceRect <> Nil) then
                 begin
-                    SchLine.Color := ReferenceRect.Color;
-                    SchLine.LineWidth := ReferenceRect.LineWidth;
+                    if (ReferencePolyline1 <> Nil) then
+                    begin
+                        SchLine.Color := ReferencePolyline1.Color;
+                        SchLine.LineWidth := ReferencePolyline1.LineWidth;
+                        SchLine.LineStyle := ReferencePolyline1.LineStyle;
+                    end
+                    else
+                    begin
+                        SchLine.Color := ReferenceRect.Color;
+                        SchLine.LineWidth := ReferenceRect.LineWidth;
+                    end;
                 end;
                 SchLine.Location := Point(GridIndexToCoord(Divider1X, GridSizeMM), GridIndexToCoord(MinY - 1, GridSizeMM));
                 SchLine.Corner := Point(GridIndexToCoord(Divider1X, GridSizeMM), GridIndexToCoord(MaxY + 1, GridSizeMM));
@@ -1348,8 +1462,17 @@ begin
             begin
                 if (ReferenceLine2 = Nil) and (ReferenceRect <> Nil) then
                 begin
-                    SchLine.Color := ReferenceRect.Color;
-                    SchLine.LineWidth := ReferenceRect.LineWidth;
+                    if (ReferencePolyline2 <> Nil) then
+                    begin
+                        SchLine.Color := ReferencePolyline2.Color;
+                        SchLine.LineWidth := ReferencePolyline2.LineWidth;
+                        SchLine.LineStyle := ReferencePolyline2.LineStyle;
+                    end
+                    else
+                    begin
+                        SchLine.Color := ReferenceRect.Color;
+                        SchLine.LineWidth := ReferenceRect.LineWidth;
+                    end;
                 end;
                 SchLine.Location := Point(GridIndexToCoord(Divider2X, GridSizeMM), GridIndexToCoord(MinY - 1, GridSizeMM));
                 SchLine.Corner := Point(GridIndexToCoord(Divider2X, GridSizeMM), GridIndexToCoord(MaxY + 1, GridSizeMM));
@@ -1405,7 +1528,13 @@ begin
                 SchLine := SchServer.SchObjectFactory(eLine, eCreate_Default);
             if (SchLine <> Nil) then
             begin
-                if (ReferenceHorizontalLine = Nil) and (ReferenceLine1 = Nil) and (ReferenceRect <> Nil) then
+                if (ReferenceHorizontalLine = Nil) and (ReferenceLine1 = Nil) and (ReferenceHorizontalPolyline <> Nil) then
+                begin
+                    SchLine.Color := ReferenceHorizontalPolyline.Color;
+                    SchLine.LineWidth := ReferenceHorizontalPolyline.LineWidth;
+                    SchLine.LineStyle := ReferenceHorizontalPolyline.LineStyle;
+                end
+                else if (ReferenceHorizontalLine = Nil) and (ReferenceLine1 = Nil) and (ReferenceRect <> Nil) then
                 begin
                     SchLine.Color := ReferenceRect.Color;
                     SchLine.LineWidth := ReferenceRect.LineWidth;
@@ -1430,7 +1559,13 @@ begin
                     SchLine := SchServer.SchObjectFactory(eLine, eCreate_Default);
                 if (SchLine <> Nil) then
                 begin
-                    if (ReferenceHorizontalLine = Nil) and (ReferenceLine1 = Nil) and (ReferenceRect <> Nil) then
+                    if (ReferenceHorizontalLine = Nil) and (ReferenceLine1 = Nil) and (ReferenceHorizontalPolyline <> Nil) then
+                    begin
+                        SchLine.Color := ReferenceHorizontalPolyline.Color;
+                        SchLine.LineWidth := ReferenceHorizontalPolyline.LineWidth;
+                        SchLine.LineStyle := ReferenceHorizontalPolyline.LineStyle;
+                    end
+                    else if (ReferenceHorizontalLine = Nil) and (ReferenceLine1 = Nil) and (ReferenceRect <> Nil) then
                     begin
                         SchLine.Color := ReferenceRect.Color;
                         SchLine.LineWidth := ReferenceRect.LineWidth;

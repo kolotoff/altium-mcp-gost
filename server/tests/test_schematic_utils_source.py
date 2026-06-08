@@ -72,6 +72,28 @@ class SchematicUtilsSourceTest(unittest.TestCase):
             "Do not hide the default Comment primitive as a workaround.",
         )
 
+    def test_reference_dividers_include_polylines(self):
+        source_path = Path(__file__).resolve().parents[1] / "AltiumScript" / "schematic_utils.pas"
+        source = source_path.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "StyleIterator.AddFilter_ObjectSet(MkSet(ePolyline))",
+            source,
+            "Reference divider discovery must include polyline primitives used by TXS0102DCTT.",
+        )
+        self.assertIn(
+            "VerticalSeparatorsEnabled := HasReferenceDividerGeometry",
+            source,
+            "Polyline divider geometry should enable generated vertical separators by default.",
+        )
+
+    def test_mcp_docs_expose_center_label_metadata(self):
+        source_path = Path(__file__).resolve().parents[1] / "main.py"
+        source = source_path.read_text(encoding="utf-8")
+
+        self.assertIn("CenterLabel=<functional text>", source)
+        self.assertIn("CenterLabelPosition=TOPCENTER", source)
+
 
 class PcbUtilsSourceTest(unittest.TestCase):
     def test_schlib_footprint_library_patch_uses_library_name_only(self):

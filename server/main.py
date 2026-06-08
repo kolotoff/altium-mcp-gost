@@ -698,6 +698,11 @@ async def create_schematic_symbol(ctx: Context, symbol_name: str, description: s
                                GroupDelimiter=RIGHT|-17.5, GroupDelimiter=BOTH|-42.5,
                                GroupDelimiter=FULL|-20.0, or GroupDelimiter=CENTER|-20.0.
                                GroupDelimiter Y values are in mm and snap to the 2.5 mm grid.
+                               CenterLabel=<functional text> adds centered graphical label text,
+                               split into two centered lines at a word break when needed.
+                               CenterLabelPosition=TOPCENTER places it near the body top; CENTER
+                               places it in the middle section between vertical dividers.
+                               VerticalSeparators=True forces left/center/right divider lines.
                                Use Designator=XP? or similar to override the copied reference designator.
                                Component properties and model links may also be populated with
                                Comment=<symbol_name>, Manufacturer=<name>,

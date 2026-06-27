@@ -537,6 +537,70 @@ begin
     end;
 end;
 
+// Extract the layout duplicator copied-net repair logic
+function ExecuteLayoutDuplicatorRepairCopiedNets(RequestData: TStringList): String;
+var
+    ParamValue: String;
+    i: Integer;
+    SourceList, DestList: TStringList;
+begin
+    SourceList := TStringList.Create;
+    DestList := TStringList.Create;
+
+    try
+        for i := 0 to RequestData.Count - 1 do
+        begin
+            if (Pos('"source_designators"', RequestData[i]) > 0) then
+            begin
+                i := i + 1;
+
+                while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
+                begin
+                    ParamValue := RequestData[i];
+                    ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
+                    ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
+                    ParamValue := Trim(ParamValue);
+
+                    if (ParamValue <> '') and (ParamValue <> '[') then
+                        SourceList.Add(ParamValue);
+
+                    i := i + 1;
+                end;
+            end
+            else if (Pos('"destination_designators"', RequestData[i]) > 0) then
+            begin
+                i := i + 1;
+
+                while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
+                begin
+                    ParamValue := RequestData[i];
+                    ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
+                    ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
+                    ParamValue := Trim(ParamValue);
+
+                    if (ParamValue <> '') and (ParamValue <> '[') then
+                        DestList.Add(ParamValue);
+
+                    i := i + 1;
+                end;
+            end
+        end;
+
+        if (SourceList.Count > 0) and (DestList.Count > 0) then
+        begin
+            Result := RepairLayoutDuplicatorCopiedNets(SourceList, DestList);
+        end
+        else
+        begin
+            ShowMessage('Error: Source or destination lists are empty');
+            Result := '{"success": false, "error": "Source or destination lists are empty"}';
+        end;
+    finally
+        SourceList.Free;
+        DestList.Free;
+    end;
+end;
+
 // Extract the layout duplicator apply logic
 function ExecuteLayoutDuplicatorApply(RequestData: TStringList): String;
 var
@@ -961,6 +1025,8 @@ begin
             Result := ExecuteMoveSelectedPadsAndTouchingVias(RequestData);
         'layout_duplicator':
             Result := GetLayoutDuplicatorComponents(True);            
+        'layout_duplicator_repair_copied_nets':
+            Result := ExecuteLayoutDuplicatorRepairCopiedNets(RequestData);
         'layout_duplicator_apply':
             Result := ExecuteLayoutDuplicatorApply(RequestData);            
         'get_pcb_rules':

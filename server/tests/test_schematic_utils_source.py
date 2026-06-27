@@ -283,5 +283,142 @@ class PcbLayoutDuplicatorSourceTest(unittest.TestCase):
         )
 
 
+class PcbLibraryCustomPadSourceTest(unittest.TestCase):
+    def test_selected_pad_join_uses_custom_pad_contour_conversion(self):
+        source_path = Path(__file__).resolve().parents[1] / "AltiumScript" / "pcb_utils.pas"
+        source = source_path.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "PCB_LIB_JOIN_SELECTED_PADS_CUSTOM",
+            source,
+            "Selected pad joining should be exposed through the PcbLib command dispatcher.",
+        )
+        self.assertIn(
+            "PCB_LIB_JOIN_SELECTED_PADS_CUSTOM_PREPARE",
+            source,
+            "Pad joining needs a separate prepare phase so Altium sees a stable selected outline.",
+        )
+        self.assertIn(
+            "PCB_LIB_JOIN_SELECTED_PADS_CUSTOM_CONVERT",
+            source,
+            "Pad joining needs a separate convert phase for the editor custom-pad command.",
+        )
+        self.assertIn(
+            "PCB_LIB_JOIN_SELECTED_PADS_CUSTOM_CLEANUP",
+            source,
+            "Pad joining needs a cleanup phase after conversion readback.",
+        )
+        self.assertIn(
+            "PCB_LIB_JOIN_SELECTED_PADS_CUSTOM_REBUILD_SOURCE",
+            source,
+            "Already converted pads need a rebuild-source phase before reconversion.",
+        )
+        self.assertIn(
+            "Client.SendMessage('PCB:CustomPadShape'",
+            source,
+            "Selected pad joining must use Altium's custom pad editor command.",
+        )
+        self.assertIn(
+            "Action=Convert|Object=Track",
+            source,
+            "Selected pad joining must invoke Altium's contour conversion action.",
+        )
+        self.assertIn(
+            "JoinSelectedPadsAsCustomPadShape",
+            source,
+            "Selected pad joining should be implemented as a single custom-shape pad operation.",
+        )
+        self.assertLess(
+            source.index("function JoinSelectedPadsAsCustomPadShape(JoinAction: String): String; forward;"),
+            source.index("function MovePCBLibraryMechanicalLayers"),
+            "DelphiScript dispatcher must see a forward declaration before calling the custom pad join function.",
+        )
+
+        join_start = source.index("function AddJoinCustomPadContourTrack", source.index("function MoveComponentsByDesignators"))
+        join_end = source.index("function MoveSelectedViasByOffset", join_start)
+        join_source = source[join_start:join_end]
+
+        self.assertIn(
+            "Board.AddPCBObject(Track)",
+            join_source,
+            "Temporary contour tracks must be registered through the active PcbLib board.",
+        )
+        self.assertIn(
+            "Board.AddPCBObject(Arc)",
+            join_source,
+            "Temporary contour arcs must be registered through the active PcbLib board.",
+        )
+        self.assertNotIn(
+            "eRegionObject",
+            join_source,
+            "Joining selected pads must not create a separate copper region.",
+        )
+        self.assertEqual(
+            join_source.count("PCBObjectFactory(ePadObject"),
+            1,
+            "Only the explicit rebuild-source phase may recreate original source pads.",
+        )
+        self.assertNotIn(
+            "Int64(",
+            join_source,
+            "Altium DelphiScript does not support Int64 casts in this script context.",
+        )
+        self.assertNotIn(
+            "IPCB_Primitive(",
+            join_source,
+            "Altium DelphiScript does not support interface-style cast calls here.",
+        )
+        self.assertIn(
+            "auto_duplicate_same_name",
+            join_source,
+            "Selection-loss recovery should only use the single supported duplicate same-name pad pair.",
+        )
+        self.assertIn(
+            "cleanup_duplicate_same_name_largest_pad",
+            join_source,
+            "Cleanup needs a post-conversion fallback that keeps the largest same-name pad.",
+        )
+        self.assertIn(
+            "AddJoinSourceRoundedPad",
+            join_source,
+            "Rebuilding an already converted pad should recreate the original rounded source pads.",
+        )
+        self.assertIn(
+            "180, 270",
+            join_source,
+            "Rounded custom-pad contour arcs should use outward arc direction.",
+        )
+        self.assertIn(
+            "270, 0",
+            join_source,
+            "Rounded custom-pad contour arcs should use outward arc direction.",
+        )
+        self.assertIn(
+            "0, 90",
+            join_source,
+            "Rounded custom-pad contour arcs should use outward arc direction.",
+        )
+        self.assertIn(
+            "90, 180",
+            join_source,
+            "Rounded custom-pad contour arcs should use outward arc direction.",
+        )
+        self.assertNotIn(
+            "ShapeOnLayer[AnchorPad.Layer] = OriginalShape",
+            join_source,
+            "Normal pad shape enums do not prove whether Altium created a custom pad shape.",
+        )
+        self.assertNotIn(
+            "Footprint.RemovePCBObject(ExtensionPad)",
+            join_source,
+            "Cleanup must use the PCB editor delete path after custom-pad conversion.",
+        )
+        self.assertIn(
+            "DeleteJoinObjects(TempObjects)",
+            join_source,
+            "Cleanup must delete temporary contour primitives through selected editor objects.",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

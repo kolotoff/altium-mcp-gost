@@ -309,6 +309,54 @@ begin
     end;
 end;
 
+function ExecuteSetPCBLayerNamesById(RequestData: TStringList): String;
+var
+    ParamValue: String;
+    i: Integer;
+    SourceList: TStringList;
+begin
+    SourceList := TStringList.Create;
+
+    try
+        for i := 0 to RequestData.Count - 1 do
+        begin
+            if (Pos('"layer_names_by_id"', RequestData[i]) > 0) then
+            begin
+                i := i + 1;
+
+                while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
+                begin
+                    ParamValue := RequestData[i];
+                    ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
+                    ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
+                    ParamValue := Trim(ParamValue);
+
+                    if (ParamValue <> '') and (ParamValue <> '[') then
+                        SourceList.Add(ParamValue);
+
+                    i := i + 1;
+                end;
+            end;
+        end;
+
+        if SourceList.Count > 0 then
+        begin
+            Result := SetPCBLayerNamesById(SourceList);
+        end
+        else
+        begin
+            Result := '{"success": false, "error": "No layer name specs provided"}';
+        end;
+    finally
+        SourceList.Free;
+    end;
+end;
+
+function ExecuteClearPCBRouteToolPathLayer(RequestData: TStringList): String;
+begin
+    Result := ClearPCBRouteToolPathLayer();
+end;
+
 // Extract the set component position logic
 function ExecuteSetComponentPosition(RequestData: TStringList): String;
 var
@@ -1011,6 +1059,10 @@ begin
             Result := GetPCBLayers(ROOT_DIR);            
         'set_pcb_layer_visibility':
             Result := ExecuteSetPCBLayerVisibility(RequestData);   
+        'set_pcb_layer_names_by_id':
+            Result := ExecuteSetPCBLayerNamesById(RequestData);
+        'clear_pcb_route_tool_path_layer':
+            Result := ExecuteClearPCBRouteToolPathLayer(RequestData);
         'get_pcb_layer_stackup':
             Result := GetPCBLayerStackup(ROOT_DIR);         
         'get_selected_components_coordinates':

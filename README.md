@@ -18,6 +18,8 @@ Note: Having Claude place components on the PCB currently fails hard.
 - List every footprint in the active PCB footprint library
 - Duplicate my selected layout. (Will prompt user to now select destination components. Supports Component, Track, Arc, Via, Polygon, & Region)
 - Show all my inner layers. Show the top and bottom layer. Turn off solder paste.
+- Rename PCB layer 4 back to Int2 DDR and layer 32 back to Bottom Layer.
+- Clear the Route Tool Path layer override so Top Layer displays with its normal layer-stack name.
 - Get me all parts on my design made by Molex
 - Give me the description and part number of U4
 - Place the selected parts on my pcb with best practices for a switching regulator. Note: It tries, but does terrible placement. Hopefully I can find a way to improve this.
@@ -177,6 +179,8 @@ The server provides several tools to interact with Altium Designer:
 - `get_pcb_layers`: Get detailed layer information including electrical, mechanical, layer pairs, etc.
 - `get_pcb_layer_stackup`: Gets stackup info like dielectric, layer thickness, etc.
 - `set_pcb_layer_visibility` ([YouTube](https://youtu.be/XaWs5A6-h30)): Turn on or off any group of layers. For example turn on inner layers. Turn off silk.
+- `set_pcb_layer_names_by_id`: Rename PCB copper or mechanical layers by numeric `layer_id` from `get_pcb_layers`. Pass entries as `layer_id|new name`, for example `["1|Top Layer", "4|Int2 DDR", "32|Bottom Layer"]`. This changes layer-stack names only; it does not save the PCB document.
+- `clear_pcb_route_tool_path_layer`: Clear Altium's route-tool-path layer override. Use this when a copper layer appears as `Route Tool Path` even after its layer-stack name has been restored.
 - `get_pcb_rules`: Gets the rule descriptions for all pcb rules in layout.
 - `get_selected_components_coordinates`: Get position and rotation information for currently selected components
 - `move_components`: Move specified components by X and Y offsets

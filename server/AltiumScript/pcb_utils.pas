@@ -791,6 +791,165 @@ begin
     end;
 end;
 
+function SetPCBLayerNamesById(LayerNameSpecs: TStringList): String;
+var
+    Board         : IPCB_Board;
+    TheLayerStack : IPCB_LayerStack_V7;
+    LayerObj      : IPCB_LayerObject;
+    MechLayer     : IPCB_MechanicalLayer;
+    ResultProps   : TStringList;
+    OutputLines   : TStringList;
+    NotFoundList  : TStringList;
+    Spec          : String;
+    SepPos        : Integer;
+    LayerId       : Integer;
+    NewName       : String;
+    i, j          : Integer;
+    UpdatedCount  : Integer;
+    Found         : Boolean;
+begin
+    ResultProps := TStringList.Create;
+    NotFoundList := TStringList.Create;
+    UpdatedCount := 0;
+
+    try
+        Board := PCBServer.GetCurrentPCBBoard;
+        if (Board = nil) then
+        begin
+            AddJSONBoolean(ResultProps, 'success', False);
+            AddJSONProperty(ResultProps, 'error', 'No PCB document is currently active');
+        end
+        else
+        begin
+            TheLayerStack := Board.LayerStack_V7;
+            if (TheLayerStack = nil) then
+            begin
+                AddJSONBoolean(ResultProps, 'success', False);
+                AddJSONProperty(ResultProps, 'error', 'No layer stack is available');
+            end
+            else
+            begin
+                PCBServer.PreProcess;
+
+                for i := 0 to LayerNameSpecs.Count - 1 do
+                begin
+                    Spec := LayerNameSpecs[i];
+                    SepPos := Pos('|', Spec);
+                    if SepPos <= 0 then
+                    begin
+                        NotFoundList.Add('"' + JSONEscapeString(Spec) + '"');
+                        Continue;
+                    end;
+
+                    LayerId := StrToIntDef(Copy(Spec, 1, SepPos - 1), -1);
+                    NewName := Copy(Spec, SepPos + 1, Length(Spec));
+                    Found := False;
+
+                    LayerObj := TheLayerStack.FirstLayer;
+                    while (LayerObj <> nil) do
+                    begin
+                        if LayerObj.V6_LayerID = LayerId then
+                        begin
+                            Found := True;
+                            if LayerObj.Name <> NewName then
+                            begin
+                                LayerObj.Name := NewName;
+                                UpdatedCount := UpdatedCount + 1;
+                            end;
+                            Break;
+                        end;
+
+                        LayerObj := TheLayerStack.NextLayer(LayerObj);
+                    end;
+
+                    if not Found then
+                    begin
+                        for j := 1 to 32 do
+                        begin
+                            MechLayer := TheLayerStack.LayerObject_V7[ILayer.MechanicalLayer(j)];
+                            if MechLayer.MechanicalLayerEnabled and (MechLayer.V6_LayerID = LayerId) then
+                            begin
+                                Found := True;
+                                if MechLayer.Name <> NewName then
+                                begin
+                                    MechLayer.Name := NewName;
+                                    UpdatedCount := UpdatedCount + 1;
+                                end;
+                                Break;
+                            end;
+                        end;
+                    end;
+
+                    if not Found then
+                        NotFoundList.Add('"' + JSONEscapeString(IntToStr(LayerId)) + '"');
+                end;
+
+                PCBServer.PostProcess;
+                Board.ViewManager_FullUpdate;
+                Board.ViewManager_UpdateLayerTabs;
+
+                AddJSONBoolean(ResultProps, 'success', True);
+                AddJSONInteger(ResultProps, 'updated_count', UpdatedCount);
+                if (NotFoundList.Count > 0) then
+                    ResultProps.Add(BuildJSONArray(NotFoundList, 'not_found_layer_ids'))
+                else
+                    ResultProps.Add('"not_found_layer_ids": []');
+                AddJSONProperty(ResultProps, 'message', 'Updated ' + IntToStr(UpdatedCount) + ' PCB layer names.');
+            end;
+        end;
+
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := OutputLines.Text;
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        NotFoundList.Free;
+        ResultProps.Free;
+    end;
+end;
+
+function ClearPCBRouteToolPathLayer(): String;
+var
+    Board       : IPCB_Board;
+    ResultProps : TStringList;
+    OutputLines : TStringList;
+begin
+    ResultProps := TStringList.Create;
+
+    try
+        Board := PCBServer.GetCurrentPCBBoard;
+        if (Board = nil) then
+        begin
+            AddJSONBoolean(ResultProps, 'success', False);
+            AddJSONProperty(ResultProps, 'error', 'No PCB document is currently active');
+        end
+        else
+        begin
+            PCBServer.PreProcess;
+            Board.RouteToolPathLayer := eNoLayer;
+            PCBServer.PostProcess;
+            Board.ViewManager_FullUpdate;
+            Board.ViewManager_UpdateLayerTabs;
+
+            AddJSONBoolean(ResultProps, 'success', True);
+            AddJSONProperty(ResultProps, 'message', 'Cleared PCB route tool path layer override.');
+        end;
+
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := OutputLines.Text;
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        ResultProps.Free;
+    end;
+end;
+
 // Function to get all PCB rules
 function GetPCBRules(ROOT_DIR: String): String;
 Var

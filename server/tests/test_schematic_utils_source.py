@@ -116,6 +116,40 @@ class PcbUtilsSourceTest(unittest.TestCase):
             "Footprint links must use the provided library file name, not an absolute path.",
         )
 
+    def test_pcb_layer_rename_commands_are_exposed_end_to_end(self):
+        server_path = Path(__file__).resolve().parents[1] / "main.py"
+        api_path = Path(__file__).resolve().parents[1] / "AltiumScript" / "Altium_API.pas"
+        utils_path = Path(__file__).resolve().parents[1] / "AltiumScript" / "pcb_utils.pas"
+        focus_path = Path(__file__).resolve().parents[1] / "AltiumScript" / "other_utils.pas"
+        readme_path = Path(__file__).resolve().parents[2] / "README.md"
+
+        server_source = server_path.read_text(encoding="utf-8")
+        api_source = api_path.read_text(encoding="utf-8")
+        utils_source = utils_path.read_text(encoding="utf-8")
+        focus_source = focus_path.read_text(encoding="utf-8")
+        readme_source = readme_path.read_text(encoding="utf-8")
+
+        self.assertIn("async def set_pcb_layer_names_by_id", server_source)
+        self.assertIn("async def clear_pcb_route_tool_path_layer", server_source)
+        self.assertIn('"set_pcb_layer_names_by_id"', server_source)
+        self.assertIn('"clear_pcb_route_tool_path_layer"', server_source)
+
+        self.assertIn("function ExecuteSetPCBLayerNamesById(RequestData: TStringList): String", api_source)
+        self.assertIn("function ExecuteClearPCBRouteToolPathLayer(RequestData: TStringList): String", api_source)
+        self.assertIn("'set_pcb_layer_names_by_id':", api_source)
+        self.assertIn("'clear_pcb_route_tool_path_layer':", api_source)
+
+        self.assertIn("function SetPCBLayerNamesById(LayerNameSpecs: TStringList): String", utils_source)
+        self.assertIn("function ClearPCBRouteToolPathLayer(): String", utils_source)
+        self.assertIn("LayerObj.Name := NewName", utils_source)
+        self.assertIn("Board.RouteToolPathLayer := eNoLayer", utils_source)
+
+        self.assertIn("(CommandName = 'set_pcb_layer_names_by_id')", focus_source)
+        self.assertIn("(CommandName = 'clear_pcb_route_tool_path_layer')", focus_source)
+
+        self.assertIn("set_pcb_layer_names_by_id", readme_source)
+        self.assertIn("clear_pcb_route_tool_path_layer", readme_source)
+
 
 class PcbLayoutDuplicatorSourceTest(unittest.TestCase):
     def test_selection_phase_does_not_start_interactive_inside_area_selection(self):

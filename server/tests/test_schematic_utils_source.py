@@ -117,5 +117,137 @@ class PcbUtilsSourceTest(unittest.TestCase):
         )
 
 
+class PcbLayoutDuplicatorSourceTest(unittest.TestCase):
+    def test_selection_phase_does_not_start_interactive_inside_area_selection(self):
+        source_path = Path(__file__).resolve().parents[1] / "AltiumScript" / "pcb_layout_duplicator.pas"
+        source = source_path.read_text(encoding="utf-8")
+
+        self.assertNotIn(
+            "Scope=InsideArea",
+            source,
+            "MCP layout duplication must not leave Altium in an interactive mouse selection command.",
+        )
+        self.assertNotIn(
+            "Client.SendMessage('PCB:Select'",
+            source,
+            "Selection phase should select duplicated primitives programmatically, not start PCB:Select.",
+        )
+        self.assertIn(
+            "Client.SendMessage('PCB:Cancel'",
+            source,
+            "Selection phase should explicitly cancel any active PCB command before returning.",
+        )
+
+    def test_apply_keeps_destination_anchor_xy_instead_of_source_absolute_xy(self):
+        source_path = Path(__file__).resolve().parents[1] / "AltiumScript" / "pcb_layout_duplicator.pas"
+        source = source_path.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "AnchorOffsetX := AnchorDstOriginalX - AnchorSrc.x",
+            source,
+            "Layout duplication must compute placement from the destination base component location.",
+        )
+        self.assertIn(
+            "CmpDst.x := CmpSrc.x + AnchorOffsetX",
+            source,
+            "Destination component X should preserve the base IC location and copy source-relative offsets.",
+        )
+        self.assertIn(
+            "CmpDst.y := CmpSrc.y + AnchorOffsetY",
+            source,
+            "Destination component Y should preserve the base IC location and copy source-relative offsets.",
+        )
+        self.assertNotIn(
+            "CmpDst.x := CmpSrc.x;",
+            source,
+            "Destination components must not be moved to source absolute X.",
+        )
+        self.assertNotIn(
+            "CmpDst.y := CmpSrc.y;",
+            source,
+            "Destination components must not be moved to source absolute Y.",
+        )
+
+    def test_apply_moves_selected_routing_by_anchor_offset_before_net_assignment(self):
+        source_path = Path(__file__).resolve().parents[1] / "AltiumScript" / "pcb_layout_duplicator.pas"
+        source = source_path.read_text(encoding="utf-8")
+
+        move_index = source.index("ConnectedPrim.MoveByXY(AnchorOffsetX, AnchorOffsetY)")
+        net_assign_index = source.index("ConnectedPrim.Net := Net")
+
+        self.assertLess(
+            move_index,
+            net_assign_index,
+            "Copied routing primitives must be moved to the destination before pad-based net assignment.",
+        )
+        self.assertIn(
+            "SourcePadCount := CountComponentPads(CmpSrc)",
+            source,
+            "The base component should be chosen from the source component with the most pads, not list order.",
+        )
+
+    def test_apply_supports_repeated_source_groups_for_multiple_destinations(self):
+        source_path = Path(__file__).resolve().parents[1] / "AltiumScript" / "pcb_layout_duplicator.pas"
+        source = source_path.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "function DetermineLayoutDuplicatorSourceGroupSize(SourceList: TStringList): Integer",
+            source,
+            "Apply must detect repeated source groups so multiple destinations get separate anchor offsets.",
+        )
+        self.assertIn(
+            "GroupStart := SourceList.Count - SourceGroupSize",
+            source,
+            "Apply should process destination groups independently, starting from the last group.",
+        )
+        self.assertIn(
+            "NewPrim := TemplatePrim.Replicate",
+            source,
+            "Each additional destination group needs its own replicated routing primitives.",
+        )
+        self.assertIn(
+            "GroupObjects.Add(NewPrim)",
+            source,
+            "Net assignment should operate on the copied primitives for the current destination group only.",
+        )
+
+    def test_apply_translates_unreached_copied_primitives_from_source_to_destination_nets(self):
+        source_path = Path(__file__).resolve().parents[1] / "AltiumScript" / "pcb_layout_duplicator.pas"
+        source = source_path.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "BuildLayoutDuplicatorNetNameMap(Board, SourceList, DestList, GroupStart, GroupEnd, NetNameMap)",
+            source,
+            "Apply should build a per-destination source-net to destination-net map from matched component pads.",
+        )
+        self.assertIn(
+            "TranslateLayoutDuplicatorPrimitiveNets(Board, GroupObjects, NetNameMap)",
+            source,
+            "Copied vias or other primitives not reached by pad tracing must not keep source nets.",
+        )
+        self.assertLess(
+            source.index("ConnectedPrim.Net := Net"),
+            source.index("TranslateLayoutDuplicatorPrimitiveNets(Board, GroupObjects, NetNameMap)"),
+            "Fallback source-net translation should run after normal pad-based net assignment.",
+        )
+
+    def test_repair_command_exists_for_existing_copied_source_net_leaks(self):
+        script_path = Path(__file__).resolve().parents[1] / "AltiumScript" / "pcb_layout_duplicator.pas"
+        api_path = Path(__file__).resolve().parents[1] / "AltiumScript" / "Altium_API.pas"
+        script_source = script_path.read_text(encoding="utf-8")
+        api_source = api_path.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "function RepairLayoutDuplicatorCopiedNets(SourceList: TStringList; DestList: TStringList): String",
+            script_source,
+            "Existing copied layouts need a non-duplicating repair path for source-net leaks.",
+        )
+        self.assertIn(
+            "'layout_duplicator_repair_copied_nets':",
+            api_source,
+            "The Altium bridge should expose the repair command for one-off board cleanup.",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

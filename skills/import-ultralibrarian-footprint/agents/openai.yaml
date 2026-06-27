@@ -1,0 +1,4 @@
+interface:
+  display_name: "Import Ultra Librarian Footprint"
+  short_description: "Create Altium PcbLib footprints from Ultra previews"
+  default_prompt: "Use $import-ultralibrarian-footprint to import this Ultra Librarian footprint into the active Altium PcbLib with a _UL suffix."

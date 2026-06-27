@@ -878,6 +878,65 @@ async def set_pcb_layer_visibility(ctx: Context, layer_names: list, visible: boo
     return json_dumps(result, indent=2)
 
 @mcp.tool()
+async def set_pcb_layer_names_by_id(ctx: Context, layer_names_by_id: list) -> str:
+    """
+    Rename PCB copper or mechanical layers by numeric layer ID.
+    Use get_pcb_layers first to read current layer_id values.
+
+    Args:
+        layer_names_by_id (list): Rename specs in "layer_id|new name" format,
+                                  e.g. ["1|Top Layer", "4|Int2 DDR", "32|Bottom Layer"].
+
+    Returns:
+        str: JSON object with updated_count and not_found_layer_ids.
+    """
+    logger.info(f"Renaming PCB layers by id: {layer_names_by_id}")
+
+    response = await altium_bridge.execute_command(
+        "set_pcb_layer_names_by_id",
+        {"layer_names_by_id": layer_names_by_id}
+    )
+
+    if not response.get("success", False):
+        error_msg = response.get("error", "Unknown error")
+        logger.error(f"Error renaming PCB layers: {error_msg}")
+        return json_dumps({"success": False, "error": f"Failed to rename PCB layers: {error_msg}"})
+
+    result = response.get("result", {})
+
+    logger.info("PCB layer names updated successfully")
+    return json_dumps(result, indent=2)
+
+@mcp.tool()
+async def clear_pcb_route_tool_path_layer(ctx: Context) -> str:
+    """
+    Clear the PCB route-tool-path layer override.
+
+    This is separate from normal layer-stack names. When set, Altium can display
+    the selected copper layer as "Route Tool Path" even if the layer stack name
+    should be "Top Layer", "Bottom Layer", etc.
+
+    Returns:
+        str: JSON object with the result of the operation.
+    """
+    logger.info("Clearing PCB route tool path layer override")
+
+    response = await altium_bridge.execute_command(
+        "clear_pcb_route_tool_path_layer",
+        {}
+    )
+
+    if not response.get("success", False):
+        error_msg = response.get("error", "Unknown error")
+        logger.error(f"Error clearing route tool path layer: {error_msg}")
+        return json_dumps({"success": False, "error": f"Failed to clear route tool path layer: {error_msg}"})
+
+    result = response.get("result", {})
+
+    logger.info("PCB route tool path layer override cleared successfully")
+    return json_dumps(result, indent=2)
+
+@mcp.tool()
 async def get_component_data(ctx: Context, cmp_designators: list) -> str:
     """
     Get all data for components in Altium

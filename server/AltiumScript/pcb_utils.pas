@@ -5435,6 +5435,50 @@ begin
     end;
 end;
 
+function FindPCBLibraryJoinSelectedPadsCustomCommand(LayerMoves: TStringList; var JoinAction: String): Boolean;
+var
+    i: Integer;
+    MoveText: String;
+begin
+    Result := False;
+    JoinAction := '';
+
+    for i := 0 to LayerMoves.Count - 1 do
+    begin
+        MoveText := UpperCase(Trim(LayerMoves[i]));
+        if MoveText = 'PCB_LIB_JOIN_SELECTED_PADS_CUSTOM' then
+        begin
+            JoinAction := 'FULL';
+            Result := True;
+            Exit;
+        end
+        else if MoveText = 'PCB_LIB_JOIN_SELECTED_PADS_CUSTOM_PREPARE' then
+        begin
+            JoinAction := 'PREPARE';
+            Result := True;
+            Exit;
+        end
+        else if MoveText = 'PCB_LIB_JOIN_SELECTED_PADS_CUSTOM_CONVERT' then
+        begin
+            JoinAction := 'CONVERT';
+            Result := True;
+            Exit;
+        end
+        else if MoveText = 'PCB_LIB_JOIN_SELECTED_PADS_CUSTOM_CLEANUP' then
+        begin
+            JoinAction := 'CLEANUP';
+            Result := True;
+            Exit;
+        end
+        else if MoveText = 'PCB_LIB_JOIN_SELECTED_PADS_CUSTOM_REBUILD_SOURCE' then
+        begin
+            JoinAction := 'REBUILD_SOURCE';
+            Result := True;
+            Exit;
+        end;
+    end;
+end;
+
 function Parse3DBodyBatchImportCommand(MoveText: String; var DataFileName: String; var SkipExisting: Boolean): Boolean;
 var
     Fields: TStringList;
@@ -9208,6 +9252,8 @@ begin
     end;
 end;
 
+function JoinSelectedPadsAsCustomPadShape(JoinAction: String): String; forward;
+
 function MovePCBLibraryMechanicalLayers(ExcludeFootprints: TStringList; LayerMoves: TStringList): String;
 var
     PcbLib              : IPCB_Library;
@@ -9255,6 +9301,7 @@ var
     CleanPadsOverlayTargetNameContains : String;
     CleanPadsOverlayPadNamePrefix : String;
     CleanPadsOverlayLayerName : String;
+    JoinSelectedPadsAction : String;
     Delete3DBodyFootprintName : String;
     Batch3DBodyImportDataFileName : String;
     Batch3DBodyImportSkipExisting : Boolean;
@@ -9396,6 +9443,12 @@ begin
     if FindPCBLibraryCleanPadsOverlayCommand(LayerMoves, CleanPadsOverlayTargetNameContains, CleanPadsOverlayPadNamePrefix, CleanPadsOverlayLayerName) then
     begin
         Result := CleanPCBLibraryPadsAndOverlayWithEditor(ExcludeFootprints, CleanPadsOverlayTargetNameContains, CleanPadsOverlayPadNamePrefix, CleanPadsOverlayLayerName);
+        Exit;
+    end;
+
+    if FindPCBLibraryJoinSelectedPadsCustomCommand(LayerMoves, JoinSelectedPadsAction) then
+    begin
+        Result := JoinSelectedPadsAsCustomPadShape(JoinSelectedPadsAction);
         Exit;
     end;
 
@@ -10048,6 +10101,701 @@ begin
     finally
         ResultProps.Free;
         MissingArray.Free;
+    end;
+end;
+
+function JoinPadCornerRadius(Pad: IPCB_Pad): TCoord;
+var
+    Radius: TCoord;
+    XSize : TCoord;
+    YSize : TCoord;
+begin
+    Result := 0;
+    if Pad = Nil then
+        Exit;
+
+    XSize := Pad.XSizeOnLayer[Pad.Layer];
+    YSize := Pad.YSizeOnLayer[Pad.Layer];
+    if (XSize <= 0) or (YSize <= 0) then
+        Exit;
+
+    if Pad.ShapeOnLayer[Pad.Layer] = eRoundedRectangular then
+    begin
+        Radius := Pad.CornerRadius(Pad.Layer);
+        if Radius <= 0 then
+            Radius := Min(XSize, YSize) div 4;
+        if Radius > (XSize div 2) then
+            Radius := XSize div 2;
+        if Radius > (YSize div 2) then
+            Radius := YSize div 2;
+        Result := Radius;
+    end;
+end;
+
+function AddJoinCustomPadContourTrack(Board: IPCB_Board; Footprint: IPCB_LibComponent; Layer: TLayer; X1, Y1, X2, Y2: TCoord; LineWidth: TCoord; TempObjects: TObjectList): Boolean;
+var
+    Track: IPCB_Track;
+begin
+    Result := False;
+
+    if ((Board = Nil) and (Footprint = Nil)) or ((X1 = X2) and (Y1 = Y2)) then
+        Exit;
+
+    Track := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
+    if Track = Nil then
+        Exit;
+
+    Track.Layer := Layer;
+    Track.X1 := X1;
+    Track.Y1 := Y1;
+    Track.X2 := X2;
+    Track.Y2 := Y2;
+    Track.Width := LineWidth;
+
+    if Board <> Nil then
+    begin
+        PCBServer.SendMessageToRobots(Track.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+        Board.AddPCBObject(Track);
+        PCBServer.SendMessageToRobots(Track.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+    end
+    else
+    begin
+        Footprint.AddPCBObject(Track);
+        PCBServer.SendMessageToRobots(Track.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+    end;
+    Track.Selected := True;
+    TempObjects.Add(Track);
+    Result := True;
+end;
+
+function AddJoinCustomPadContourArc(Board: IPCB_Board; Footprint: IPCB_LibComponent; Layer: TLayer; XCenter, YCenter, Radius: TCoord; StartAngle, EndAngle: Double; LineWidth: TCoord; TempObjects: TObjectList): Boolean;
+var
+    Arc: IPCB_Arc;
+begin
+    Result := False;
+
+    if ((Board = Nil) and (Footprint = Nil)) or (Radius <= 0) then
+        Exit;
+
+    Arc := PCBServer.PCBObjectFactory(eArcObject, eNoDimension, eCreate_Default);
+    if Arc = Nil then
+        Exit;
+
+    Arc.Layer := Layer;
+    Arc.XCenter := XCenter;
+    Arc.YCenter := YCenter;
+    Arc.Radius := Radius;
+    Arc.StartAngle := StartAngle;
+    Arc.EndAngle := EndAngle;
+    Arc.LineWidth := LineWidth;
+
+    if Board <> Nil then
+    begin
+        PCBServer.SendMessageToRobots(Arc.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+        Board.AddPCBObject(Arc);
+        PCBServer.SendMessageToRobots(Arc.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+    end
+    else
+    begin
+        Footprint.AddPCBObject(Arc);
+        PCBServer.SendMessageToRobots(Arc.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, c_NoEventData);
+    end;
+    Arc.Selected := True;
+    TempObjects.Add(Arc);
+    Result := True;
+end;
+
+function AddJoinSourceRoundedPad(Board: IPCB_Board; PadName: String; XMM, YMM, WMM, HMM: Double): IPCB_Pad;
+begin
+    Result := Nil;
+
+    if Board = Nil then
+        Exit;
+
+    Result := PCBServer.PCBObjectFactory(ePadObject, eNoDimension, eCreate_Default);
+    if Result = Nil then
+        Exit;
+
+    Result.Name := PadName;
+    Result.Mode := ePadMode_Simple;
+    Result.HoleSize := 0;
+    Result.X := Board.XOrigin + MMsToCoord(XMM);
+    Result.Y := Board.YOrigin + MMsToCoord(YMM);
+    Result.Layer := eTopLayer;
+    Result.TopXSize := MMsToCoord(WMM);
+    Result.TopYSize := MMsToCoord(HMM);
+    Result.TopShape := eRoundedRectangular;
+
+    PCBServer.SendMessageToRobots(Result.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+    Board.AddPCBObject(Result);
+    PCBServer.SendMessageToRobots(Result.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+end;
+
+function IsRightStepPadJoinCandidate(MainPad, ExtensionPad: IPCB_Pad): Boolean;
+var
+    Layer: TLayer;
+    MainXSize, MainYSize, ExtensionXSize, ExtensionYSize : TCoord;
+    ML, MR, MB, MT, EL, ER, EB, ET : TCoord;
+    Tolerance : TCoord;
+begin
+    Result := False;
+
+    if (MainPad = Nil) or (ExtensionPad = Nil) then
+        Exit;
+
+    Layer := MainPad.Layer;
+    if ExtensionPad.Layer <> Layer then
+        Exit;
+
+    MainXSize := MainPad.XSizeOnLayer[Layer];
+    MainYSize := MainPad.YSizeOnLayer[Layer];
+    ExtensionXSize := ExtensionPad.XSizeOnLayer[Layer];
+    ExtensionYSize := ExtensionPad.YSizeOnLayer[Layer];
+
+    ML := MainPad.X - (MainXSize div 2);
+    MR := MainPad.X + (MainXSize div 2);
+    MB := MainPad.Y - (MainYSize div 2);
+    MT := MainPad.Y + (MainYSize div 2);
+    EL := ExtensionPad.X - (ExtensionXSize div 2);
+    ER := ExtensionPad.X + (ExtensionXSize div 2);
+    EB := ExtensionPad.Y - (ExtensionYSize div 2);
+    ET := ExtensionPad.Y + (ExtensionYSize div 2);
+
+    Tolerance := MMsToCoord(0.002);
+    Result := ((ER > MR + Tolerance) and (EL < MR + Tolerance) and
+               (ET < MT - Tolerance) and (EB > MB + Tolerance));
+end;
+
+function AddRightStepCustomPadContour(Board: IPCB_Board; Footprint: IPCB_LibComponent; MainPad, ExtensionPad: IPCB_Pad; TempObjects: TObjectList): Integer;
+var
+    Layer     : TLayer;
+    LineWidth : TCoord;
+    MainXSize, MainYSize, ExtensionXSize, ExtensionYSize : TCoord;
+    ML, MR, MB, MT, EL, ER, EB, ET : TCoord;
+    MainR, ExtensionR : TCoord;
+begin
+    Result := 0;
+
+    if (Footprint = Nil) or (MainPad = Nil) or (ExtensionPad = Nil) then
+        Exit;
+
+    if not IsRightStepPadJoinCandidate(MainPad, ExtensionPad) then
+        Exit;
+
+    Layer := MainPad.Layer;
+    MainXSize := MainPad.XSizeOnLayer[Layer];
+    MainYSize := MainPad.YSizeOnLayer[Layer];
+    ExtensionXSize := ExtensionPad.XSizeOnLayer[Layer];
+    ExtensionYSize := ExtensionPad.YSizeOnLayer[Layer];
+
+    ML := MainPad.X - (MainXSize div 2);
+    MR := MainPad.X + (MainXSize div 2);
+    MB := MainPad.Y - (MainYSize div 2);
+    MT := MainPad.Y + (MainYSize div 2);
+    EL := ExtensionPad.X - (ExtensionXSize div 2);
+    ER := ExtensionPad.X + (ExtensionXSize div 2);
+    EB := ExtensionPad.Y - (ExtensionYSize div 2);
+    ET := ExtensionPad.Y + (ExtensionYSize div 2);
+
+    MainR := JoinPadCornerRadius(MainPad);
+    ExtensionR := JoinPadCornerRadius(ExtensionPad);
+    LineWidth := MMsToCoord(0.001);
+    if LineWidth <= 0 then
+        LineWidth := 1;
+
+    if AddJoinCustomPadContourTrack(Board, Footprint, Layer, ML + MainR, MT, MR - MainR, MT, LineWidth, TempObjects) then Result := Result + 1;
+    if AddJoinCustomPadContourArc(Board, Footprint, Layer, MR - MainR, MT - MainR, MainR, 0, 90, LineWidth, TempObjects) then Result := Result + 1;
+    if AddJoinCustomPadContourTrack(Board, Footprint, Layer, MR, MT - MainR, MR, ET, LineWidth, TempObjects) then Result := Result + 1;
+    if AddJoinCustomPadContourTrack(Board, Footprint, Layer, MR, ET, ER - ExtensionR, ET, LineWidth, TempObjects) then Result := Result + 1;
+    if AddJoinCustomPadContourArc(Board, Footprint, Layer, ER - ExtensionR, ET - ExtensionR, ExtensionR, 0, 90, LineWidth, TempObjects) then Result := Result + 1;
+    if AddJoinCustomPadContourTrack(Board, Footprint, Layer, ER, ET - ExtensionR, ER, EB + ExtensionR, LineWidth, TempObjects) then Result := Result + 1;
+    if AddJoinCustomPadContourArc(Board, Footprint, Layer, ER - ExtensionR, EB + ExtensionR, ExtensionR, 270, 0, LineWidth, TempObjects) then Result := Result + 1;
+    if AddJoinCustomPadContourTrack(Board, Footprint, Layer, ER - ExtensionR, EB, MR, EB, LineWidth, TempObjects) then Result := Result + 1;
+    if AddJoinCustomPadContourTrack(Board, Footprint, Layer, MR, EB, MR, MB + MainR, LineWidth, TempObjects) then Result := Result + 1;
+    if AddJoinCustomPadContourArc(Board, Footprint, Layer, MR - MainR, MB + MainR, MainR, 270, 0, LineWidth, TempObjects) then Result := Result + 1;
+    if AddJoinCustomPadContourTrack(Board, Footprint, Layer, MR - MainR, MB, ML + MainR, MB, LineWidth, TempObjects) then Result := Result + 1;
+    if AddJoinCustomPadContourArc(Board, Footprint, Layer, ML + MainR, MB + MainR, MainR, 180, 270, LineWidth, TempObjects) then Result := Result + 1;
+    if AddJoinCustomPadContourTrack(Board, Footprint, Layer, ML, MB + MainR, ML, MT - MainR, LineWidth, TempObjects) then Result := Result + 1;
+    if AddJoinCustomPadContourArc(Board, Footprint, Layer, ML + MainR, MT - MainR, MainR, 90, 180, LineWidth, TempObjects) then Result := Result + 1;
+end;
+
+procedure SelectOnlyJoinObjects(AnchorPad: IPCB_Pad; TempObjects: TObjectList);
+var
+    i        : Integer;
+    Primitive: IPCB_Primitive;
+begin
+    Client.SendMessage('PCB:DeSelect', 'Scope=All', 255, Client.CurrentView);
+
+    if AnchorPad <> Nil then
+        AnchorPad.Selected := True;
+
+    for i := 0 to TempObjects.Count - 1 do
+        if TempObjects[i] <> Nil then
+        begin
+            Primitive := TempObjects[i];
+            Primitive.Selected := True;
+        end;
+end;
+
+procedure DeleteJoinObjects(ObjectsToDelete: TObjectList);
+var
+    i        : Integer;
+    Primitive: IPCB_Primitive;
+begin
+    Client.SendMessage('PCB:DeSelect', 'Scope=All', 255, Client.CurrentView);
+
+    for i := 0 to ObjectsToDelete.Count - 1 do
+        if ObjectsToDelete[i] <> Nil then
+        begin
+            Primitive := ObjectsToDelete[i];
+            Primitive.Selected := True;
+        end;
+
+    if ObjectsToDelete.Count > 0 then
+        Client.SendMessage('PCB:DeleteObjects', 'Object=SELECTED', 255, Client.CurrentView);
+
+    Client.SendMessage('PCB:DeSelect', 'Scope=All', 255, Client.CurrentView);
+end;
+
+function IsJoinTemporaryOutlinePrimitive(Primitive: IPCB_Primitive; Layer: TLayer): Boolean;
+var
+    Track    : IPCB_Track;
+    Arc      : IPCB_Arc;
+    LineWidth: TCoord;
+begin
+    Result := False;
+
+    if Primitive = Nil then
+        Exit;
+    if Primitive.Layer <> Layer then
+        Exit;
+
+    LineWidth := MMsToCoord(0.001);
+    if LineWidth <= 0 then
+        LineWidth := 1;
+
+    if Primitive.ObjectId = eTrackObject then
+    begin
+        Track := Primitive;
+        Result := Track.Width = LineWidth;
+    end
+    else if Primitive.ObjectId = eArcObject then
+    begin
+        Arc := Primitive;
+        Result := Arc.LineWidth = LineWidth;
+    end;
+end;
+
+function CollectJoinTemporaryOutlines(Footprint: IPCB_LibComponent; Layer: TLayer; ObjectsToRemove: TObjectList): Integer;
+var
+    PrimitiveIterator : IPCB_GroupIterator;
+    Primitive         : IPCB_Primitive;
+begin
+    Result := 0;
+
+    if (Footprint = Nil) or (ObjectsToRemove = Nil) then
+        Exit;
+
+    PrimitiveIterator := Footprint.GroupIterator_Create;
+    if PrimitiveIterator = Nil then
+        Exit;
+
+    try
+        PrimitiveIterator.SetState_FilterAll;
+        Primitive := PrimitiveIterator.FirstPCBObject;
+        while Primitive <> Nil do
+        begin
+            if IsJoinTemporaryOutlinePrimitive(Primitive, Layer) then
+            begin
+                ObjectsToRemove.Add(Primitive);
+                Result := Result + 1;
+            end;
+
+            Primitive := PrimitiveIterator.NextPCBObject;
+        end;
+    finally
+        Footprint.GroupIterator_Destroy(PrimitiveIterator);
+    end;
+end;
+
+function JoinSelectedPadsAsCustomPadShape(JoinAction: String): String;
+var
+    PcbLib            : IPCB_Library;
+    Board             : IPCB_Board;
+    Footprint         : IPCB_LibComponent;
+    PrimitiveIterator : IPCB_GroupIterator;
+    Primitive         : IPCB_Primitive;
+    Pad               : IPCB_Pad;
+    SelectedPads      : TObjectList;
+    AllPads           : TObjectList;
+    TempObjects       : TObjectList;
+    ResultProps       : TStringList;
+    OutputLines       : TStringList;
+    AnchorPad         : IPCB_Pad;
+    ExtensionPad      : IPCB_Pad;
+    PadArea           : Double;
+    AnchorArea        : Double;
+    CandidateArea     : Double;
+    CandidateCount    : Integer;
+    CandidateAnchor   : IPCB_Pad;
+    CandidateExtension: IPCB_Pad;
+    SelectionSource   : String;
+    OutlineObjects    : Integer;
+    DeletedOutlines   : Integer;
+    DeletedPads       : Integer;
+    RebuiltPads       : Integer;
+    i                 : Integer;
+    ServerDocument    : IServerDocument;
+    CurrentView       : IServerDocumentView;
+begin
+    JoinAction := UpperCase(Trim(JoinAction));
+    if JoinAction = '' then
+        JoinAction := 'FULL';
+
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    if PcbLib = Nil then
+    begin
+        Result := '{"success": false, "error": "No PCB library document is currently active. Open a .PcbLib file first."}';
+        Exit;
+    end;
+
+    Board := PcbLib.Board;
+    Footprint := PcbLib.CurrentComponent;
+    if Footprint = Nil then
+    begin
+        Result := '{"success": false, "error": "No active footprint in the PCB library."}';
+        Exit;
+    end;
+
+    ResultProps := TStringList.Create;
+    try
+        if JoinAction = 'CONVERT' then
+        begin
+            Client.SendMessage('PCB:CustomPadShape', 'Action=Convert|Object=Track', 255, Client.CurrentView);
+            AddJSONBoolean(ResultProps, 'success', True);
+            AddJSONProperty(ResultProps, 'action', 'CONVERT');
+            AddJSONProperty(ResultProps, 'command', 'PCB:CustomPadShape');
+            AddJSONProperty(ResultProps, 'parameters', 'Action=Convert|Object=Track');
+            AddJSONBoolean(ResultProps, 'conversion_command_sent', True);
+            OutputLines := TStringList.Create;
+            try
+                OutputLines.Text := BuildJSONObject(ResultProps);
+                Result := OutputLines.Text;
+            finally
+                OutputLines.Free;
+            end;
+            Exit;
+        end;
+    finally
+        ResultProps.Free;
+    end;
+
+    SelectedPads := TObjectList.Create;
+    SelectedPads.OwnsObjects := False;
+    AllPads := TObjectList.Create;
+    AllPads.OwnsObjects := False;
+    TempObjects := TObjectList.Create;
+    TempObjects.OwnsObjects := False;
+    ResultProps := TStringList.Create;
+
+    try
+        PrimitiveIterator := Footprint.GroupIterator_Create;
+        if PrimitiveIterator = Nil then
+        begin
+            Result := '{"success": false, "error": "Failed to create footprint primitive iterator."}';
+            Exit;
+        end;
+
+        try
+            PrimitiveIterator.AddFilter_ObjectSet(MkSet(ePadObject));
+            Primitive := PrimitiveIterator.FirstPCBObject;
+            while Primitive <> Nil do
+            begin
+                AllPads.Add(Primitive);
+                if Primitive.Selected then
+                    SelectedPads.Add(Primitive);
+                Primitive := PrimitiveIterator.NextPCBObject;
+            end;
+        finally
+            Footprint.GroupIterator_Destroy(PrimitiveIterator);
+        end;
+
+        if JoinAction = 'REBUILD_SOURCE' then
+        begin
+            DeletedOutlines := CollectJoinTemporaryOutlines(Footprint, eTopLayer, TempObjects);
+            DeletedPads := 0;
+            for i := 0 to AllPads.Count - 1 do
+            begin
+                Pad := AllPads[i];
+                if (Pad <> Nil) and (Pad.Layer = eTopLayer) and (Pad.Name = '3') then
+                begin
+                    TempObjects.Add(Pad);
+                    DeletedPads := DeletedPads + 1;
+                end;
+            end;
+
+            if TempObjects.Count > 0 then
+                DeleteJoinObjects(TempObjects);
+            TempObjects.Clear;
+
+            RebuiltPads := 0;
+            PCBServer.PreProcess;
+            try
+                if AddJoinSourceRoundedPad(Board, '3', 0.2, 0.0, 0.4, 0.8) <> Nil then
+                    RebuiltPads := RebuiltPads + 1;
+                if AddJoinSourceRoundedPad(Board, '3', 0.5, 0.0, 0.4, 0.35) <> Nil then
+                    RebuiltPads := RebuiltPads + 1;
+            finally
+                PCBServer.PostProcess;
+            end;
+
+            if Board <> Nil then
+                Board.ViewManager_FullUpdate;
+            Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
+
+            CurrentView := Client.GetCurrentView;
+            if CurrentView <> Nil then
+            begin
+                ServerDocument := CurrentView.OwnerDocument;
+                if ServerDocument <> Nil then
+                    ServerDocument.Modified := True;
+            end;
+
+            AddJSONBoolean(ResultProps, 'success', RebuiltPads = 2);
+            AddJSONProperty(ResultProps, 'action', JoinAction);
+            AddJSONProperty(ResultProps, 'footprint', Footprint.Name);
+            AddJSONProperty(ResultProps, 'pad_name', '3');
+            AddJSONInteger(ResultProps, 'deleted_pad3_primitives', DeletedPads);
+            AddJSONInteger(ResultProps, 'temporary_outline_objects_deleted', DeletedOutlines);
+            AddJSONInteger(ResultProps, 'rebuilt_source_pads', RebuiltPads);
+            AddJSONBoolean(ResultProps, 'document_saved', False);
+            AddJSONBoolean(ResultProps, 'document_dirty', True);
+
+            OutputLines := TStringList.Create;
+            try
+                OutputLines.Text := BuildJSONObject(ResultProps);
+                Result := OutputLines.Text;
+            finally
+                OutputLines.Free;
+            end;
+            Exit;
+        end;
+
+        SelectionSource := 'selected';
+        if (SelectedPads.Count = 0) or ((JoinAction = 'CLEANUP') and (SelectedPads.Count <> 2)) then
+        begin
+            if SelectedPads.Count <> 0 then
+                SelectedPads.Clear;
+            CandidateCount := 0;
+            CandidateAnchor := Nil;
+            CandidateExtension := Nil;
+            for i := 0 to AllPads.Count - 2 do
+            begin
+                AnchorPad := AllPads[i];
+                for OutlineObjects := i + 1 to AllPads.Count - 1 do
+                begin
+                    ExtensionPad := AllPads[OutlineObjects];
+                    if (AnchorPad.Name = ExtensionPad.Name) and (AnchorPad.Layer = ExtensionPad.Layer) then
+                    begin
+                        AnchorArea := CoordToMMs(AnchorPad.XSizeOnLayer[AnchorPad.Layer]) * CoordToMMs(AnchorPad.YSizeOnLayer[AnchorPad.Layer]);
+                        CandidateArea := CoordToMMs(ExtensionPad.XSizeOnLayer[ExtensionPad.Layer]) * CoordToMMs(ExtensionPad.YSizeOnLayer[ExtensionPad.Layer]);
+                        if CandidateArea > AnchorArea then
+                        begin
+                            Pad := AnchorPad;
+                            AnchorPad := ExtensionPad;
+                            ExtensionPad := Pad;
+                        end;
+
+                        if IsRightStepPadJoinCandidate(AnchorPad, ExtensionPad) then
+                        begin
+                            CandidateCount := CandidateCount + 1;
+                            CandidateAnchor := AnchorPad;
+                            CandidateExtension := ExtensionPad;
+                        end;
+                    end;
+                end;
+            end;
+
+            if CandidateCount = 1 then
+            begin
+                SelectedPads.Add(CandidateAnchor);
+                SelectedPads.Add(CandidateExtension);
+                SelectionSource := 'auto_duplicate_same_name';
+            end
+            else if JoinAction = 'CLEANUP' then
+            begin
+                CandidateCount := 0;
+                CandidateAnchor := Nil;
+                CandidateExtension := Nil;
+                for i := 0 to AllPads.Count - 2 do
+                begin
+                    AnchorPad := AllPads[i];
+                    for OutlineObjects := i + 1 to AllPads.Count - 1 do
+                    begin
+                        ExtensionPad := AllPads[OutlineObjects];
+                        if (AnchorPad.Name = ExtensionPad.Name) and (AnchorPad.Layer = ExtensionPad.Layer) then
+                        begin
+                            AnchorArea := CoordToMMs(AnchorPad.XSizeOnLayer[AnchorPad.Layer]) * CoordToMMs(AnchorPad.YSizeOnLayer[AnchorPad.Layer]);
+                            CandidateArea := CoordToMMs(ExtensionPad.XSizeOnLayer[ExtensionPad.Layer]) * CoordToMMs(ExtensionPad.YSizeOnLayer[ExtensionPad.Layer]);
+                            if CandidateArea > AnchorArea then
+                            begin
+                                Pad := AnchorPad;
+                                AnchorPad := ExtensionPad;
+                                ExtensionPad := Pad;
+                            end;
+
+                            CandidateCount := CandidateCount + 1;
+                            CandidateAnchor := AnchorPad;
+                            CandidateExtension := ExtensionPad;
+                        end;
+                    end;
+                end;
+
+                if CandidateCount = 1 then
+                begin
+                    SelectedPads.Add(CandidateAnchor);
+                    SelectedPads.Add(CandidateExtension);
+                    SelectionSource := 'cleanup_duplicate_same_name_largest_pad';
+                end;
+            end;
+        end;
+
+        if SelectedPads.Count <> 2 then
+        begin
+            AddJSONBoolean(ResultProps, 'success', False);
+            AddJSONProperty(ResultProps, 'error', 'Select exactly two same-name rounded top-layer pads before running PCB_LIB_JOIN_SELECTED_PADS_CUSTOM, or leave exactly one supported duplicate same-name stepped pair in the active footprint.');
+            AddJSONProperty(ResultProps, 'cleanup_fallback', 'cleanup_duplicate_same_name_largest_pad');
+            AddJSONProperty(ResultProps, 'join_action', JoinAction);
+            AddJSONInteger(ResultProps, 'all_pads', AllPads.Count);
+            AddJSONInteger(ResultProps, 'selected_pads', SelectedPads.Count);
+        end
+        else
+        begin
+            AnchorPad := SelectedPads[0];
+            ExtensionPad := SelectedPads[1];
+            AnchorArea := CoordToMMs(AnchorPad.XSizeOnLayer[AnchorPad.Layer]) * CoordToMMs(AnchorPad.YSizeOnLayer[AnchorPad.Layer]);
+            Pad := ExtensionPad;
+            PadArea := CoordToMMs(Pad.XSizeOnLayer[Pad.Layer]) * CoordToMMs(Pad.YSizeOnLayer[Pad.Layer]);
+            if PadArea > AnchorArea then
+            begin
+                AnchorPad := Pad;
+                ExtensionPad := SelectedPads[0];
+                AnchorArea := PadArea;
+            end;
+
+            if (AnchorPad.Name <> ExtensionPad.Name) or (AnchorPad.Layer <> ExtensionPad.Layer) then
+            begin
+                AddJSONBoolean(ResultProps, 'success', False);
+                AddJSONProperty(ResultProps, 'error', 'Selected pads must have the same pad name and layer.');
+            end
+            else
+            begin
+                if JoinAction = 'CLEANUP' then
+                begin
+                    DeletedOutlines := 0;
+                    DeletedPads := 0;
+                    DeletedOutlines := CollectJoinTemporaryOutlines(Footprint, AnchorPad.Layer, TempObjects);
+                    TempObjects.Add(ExtensionPad);
+                    DeletedPads := 1;
+                    DeleteJoinObjects(TempObjects);
+
+                    if Board <> Nil then
+                        Board.ViewManager_FullUpdate;
+                    Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
+
+                    CurrentView := Client.GetCurrentView;
+                    if CurrentView <> Nil then
+                    begin
+                        ServerDocument := CurrentView.OwnerDocument;
+                        if ServerDocument <> Nil then
+                            ServerDocument.Modified := True;
+                    end;
+
+                    AddJSONBoolean(ResultProps, 'success', True);
+                    AddJSONProperty(ResultProps, 'action', JoinAction);
+                    AddJSONProperty(ResultProps, 'footprint', Footprint.Name);
+                    AddJSONProperty(ResultProps, 'pad_name', AnchorPad.Name);
+                    AddJSONProperty(ResultProps, 'selection_source', SelectionSource);
+                    AddJSONInteger(ResultProps, 'deleted_source_pads', DeletedPads);
+                    AddJSONInteger(ResultProps, 'temporary_outline_objects_deleted', DeletedOutlines);
+                    AddJSONBoolean(ResultProps, 'document_saved', False);
+                    AddJSONBoolean(ResultProps, 'document_dirty', True);
+                end
+                else
+                begin
+                    DeletedOutlines := CollectJoinTemporaryOutlines(Footprint, AnchorPad.Layer, TempObjects);
+                    if DeletedOutlines > 0 then
+                        DeleteJoinObjects(TempObjects);
+                    TempObjects.Clear;
+
+                    PCBServer.PreProcess;
+                    try
+                        OutlineObjects := AddRightStepCustomPadContour(Board, Footprint, AnchorPad, ExtensionPad, TempObjects);
+                    finally
+                        PCBServer.PostProcess;
+                    end;
+
+                    if OutlineObjects <= 0 then
+                    begin
+                        AddJSONBoolean(ResultProps, 'success', False);
+                        AddJSONProperty(ResultProps, 'error', 'Selected pad geometry is not a supported right-side stepped rounded-rectangle join.');
+                        AddJSONInteger(ResultProps, 'stale_temporary_outline_objects_deleted', DeletedOutlines);
+                    end
+                    else
+                    begin
+                        if Board <> Nil then
+                            Board.ViewManager_FullUpdate;
+                        Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
+
+                        CurrentView := Client.GetCurrentView;
+                        if CurrentView <> Nil then
+                        begin
+                            ServerDocument := CurrentView.OwnerDocument;
+                            if ServerDocument <> Nil then
+                                ServerDocument.Modified := True;
+                        end;
+
+                        AddJSONBoolean(ResultProps, 'success', True);
+                        AddJSONProperty(ResultProps, 'action', JoinAction);
+                        AddJSONProperty(ResultProps, 'footprint', Footprint.Name);
+                        AddJSONProperty(ResultProps, 'pad_name', AnchorPad.Name);
+                        AddJSONProperty(ResultProps, 'selection_source', SelectionSource);
+                        AddJSONInteger(ResultProps, 'selected_pads_prepared', SelectedPads.Count);
+                        AddJSONInteger(ResultProps, 'temporary_outline_objects', TempObjects.Count);
+                        AddJSONInteger(ResultProps, 'stale_temporary_outline_objects_deleted', DeletedOutlines);
+                        AddJSONBoolean(ResultProps, 'pad_and_outline_selected_for_custom_conversion', True);
+
+                        SelectOnlyJoinObjects(AnchorPad, TempObjects);
+                        if JoinAction = 'FULL' then
+                        begin
+                            Client.SendMessage('PCB:CustomPadShape', 'Action=Convert|Object=Track', 255, Client.CurrentView);
+                            AddJSONBoolean(ResultProps, 'conversion_command_sent', True);
+                            AddJSONProperty(ResultProps, 'next_verification', 'Read back primitives, then run PCB_LIB_JOIN_SELECTED_PADS_CUSTOM_CLEANUP only after conversion is visible.');
+                        end
+                        else
+                        begin
+                            AddJSONBoolean(ResultProps, 'conversion_command_sent', False);
+                            AddJSONProperty(ResultProps, 'next_step', 'Run PCB_LIB_JOIN_SELECTED_PADS_CUSTOM_CONVERT with this selection still active.');
+                        end;
+                        AddJSONBoolean(ResultProps, 'document_saved', False);
+                        AddJSONBoolean(ResultProps, 'document_dirty', True);
+                    end;
+                end;
+            end;
+        end;
+
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := OutputLines.Text;
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        ResultProps.Free;
+        TempObjects.Free;
+        AllPads.Free;
+        SelectedPads.Free;
     end;
 end;
 

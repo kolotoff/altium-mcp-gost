@@ -1528,6 +1528,78 @@ async def layout_duplicator_apply(ctx: Context, source_designators: list, destin
     
     logger.info(f"Layout duplication applied successfully")
     return json_dumps(result, indent=2)
+
+@mcp.tool()
+async def layout_duplicator_apply_groups(
+    ctx: Context,
+    source_designators: list,
+    destination_designator_groups: list,
+) -> str:
+    """
+    Apply one selected layout/routing source group to multiple destination groups in one Altium call.
+
+    Use this after layout_duplicator when copied tracks, vias, polygons, or regions are selected.
+    Separate layout_duplicator_apply calls can move the same duplicated routing primitives between
+    destinations; this helper repeats the source group and flattens all destination groups so the
+    Pascal apply command replicates routing for each group.
+
+    Args:
+        source_designators (list): Source component designators in one group.
+        destination_designator_groups (list): List of destination groups, each matching source length.
+
+    Returns:
+        str: JSON object with the result of the layout duplication
+    """
+    if not source_designators:
+        return json_dumps({"success": False, "error": "source_designators must not be empty"})
+
+    if not destination_designator_groups:
+        return json_dumps({"success": False, "error": "destination_designator_groups must not be empty"})
+
+    source_group_size = len(source_designators)
+    validation_errors = []
+    for group_index, destination_group in enumerate(destination_designator_groups):
+        if not isinstance(destination_group, list):
+            validation_errors.append(f"group {group_index} is not a list")
+            continue
+
+        if len(destination_group) != source_group_size:
+            validation_errors.append(
+                f"group {group_index} has {len(destination_group)} designators; expected {source_group_size}"
+            )
+
+    if validation_errors:
+        return json_dumps({"success": False, "error": "; ".join(validation_errors)})
+
+    expanded_source_designators = []
+    flattened_destination_designators = []
+    for destination_group in destination_designator_groups:
+        expanded_source_designators.extend(source_designators)
+        flattened_destination_designators.extend(destination_group)
+
+    logger.info(
+        "Applying grouped layout duplication from %s to %d destination groups",
+        source_designators,
+        len(destination_designator_groups),
+    )
+
+    response = await altium_bridge.execute_command(
+        "layout_duplicator_apply",
+        {
+            "source_designators": expanded_source_designators,
+            "destination_designators": flattened_destination_designators,
+        }
+    )
+
+    if not response.get("success", False):
+        error_msg = response.get("error", "Unknown error")
+        logger.error(f"Error applying grouped layout duplication: {error_msg}")
+        return json_dumps({"success": False, "error": f"Failed to apply grouped layout duplication: {error_msg}"})
+
+    result = response.get("result", {})
+
+    logger.info("Grouped layout duplication applied successfully")
+    return json_dumps(result, indent=2)
     
 @mcp.tool()
 async def get_pcb_rules(ctx: Context) -> str:

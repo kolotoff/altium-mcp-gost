@@ -282,6 +282,41 @@ class PcbLayoutDuplicatorSourceTest(unittest.TestCase):
             "The Altium bridge should expose the repair command for one-off board cleanup.",
         )
 
+    def test_grouped_apply_wrapper_repeats_source_groups_in_one_command(self):
+        source_path = Path(__file__).resolve().parents[1] / "main.py"
+        source = source_path.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "async def layout_duplicator_apply_groups",
+            source,
+            "MCP should expose a grouped layout apply helper for multi-destination routing copies.",
+        )
+        self.assertIn(
+            "destination_designator_groups",
+            source,
+            "Grouped apply should accept destination groups instead of a pre-flattened list.",
+        )
+        self.assertIn(
+            "expanded_source_designators.extend(source_designators)",
+            source,
+            "Grouped apply must repeat the source list once for each destination group.",
+        )
+        self.assertIn(
+            "flattened_destination_designators.extend(destination_group)",
+            source,
+            "Grouped apply must flatten destination groups for the existing Altium command.",
+        )
+        self.assertIn(
+            '"layout_duplicator_apply"',
+            source,
+            "Grouped apply should reuse the existing Pascal apply command.",
+        )
+        self.assertIn(
+            "Separate layout_duplicator_apply calls can move the same duplicated routing primitives",
+            source,
+            "The wrapper documentation should warn against separate apply calls for copied routing.",
+        )
+
 
 class PcbLibraryCustomPadSourceTest(unittest.TestCase):
     def test_selected_pad_join_uses_custom_pad_contour_conversion(self):

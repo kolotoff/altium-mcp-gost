@@ -16,7 +16,7 @@ Note: Having Claude place components on the PCB currently fails hard.
 - In the active PCB footprint library, move all primitives from Mechanical 13 to Mechanical 1 and Mechanical 15 to Mechanical 3, except footprint 53398-0271
 - In the active PCB footprint library, create Draftsman-style projections of embedded 3D STEP bodies on Mechanical 2 with 0.1 mm tracks, except footprint 53398-0271
 - List every footprint in the active PCB footprint library
-- Duplicate my selected layout. (Will prompt user to now select destination components. Supports Component, Track, Arc, Via, Polygon, & Region)
+- Duplicate my selected layout. (Will prompt user to now select destination components. Supports Component, Track, Arc, Via, Polygon, & Region. Use `layout_duplicator_apply_groups` when copying the same selected routing to multiple destinations.)
 - Show all my inner layers. Show the top and bottom layer. Turn off solder paste.
 - Rename PCB layer 4 back to Int2 DDR and layer 32 back to Bottom Layer.
 - Clear the Route Tool Path layer override so Top Layer displays with its normal layer-stack name.
@@ -186,6 +186,21 @@ The server provides several tools to interact with Altium Designer:
 - `move_components`: Move specified components by X and Y offsets
 - `layout_duplicator` ([YouTube](https://youtu.be/HD-A_8iVV70)): Starts layout duplication assuming you have already selected the source components on the PCB.
 - `layout_duplicator_apply`: Action #2 of `layout_duplicator`. Agent will use part info automatically to predict the match between source and destination components, then will send those matches to the place script.
+- `layout_duplicator_apply_groups`: Multi-destination wrapper for `layout_duplicator_apply`. Use this after `layout_duplicator` when the selected source includes routing primitives and you want the same placement/routing copied to more than one destination group. It repeats the source designator list and flattens all destination groups into one Altium apply command, so tracks, vias, polygons, and regions are replicated for each group.
+
+When copying selected routing to multiple destinations, call `layout_duplicator_apply_groups` once instead of calling `layout_duplicator_apply` repeatedly. Repeated separate apply calls can move the same duplicated routing primitives from the previous destination to the next destination.
+
+Example grouped apply payload:
+
+```json
+{
+  "source_designators": ["C258", "C257", "R165", "R163", "L47", "DA8"],
+  "destination_designator_groups": [
+    ["C254", "C253", "R139", "R138", "L41", "DA5"],
+    ["C256", "C255", "R142", "R140", "L42", "DA7"]
+  ]
+}
+```
 
 The cool thing about layout duplication this way as opposed to with Altium's built in layout replication, is that the exact components don't have to match because the LLM can look through the descriptions and understand which components match and which don't have a match. That's something that can't really be hard coded.
 ![Placement Duplicator](assets/placement_duplicator.gif)

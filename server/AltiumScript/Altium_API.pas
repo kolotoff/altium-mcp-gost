@@ -1027,6 +1027,59 @@ begin
         Result := CopyPCBPolygonGeometry(SourcePolygonName, TargetPolygonName);
 end;
 
+function ExecuteAddTentedViasAroundKeepoutContour(RequestData: TStringList): String;
+var
+    ParamValue: String;
+    i, ValueStart: Integer;
+    ViaDiameterMM: Double;
+    ViaHoleMM: Double;
+    EdgeClearanceMM: Double;
+    PitchMM: Double;
+    NetName: String;
+begin
+    ViaDiameterMM := 0.4;
+    ViaHoleMM := 0.2;
+    EdgeClearanceMM := 0.3;
+    PitchMM := 2.0;
+    NetName := '';
+
+    for i := 0 to RequestData.Count - 1 do
+    begin
+        if (Pos('"via_diameter_mm"', RequestData[i]) > 0) then
+        begin
+            ValueStart := Pos(':', RequestData[i]) + 1;
+            ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
+            ViaDiameterMM := SafeStrToFloat(TrimJSON(ParamValue));
+        end
+        else if (Pos('"via_hole_mm"', RequestData[i]) > 0) then
+        begin
+            ValueStart := Pos(':', RequestData[i]) + 1;
+            ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
+            ViaHoleMM := SafeStrToFloat(TrimJSON(ParamValue));
+        end
+        else if (Pos('"edge_clearance_mm"', RequestData[i]) > 0) then
+        begin
+            ValueStart := Pos(':', RequestData[i]) + 1;
+            ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
+            EdgeClearanceMM := SafeStrToFloat(TrimJSON(ParamValue));
+        end
+        else if (Pos('"pitch_mm"', RequestData[i]) > 0) then
+        begin
+            ValueStart := Pos(':', RequestData[i]) + 1;
+            ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
+            PitchMM := SafeStrToFloat(TrimJSON(ParamValue));
+        end
+        else if (Pos('"net_name"', RequestData[i]) > 0) then
+        begin
+            ValueStart := Pos(':', RequestData[i]) + 1;
+            ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
+            NetName := TrimJSON(ParamValue);
+        end;
+    end;
+
+    Result := AddTentedViasAroundKeepoutContour(ViaDiameterMM, ViaHoleMM, EdgeClearanceMM, PitchMM, NetName);
+end;
+
 // Extract the search library symbol logic
 function ExecuteSearchLibrarySymbol(RequestData: TStringList): String;
 var
@@ -1145,6 +1198,8 @@ begin
             Result := ExecuteMovePCBLibraryMechanicalLayers(RequestData);
         'copy_pcb_polygon_geometry':
             Result := ExecuteCopyPCBPolygonGeometry(RequestData);
+        'add_tented_vias_around_keepout_contour':
+            Result := ExecuteAddTentedViasAroundKeepoutContour(RequestData);
     else
         ShowMessage('Error: Unknown command: ' + CommandName);
     end;

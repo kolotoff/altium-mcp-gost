@@ -123,6 +123,7 @@ begin
        (CommandName = 'move_selected_vias')                  or
        (CommandName = 'move_selected_pads_and_touching_vias') or
        (CommandName = 'copy_pcb_polygon_geometry')           or
+       (CommandName = 'add_tented_vias_around_keepout_contour') or
        (CommandName = 'set_pcb_layer_visibility')            or
        (CommandName = 'set_pcb_layer_names_by_id')           or
        (CommandName = 'clear_pcb_route_tool_path_layer')     or

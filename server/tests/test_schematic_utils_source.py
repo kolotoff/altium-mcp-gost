@@ -175,6 +175,35 @@ class PcbUtilsSourceTest(unittest.TestCase):
         self.assertIn("(CommandName = 'copy_pcb_polygon_geometry')", focus_source)
         self.assertIn("copy_pcb_polygon_geometry", readme_source)
 
+    def test_tented_keepout_contour_via_command_is_exposed_end_to_end(self):
+        server_path = Path(__file__).resolve().parents[1] / "main.py"
+        api_path = Path(__file__).resolve().parents[1] / "AltiumScript" / "Altium_API.pas"
+        utils_path = Path(__file__).resolve().parents[1] / "AltiumScript" / "pcb_utils.pas"
+        focus_path = Path(__file__).resolve().parents[1] / "AltiumScript" / "other_utils.pas"
+
+        server_source = server_path.read_text(encoding="utf-8")
+        api_source = api_path.read_text(encoding="utf-8")
+        utils_source = utils_path.read_text(encoding="utf-8")
+        focus_source = focus_path.read_text(encoding="utf-8")
+
+        self.assertIn("async def add_tented_vias_around_keepout_contour", server_source)
+        self.assertIn('"add_tented_vias_around_keepout_contour"', server_source)
+        self.assertIn("function ExecuteAddTentedViasAroundKeepoutContour(RequestData: TStringList): String", api_source)
+        self.assertIn("'add_tented_vias_around_keepout_contour':", api_source)
+        self.assertIn("function AddTentedViasAroundKeepoutContour(ViaDiameterMM, ViaHoleMM, EdgeClearanceMM, PitchMM: Double; NetName: String): String", utils_source)
+        self.assertIn("PCBPrimitiveIsKeepout", utils_source)
+        self.assertIn("EdgeClearanceMM + (ViaDiameterMM / 2.0)", utils_source)
+        self.assertIn("FindPCBBoardNetByName(Board, NetName)", utils_source)
+        self.assertIn("Via.Net := Net", utils_source)
+        self.assertIn("Via.SetState_SolderMaskExpansion(-(ViaDiameter div 2))", utils_source)
+        self.assertIn("Via.IsTenting_Top := True", utils_source)
+        self.assertIn("Via.IsTenting_Bottom := True", utils_source)
+        self.assertIn("Client.SendMessage('PCB:DeSelect'", utils_source)
+        self.assertIn("created_vias_selected", utils_source)
+        self.assertIn('"net_name"', server_source)
+        self.assertIn("document_saved", utils_source)
+        self.assertIn("(CommandName = 'add_tented_vias_around_keepout_contour')", focus_source)
+
 
 class PcbLayoutDuplicatorSourceTest(unittest.TestCase):
     def test_selection_phase_does_not_start_interactive_inside_area_selection(self):

@@ -1974,6 +1974,60 @@ async def copy_pcb_polygon_geometry(ctx: Context, source_polygon: str, target_po
     return json_dumps(result, indent=2)
 
 @mcp.tool()
+async def add_tented_vias_around_keepout_contour(
+    ctx: Context,
+    via_diameter_mm: float = 0.4,
+    via_hole_mm: float = 0.2,
+    edge_clearance_mm: float = 0.3,
+    pitch_mm: float = 2.0,
+    net_name: str = "",
+) -> str:
+    """
+    Add fully tented vias around the active PCB keepout contour.
+
+    Vias are placed inside the PCB by offsetting their centers from the Keep-Out
+    Layer contour by edge_clearance_mm plus the via radius. The PCB document is
+    modified and left dirty for inspection; this tool does not save.
+
+    Args:
+        via_diameter_mm (float): Via outer diameter in mm.
+        via_hole_mm (float): Via drill hole diameter in mm.
+        edge_clearance_mm (float): Clearance from via outer diameter to keepout in mm.
+        pitch_mm (float): Via center-to-center pitch along the contour in mm.
+        net_name (str): Optional PCB net name to assign to created vias.
+
+    Returns:
+        str: JSON object with placement counts and applied settings.
+    """
+    logger.info(
+        "Adding tented contour vias diameter=%s hole=%s edge_clearance=%s pitch=%s",
+        via_diameter_mm,
+        via_hole_mm,
+        edge_clearance_mm,
+        pitch_mm,
+    )
+
+    response = await altium_bridge.execute_command(
+        "add_tented_vias_around_keepout_contour",
+        {
+            "via_diameter_mm": via_diameter_mm,
+            "via_hole_mm": via_hole_mm,
+            "edge_clearance_mm": edge_clearance_mm,
+            "pitch_mm": pitch_mm,
+            "net_name": net_name,
+        },
+    )
+
+    if not response.get("success", False):
+        error_msg = response.get("error", "Unknown error")
+        logger.error("Error adding tented contour vias: %s", error_msg)
+        return json_dumps({"success": False, "error": f"Failed to add tented contour vias: {error_msg}"})
+
+    result = response.get("result", {})
+    logger.info("Tented contour vias added successfully")
+    return json_dumps(result, indent=2)
+
+@mcp.tool()
 async def get_server_status(ctx: Context) -> str:
     """Get the current status of the Altium MCP server"""
     status = {

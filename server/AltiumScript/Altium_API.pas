@@ -539,6 +539,12 @@ begin
     end;
 end;
 
+// Extract the delete selected vias logic
+function ExecuteDeleteSelectedVias(RequestData: TStringList): String;
+begin
+    Result := DeleteSelectedVias();
+end;
+
 // Extract the move selected pads and touching vias logic
 function ExecuteMoveSelectedPadsAndTouchingVias(RequestData: TStringList): String;
 var
@@ -987,6 +993,40 @@ begin
     end;
 end;
 
+function ExecuteCopyPCBPolygonGeometry(RequestData: TStringList): String;
+var
+    ParamValue: String;
+    i, ValueStart: Integer;
+    SourcePolygonName: String;
+    TargetPolygonName: String;
+begin
+    SourcePolygonName := '';
+    TargetPolygonName := '';
+
+    for i := 0 to RequestData.Count - 1 do
+    begin
+        if (Pos('"source_polygon"', RequestData[i]) > 0) then
+        begin
+            ValueStart := Pos(':', RequestData[i]) + 1;
+            ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
+            SourcePolygonName := TrimJSON(ParamValue);
+        end
+        else if (Pos('"target_polygon"', RequestData[i]) > 0) then
+        begin
+            ValueStart := Pos(':', RequestData[i]) + 1;
+            ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
+            TargetPolygonName := TrimJSON(ParamValue);
+        end;
+    end;
+
+    if SourcePolygonName = '' then
+        Result := '{"success": false, "error": "No source polygon provided"}'
+    else if TargetPolygonName = '' then
+        Result := '{"success": false, "error": "No target polygon provided"}'
+    else
+        Result := CopyPCBPolygonGeometry(SourcePolygonName, TargetPolygonName);
+end;
+
 // Extract the search library symbol logic
 function ExecuteSearchLibrarySymbol(RequestData: TStringList): String;
 var
@@ -1073,6 +1113,8 @@ begin
             Result := ExecuteMoveComponents(RequestData);            
         'move_selected_vias':
             Result := ExecuteMoveSelectedVias(RequestData);
+        'delete_selected_vias':
+            Result := ExecuteDeleteSelectedVias(RequestData);
         'move_selected_pads_and_touching_vias':
             Result := ExecuteMoveSelectedPadsAndTouchingVias(RequestData);
         'layout_duplicator':
@@ -1101,6 +1143,8 @@ begin
             Result := ExecuteSetPCBLibraryPadShapes(RequestData);
         'move_pcb_library_mechanical_layers':
             Result := ExecuteMovePCBLibraryMechanicalLayers(RequestData);
+        'copy_pcb_polygon_geometry':
+            Result := ExecuteCopyPCBPolygonGeometry(RequestData);
     else
         ShowMessage('Error: Unknown command: ' + CommandName);
     end;

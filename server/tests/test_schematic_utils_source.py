@@ -150,6 +150,31 @@ class PcbUtilsSourceTest(unittest.TestCase):
         self.assertIn("set_pcb_layer_names_by_id", readme_source)
         self.assertIn("clear_pcb_route_tool_path_layer", readme_source)
 
+    def test_pcb_polygon_geometry_copy_command_is_exposed_end_to_end(self):
+        server_path = Path(__file__).resolve().parents[1] / "main.py"
+        api_path = Path(__file__).resolve().parents[1] / "AltiumScript" / "Altium_API.pas"
+        utils_path = Path(__file__).resolve().parents[1] / "AltiumScript" / "pcb_utils.pas"
+        focus_path = Path(__file__).resolve().parents[1] / "AltiumScript" / "other_utils.pas"
+        readme_path = Path(__file__).resolve().parents[2] / "README.md"
+
+        server_source = server_path.read_text(encoding="utf-8")
+        api_source = api_path.read_text(encoding="utf-8")
+        utils_source = utils_path.read_text(encoding="utf-8")
+        focus_source = focus_path.read_text(encoding="utf-8")
+        readme_source = readme_path.read_text(encoding="utf-8")
+
+        self.assertIn("async def copy_pcb_polygon_geometry", server_source)
+        self.assertIn('"copy_pcb_polygon_geometry"', server_source)
+        self.assertIn("function ExecuteCopyPCBPolygonGeometry(RequestData: TStringList): String", api_source)
+        self.assertIn("'copy_pcb_polygon_geometry':", api_source)
+        self.assertIn("function CopyPCBPolygonGeometry(SourcePolygonName, TargetPolygonName: String): String", utils_source)
+        self.assertIn("NewPoly := SourcePoly.Replicate", utils_source)
+        self.assertIn("NewPoly.Layer := TargetLayer", utils_source)
+        self.assertIn("NewPoly.Net := TargetNet", utils_source)
+        self.assertIn("NewPoly.Name := TargetName", utils_source)
+        self.assertIn("(CommandName = 'copy_pcb_polygon_geometry')", focus_source)
+        self.assertIn("copy_pcb_polygon_geometry", readme_source)
+
 
 class PcbLayoutDuplicatorSourceTest(unittest.TestCase):
     def test_selection_phase_does_not_start_interactive_inside_area_selection(self):

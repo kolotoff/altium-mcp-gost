@@ -1940,6 +1940,40 @@ async def move_pcb_library_mechanical_layers(ctx: Context, exclude_footprint_nam
     return json_dumps(result, indent=2)
 
 @mcp.tool()
+async def copy_pcb_polygon_geometry(ctx: Context, source_polygon: str, target_polygon: str) -> str:
+    """
+    Copy the geometry of one named PCB polygon to another named PCB polygon.
+
+    The destination polygon keeps its original name, net, and layer. The board is
+    modified in Altium and left dirty for inspection; this tool does not save.
+
+    Args:
+        source_polygon (str): Source polygon name, or its net name as fallback.
+        target_polygon (str): Target polygon name, or its net name as fallback.
+
+    Returns:
+        str: JSON object with source/target polygon readback details.
+    """
+    logger.info("Copying PCB polygon geometry from %s to %s", source_polygon, target_polygon)
+
+    response = await altium_bridge.execute_command(
+        "copy_pcb_polygon_geometry",
+        {
+            "source_polygon": source_polygon,
+            "target_polygon": target_polygon,
+        },
+    )
+
+    if not response.get("success", False):
+        error_msg = response.get("error", "Unknown error")
+        logger.error("Error copying PCB polygon geometry: %s", error_msg)
+        return json_dumps({"success": False, "error": f"Failed to copy PCB polygon geometry: {error_msg}"})
+
+    result = response.get("result", {})
+    logger.info("PCB polygon geometry copied successfully")
+    return json_dumps(result, indent=2)
+
+@mcp.tool()
 async def get_server_status(ctx: Context) -> str:
     """Get the current status of the Altium MCP server"""
     status = {

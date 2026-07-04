@@ -10799,6 +10799,272 @@ begin
     end;
 end;
 
+// Function to delete currently selected vias without deleting other selected objects
+function DeleteSelectedVias(): String;
+var
+    Board        : IPCB_Board;
+    Iterator     : IPCB_BoardIterator;
+    Primitive    : IPCB_Primitive;
+    ViasToDelete : TObjectList;
+    KeepSelected : TObjectList;
+    ResultProps  : TStringList;
+    OutputLines  : TStringList;
+    i            : Integer;
+begin
+    Board := PCBServer.GetCurrentPCBBoard;
+    if (Board = nil) then
+    begin
+        Result := 'ERROR: No PCB document is currently active';
+        Exit;
+    end;
+
+    ViasToDelete := TObjectList.Create;
+    ViasToDelete.OwnsObjects := False;
+    KeepSelected := TObjectList.Create;
+    KeepSelected.OwnsObjects := False;
+    ResultProps := TStringList.Create;
+
+    try
+        Iterator := Board.BoardIterator_Create;
+        Iterator.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
+        Iterator.AddFilter_Method(eProcessAll);
+
+        Primitive := Iterator.FirstPCBObject;
+        while (Primitive <> Nil) do
+        begin
+            if Primitive.Selected then
+            begin
+                if Primitive.ObjectId = eViaObject then
+                    ViasToDelete.Add(Primitive)
+                else
+                    KeepSelected.Add(Primitive);
+            end;
+
+            Primitive := Iterator.NextPCBObject;
+        end;
+
+        Board.BoardIterator_Destroy(Iterator);
+
+        if ViasToDelete.Count > 0 then
+        begin
+            PCBServer.PreProcess;
+
+            for i := 0 to KeepSelected.Count - 1 do
+            begin
+                Primitive := KeepSelected[i];
+                Primitive.Selected := False;
+            end;
+
+            for i := 0 to ViasToDelete.Count - 1 do
+            begin
+                Primitive := ViasToDelete[i];
+                Primitive.Selected := True;
+            end;
+
+            Client.SendMessage('PCB:DeleteObjects', 'Object=SELECTED', 255, Client.CurrentView);
+
+            for i := 0 to KeepSelected.Count - 1 do
+            begin
+                Primitive := KeepSelected[i];
+                Primitive.Selected := True;
+            end;
+
+            PCBServer.PostProcess;
+            Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
+            Board.ViewManager_FullUpdate;
+        end;
+
+        AddJSONBoolean(ResultProps, 'success', True);
+        AddJSONInteger(ResultProps, 'deleted_vias', ViasToDelete.Count);
+        AddJSONInteger(ResultProps, 'preserved_other_selected_objects', KeepSelected.Count);
+
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := OutputLines.Text;
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        ViasToDelete.Free;
+        KeepSelected.Free;
+        ResultProps.Free;
+    end;
+end;
+
+function PCBPrimitiveNetName(Primitive: IPCB_Primitive): String;
+begin
+    Result := '';
+    if (Primitive <> Nil) and (Primitive.Net <> Nil) then
+        Result := Primitive.Net.Name;
+end;
+
+function PCBPolygonIdentifierMatches(Polygon: IPCB_Primitive; PolygonName: String): Boolean;
+var
+    MatchName : String;
+begin
+    Result := False;
+    MatchName := UpperCase(Trim(PolygonName));
+    if (Polygon = Nil) or (MatchName = '') then
+        Exit;
+
+    if UpperCase(Trim(Polygon.Name)) = MatchName then
+    begin
+        Result := True;
+        Exit;
+    end;
+
+    if UpperCase(Trim(PCBPrimitiveNetName(Polygon))) = MatchName then
+        Result := True;
+end;
+
+function PCBLayerDisplayName(Board: IPCB_Board; Layer: TLayer): String;
+var
+    LayerObj: IPCB_LayerObject;
+begin
+    Result := Layer2String(Layer);
+    if Board = Nil then
+        Exit;
+
+    LayerObj := Board.LayerStack.LayerObject[Layer];
+    if (LayerObj <> Nil) and (LayerObj.Name <> '') then
+        Result := LayerObj.Name;
+end;
+
+procedure AddPCBPolygonSummary(Props: TStringList; Prefix: String; Board: IPCB_Board; Polygon: IPCB_Primitive);
+var
+    Rect: TCoordRect;
+begin
+    if Polygon = Nil then
+        Exit;
+
+    Rect := Polygon.BoundingRectangle;
+    AddJSONProperty(Props, Prefix + '_name', Polygon.Name);
+    AddJSONProperty(Props, Prefix + '_net', PCBPrimitiveNetName(Polygon));
+    AddJSONProperty(Props, Prefix + '_layer', PCBLayerDisplayName(Board, Polygon.Layer));
+    AddJSONNumber(Props, Prefix + '_left_mils', CoordToMils(Rect.Left));
+    AddJSONNumber(Props, Prefix + '_bottom_mils', CoordToMils(Rect.Bottom));
+    AddJSONNumber(Props, Prefix + '_right_mils', CoordToMils(Rect.Right));
+    AddJSONNumber(Props, Prefix + '_top_mils', CoordToMils(Rect.Top));
+end;
+
+function FindPCBPolygonByNameOrNet(Board: IPCB_Board; PolygonName: String; ExcludePolygon: IPCB_Primitive): IPCB_Primitive;
+var
+    Iterator : IPCB_BoardIterator;
+    Polygon  : IPCB_Primitive;
+begin
+    Result := Nil;
+    if Board = Nil then
+        Exit;
+
+    Iterator := Board.BoardIterator_Create;
+    Iterator.AddFilter_ObjectSet(MkSet(ePolyObject));
+    Iterator.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
+    Iterator.AddFilter_Method(eProcessAll);
+
+    try
+        Polygon := Iterator.FirstPCBObject;
+        while Polygon <> Nil do
+        begin
+            if (Polygon <> ExcludePolygon) and PCBPolygonIdentifierMatches(Polygon, PolygonName) then
+            begin
+                Result := Polygon;
+                Exit;
+            end;
+
+            Polygon := Iterator.NextPCBObject;
+        end;
+    finally
+        Board.BoardIterator_Destroy(Iterator);
+    end;
+end;
+
+function CopyPCBPolygonGeometry(SourcePolygonName, TargetPolygonName: String): String;
+var
+    Board         : IPCB_Board;
+    SourcePoly    : IPCB_Primitive;
+    TargetPoly    : IPCB_Primitive;
+    NewPoly       : IPCB_Primitive;
+    TargetNet     : IPCB_Net;
+    TargetLayer   : TLayer;
+    TargetName    : String;
+    ResultProps   : TStringList;
+    OutputLines   : TStringList;
+begin
+    Board := PCBServer.GetCurrentPCBBoard;
+    if (Board = Nil) then
+    begin
+        Result := 'ERROR: No PCB document is currently active';
+        Exit;
+    end;
+
+    ResultProps := TStringList.Create;
+    try
+        SourcePoly := FindPCBPolygonByNameOrNet(Board, SourcePolygonName, Nil);
+        if SourcePoly = Nil then
+        begin
+            AddJSONBoolean(ResultProps, 'success', False);
+            AddJSONProperty(ResultProps, 'error', 'Source polygon not found: ' + SourcePolygonName);
+        end
+        else
+        begin
+            TargetPoly := FindPCBPolygonByNameOrNet(Board, TargetPolygonName, SourcePoly);
+            if TargetPoly = Nil then
+            begin
+                AddJSONBoolean(ResultProps, 'success', False);
+                AddJSONProperty(ResultProps, 'error', 'Target polygon not found: ' + TargetPolygonName);
+            end
+            else
+            begin
+                TargetNet := TargetPoly.Net;
+                TargetLayer := TargetPoly.Layer;
+                TargetName := TargetPoly.Name;
+                if TargetName = '' then
+                    TargetName := TargetPolygonName;
+
+                AddPCBPolygonSummary(ResultProps, 'source_before', Board, SourcePoly);
+                AddPCBPolygonSummary(ResultProps, 'target_before', Board, TargetPoly);
+
+                PCBServer.PreProcess;
+                try
+                    NewPoly := SourcePoly.Replicate;
+                    PCBServer.SendMessageToRobots(NewPoly.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+                    NewPoly.Layer := TargetLayer;
+                    NewPoly.Net := TargetNet;
+                    NewPoly.Name := TargetName;
+                    Board.AddPCBObject(NewPoly);
+                    PCBServer.SendMessageToRobots(NewPoly.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+
+                    Board.RemovePCBObject(TargetPoly);
+                    Board.DispatchMessage(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, NewPoly.I_ObjectAddress);
+                finally
+                    PCBServer.PostProcess;
+                end;
+
+                Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
+                Board.ConnectivelyValidateNets;
+                Board.ViewManager_FullUpdate;
+
+                AddJSONBoolean(ResultProps, 'success', True);
+                AddJSONProperty(ResultProps, 'source_polygon', SourcePolygonName);
+                AddJSONProperty(ResultProps, 'target_polygon', TargetPolygonName);
+                AddPCBPolygonSummary(ResultProps, 'target_after', Board, NewPoly);
+                AddJSONBoolean(ResultProps, 'document_dirty', True);
+            end;
+        end;
+
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := OutputLines.Text;
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        ResultProps.Free;
+    end;
+end;
+
 // Function to move currently selected vias by X and Y offsets
 function MoveSelectedViasByOffset(XOffset, YOffset: TCoord): String;
 var

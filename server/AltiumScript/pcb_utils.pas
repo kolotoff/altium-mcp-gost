@@ -11065,6 +11065,131 @@ begin
     end;
 end;
 
+function PCBFillKindName(Primitive: IPCB_Primitive): String;
+begin
+    Result := 'unknown';
+    if Primitive = Nil then
+        Exit;
+
+    case Primitive.ObjectId of
+        eFillObject:
+            Result := 'fill';
+        eRegionObject:
+            Result := 'region';
+    end;
+end;
+
+function CopySelectedFillToSignalLayers(): String;
+var
+    Board          : IPCB_Board;
+    LayerStack     : IPCB_LayerStack_V7;
+    LayerObj       : IPCB_LayerObject;
+    SelectedObj    : IPCB_Primitive;
+    SourceFill     : IPCB_Primitive;
+    NewFill        : IPCB_Primitive;
+    CopiedLayers   : TStringList;
+    ResultProps    : TStringList;
+    OutputLines    : TStringList;
+    i              : Integer;
+    FillCount      : Integer;
+begin
+    Board := PCBServer.GetCurrentPCBBoard;
+    if Board = Nil then
+    begin
+        Result := '{"success": false, "error": "No PCB document is currently active"}';
+        Exit;
+    end;
+
+    ResultProps := TStringList.Create;
+    CopiedLayers := TStringList.Create;
+    try
+        SourceFill := Nil;
+        FillCount := 0;
+
+        for i := 0 to Board.SelectecObjectCount - 1 do
+        begin
+            SelectedObj := Board.SelectecObject[i];
+            if (SelectedObj <> Nil) and
+               ((SelectedObj.ObjectId = eFillObject) or (SelectedObj.ObjectId = eRegionObject)) then
+            begin
+                FillCount := FillCount + 1;
+                SourceFill := SelectedObj;
+            end;
+        end;
+
+        if FillCount <> 1 then
+        begin
+            AddJSONBoolean(ResultProps, 'success', False);
+            AddJSONProperty(ResultProps, 'error', 'Select exactly one fill or region before running copy_selected_fill_to_signal_layers.');
+            AddJSONInteger(ResultProps, 'selected_fill_or_region_count', FillCount);
+        end
+        else if not LayerSet.SignalLayers.Contains(SourceFill.Layer) then
+        begin
+            AddJSONBoolean(ResultProps, 'success', False);
+            AddJSONProperty(ResultProps, 'error', 'Selected fill/region is not on a signal layer.');
+            AddJSONProperty(ResultProps, 'source_layer', PCBLayerDisplayName(Board, SourceFill.Layer));
+        end
+        else
+        begin
+            LayerStack := Board.LayerStack_V7;
+            if LayerStack = Nil then
+            begin
+                AddJSONBoolean(ResultProps, 'success', False);
+                AddJSONProperty(ResultProps, 'error', 'PCB layer stack is unavailable.');
+            end
+            else
+            begin
+                PCBServer.PreProcess;
+                try
+                    LayerObj := LayerStack.FirstLayer;
+                    while LayerObj <> Nil do
+                    begin
+                        if LayerSet.SignalLayers.Contains(LayerObj.V6_LayerID) and
+                           (LayerObj.V6_LayerID <> SourceFill.Layer) then
+                        begin
+                            NewFill := SourceFill.Replicate;
+                            PCBServer.SendMessageToRobots(NewFill.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+                            NewFill.Layer := LayerObj.V6_LayerID;
+                            NewFill.Selected := True;
+                            Board.AddPCBObject(NewFill);
+                            PCBServer.SendMessageToRobots(NewFill.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+                            Board.DispatchMessage(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, NewFill.I_ObjectAddress);
+                            CopiedLayers.Add('"' + JSONEscapeString(PCBLayerDisplayName(Board, LayerObj.V6_LayerID)) + '"');
+                        end;
+
+                        LayerObj := LayerStack.NextLayer(LayerObj);
+                    end;
+                finally
+                    PCBServer.PostProcess;
+                end;
+
+                Board.ConnectivelyValidateNets;
+                Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
+                Board.ViewManager_FullUpdate;
+
+                AddJSONBoolean(ResultProps, 'success', True);
+                AddJSONProperty(ResultProps, 'source_kind', PCBFillKindName(SourceFill));
+                AddJSONProperty(ResultProps, 'source_net', PCBPrimitiveNetName(SourceFill));
+                AddJSONProperty(ResultProps, 'source_layer', PCBLayerDisplayName(Board, SourceFill.Layer));
+                AddJSONInteger(ResultProps, 'copied_count', CopiedLayers.Count);
+                ResultProps.Add(BuildJSONArray(CopiedLayers, 'target_layers'));
+                AddJSONBoolean(ResultProps, 'document_dirty', True);
+            end;
+        end;
+
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := OutputLines.Text;
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        CopiedLayers.Free;
+        ResultProps.Free;
+    end;
+end;
+
 function PCBPrimitiveIsKeepout(Primitive: IPCB_Primitive): Boolean;
 begin
     Result := False;

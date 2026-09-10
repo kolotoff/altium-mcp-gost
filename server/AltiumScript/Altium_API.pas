@@ -1027,6 +1027,11 @@ begin
         Result := CopyPCBPolygonGeometry(SourcePolygonName, TargetPolygonName);
 end;
 
+function ExecuteCopySelectedFillToSignalLayers(RequestData: TStringList): String;
+begin
+    Result := CopySelectedFillToSignalLayers();
+end;
+
 function ExecuteAddTentedViasAroundKeepoutContour(RequestData: TStringList): String;
 var
     ParamValue: String;
@@ -1198,6 +1203,8 @@ begin
             Result := ExecuteMovePCBLibraryMechanicalLayers(RequestData);
         'copy_pcb_polygon_geometry':
             Result := ExecuteCopyPCBPolygonGeometry(RequestData);
+        'copy_selected_fill_to_signal_layers':
+            Result := ExecuteCopySelectedFillToSignalLayers(RequestData);
         'add_tented_vias_around_keepout_contour':
             Result := ExecuteAddTentedViasAroundKeepoutContour(RequestData);
     else

@@ -5,8 +5,6 @@ import time
 import asyncio
 import logging
 import subprocess
-import tkinter as tk
-from tkinter import filedialog
 from pathlib import Path
 from typing import Dict, Any, Optional
 import sys
@@ -77,39 +75,48 @@ class AltiumConfig:
             self._create_default_config()
     
     def _create_default_config(self):
-        """Create a default configuration file with improved Altium executable discovery"""
-        
-        # Try to find Altium directories dynamically
-        altium_base_path = r"C:\Program Files\Altium"
-        altium_exe_path = None
-        
-        if os.path.exists(altium_base_path):
-            # Find all directories that match the pattern AD*
-            ad_dirs = glob.glob(os.path.join(altium_base_path, "AD*"))
-            
-            if ad_dirs:
-                # Sort directories by version number (extract the number after "AD")
-                def get_version_number(dir_path):
-                    match = re.search(r"AD(\d+)", os.path.basename(dir_path))
-                    if match:
-                        return int(match.group(1))
-                    return 0
-                
-                # Sort directories by version number (highest first)
-                ad_dirs.sort(key=get_version_number, reverse=True)
-                
-                # Try each directory until we find one with X2.EXE
-                for ad_dir in ad_dirs:
-                    potential_exe = os.path.join(ad_dir, "X2.EXE")
-                    if os.path.exists(potential_exe):
-                        altium_exe_path = potential_exe
-                        break
-        
-        # Set the found path (or empty string if nothing found)
-        self.altium_exe_path = altium_exe_path if altium_exe_path else ""
-        
-        # Save the configuration
+        """Create a default configuration without opening any desktop UI."""
+        self.altium_exe_path = self._discover_altium_executable() or ""
         self.save_config()
+
+    @staticmethod
+    def _discover_altium_executable() -> Optional[str]:
+        """Find the active Altium installation using its installer registry data."""
+        candidates = [os.environ.get("ALTIUM_EXE_PATH", "")]
+
+        # Altium's current installer records each build here.  In particular,
+        # ProgramsInstallPath supports installations outside C:\\Program Files.
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Altium\Builds") as builds:
+                index = 0
+                while True:
+                    try:
+                        build_name = winreg.EnumKey(builds, index)
+                        index += 1
+                    except OSError:
+                        break
+                    try:
+                        with winreg.OpenKey(builds, build_name) as build:
+                            installed = str(winreg.QueryValueEx(build, "Installed")[0]).lower()
+                            install_dir = winreg.QueryValueEx(build, "ProgramsInstallPath")[0]
+                        if installed == "true":
+                            candidates.append(str(Path(install_dir) / "X2.EXE"))
+                    except (FileNotFoundError, OSError):
+                        continue
+        except (ImportError, FileNotFoundError, OSError):
+            pass
+
+        # Legacy installer locations remain a useful fallback.
+        for base_path in (Path(r"C:\Program Files\Altium"), Path(r"C:\Program Files (x86)\Altium")):
+            candidates.append(str(base_path / "X2.EXE"))
+            if base_path.is_dir():
+                candidates.extend(str(directory / "X2.EXE") for directory in sorted(base_path.glob("AD*"), reverse=True))
+
+        for candidate in candidates:
+            if candidate and Path(candidate).is_file():
+                return candidate
+        return None
     
     def save_config(self):
         """Save configuration to file"""
@@ -126,103 +133,24 @@ class AltiumConfig:
             logger.error(f"Error saving configuration: {e}")
     
     def verify_paths(self):
-        """Verify that the paths in the configuration exist, prompt for input if they don't"""
-
-        # Initialize variables
-        root = None
-        paths_verified = True
-        
-        # Check Altium executable
-        if not self.altium_exe_path or not os.path.exists(self.altium_exe_path):
-            paths_verified = False
-            
-            # Before prompting, try an automatic discovery
-            altium_base_path = r"C:\Program Files\Altium"
-            if os.path.exists(altium_base_path):
-                logger.info(f"Attempting automatic discovery in {altium_base_path}")
-                # Find all directories that match the pattern AD*
-                ad_dirs = glob.glob(os.path.join(altium_base_path, "AD*"))
-                
-                if ad_dirs:
-                    # Sort directories by version number (extract the number after "AD")
-                    def get_version_number(dir_path):
-                        match = re.search(r"AD(\d+)", os.path.basename(dir_path))
-                        if match:
-                            return int(match.group(1))
-                        return 0
-                    
-                    # Sort directories by version number (highest first)
-                    ad_dirs.sort(key=get_version_number, reverse=True)
-                    
-                    # Try each directory until we find one with X2.EXE
-                    for ad_dir in ad_dirs:
-                        potential_exe = os.path.join(ad_dir, "X2.EXE")
-                        if os.path.exists(potential_exe):
-                            self.altium_exe_path = potential_exe
-                            logger.info(f"Automatically found Altium at: {self.altium_exe_path}")
-                            print(f"Automatically found Altium at: {self.altium_exe_path}")
-                            paths_verified = True
-                            break
-            
-            # If automatic discovery failed, prompt for input
-            if not self.altium_exe_path or not os.path.exists(self.altium_exe_path):
-                if root is None:
-                    import tkinter as tk
-                    from tkinter import filedialog
-                    root = tk.Tk()
-                    root.withdraw()  # Hide the main window
-                
-                logger.info("Altium executable not found. Prompting user for selection...")
-                print(f"Altium executable not found. Searched in:")
-                print(f"  - Automatically scanned C:\\Program Files\\Altium\\AD*\\X2.EXE")
-                print(f"  - Last known path: {self.altium_exe_path}")
-                print("Please select the Altium X2.EXE file...")
-                
-                self.altium_exe_path = filedialog.askopenfilename(
-                    title="Select Altium Executable",
-                    filetypes=[("Executable files", "*.exe")],  # Only allow .exe files
-                    initialdir="C:/Program Files/Altium"
-                )
-                
-                if not self.altium_exe_path:
-                    logger.error("No Altium executable selected. Some functionality may not work.")
-                    print("Warning: No Altium executable selected. Automatic script execution will be disabled.")
-                    paths_verified = False
-        
-        # Check script path
-        if not os.path.exists(self.script_path):
-            paths_verified = False
-            
-            if root is None:
-                import tkinter as tk
-                from tkinter import filedialog
-                root = tk.Tk()
-                root.withdraw()  # Hide the main window
-            
-            logger.info(f"Script file not found at {self.script_path}. Prompting user for selection...")
-            print(f"Script file not found at {self.script_path}. Please select the Altium project file...")
-            
-            selected_path = filedialog.askopenfilename(
-                title="Select Altium Project File",
-                filetypes=[("Altium Project files", "*.PrjScr")],  # Changed to PrjScr for script project
-                initialdir=str(MCP_DIR)
-            )
-            
-            if selected_path:
-                self.script_path = selected_path
+        """Verify configuration without displaying native file-selection dialogs."""
+        changed = False
+        if not self.altium_exe_path or not Path(self.altium_exe_path).is_file():
+            discovered_path = self._discover_altium_executable()
+            if discovered_path:
+                self.altium_exe_path = discovered_path
+                changed = True
+                logger.info("Automatically found Altium at: %s", discovered_path)
             else:
-                logger.error("No script file selected. Some functionality may not work.")
-                print("Warning: No script file selected. Please make sure to create one.")
-                paths_verified = False
-        
-        # Clean up tkinter root if created
-        if root is not None:
-            root.destroy()
-        
-        # Save the updated configuration
-        self.save_config()
-        
-        return paths_verified
+                logger.warning("Altium executable not found; script execution is disabled.")
+
+        script_exists = Path(self.script_path).is_file()
+        if not script_exists:
+            logger.warning("Altium script project not found at: %s", self.script_path)
+
+        if changed:
+            self.save_config()
+        return bool(self.altium_exe_path and Path(self.altium_exe_path).is_file() and script_exists)
 
 class AltiumBridge:
     def __init__(self):
@@ -1974,6 +1902,34 @@ async def copy_pcb_polygon_geometry(ctx: Context, source_polygon: str, target_po
     return json_dumps(result, indent=2)
 
 @mcp.tool()
+async def copy_selected_fill_to_signal_layers(ctx: Context) -> str:
+    """
+    Copy the currently selected PCB fill or region to every other signal layer.
+
+    Exactly one fill or region must be selected. The copied primitives keep the
+    source geometry and net, are placed on each other signal layer, and the PCB
+    document is left dirty for inspection; this tool does not save.
+
+    Returns:
+        str: JSON object with copied layer readback details.
+    """
+    logger.info("Copying selected fill/region to signal layers")
+
+    response = await altium_bridge.execute_command(
+        "copy_selected_fill_to_signal_layers",
+        {},
+    )
+
+    if not response.get("success", False):
+        error_msg = response.get("error", "Unknown error")
+        logger.error("Error copying selected fill/region to signal layers: %s", error_msg)
+        return json_dumps({"success": False, "error": f"Failed to copy selected fill/region to signal layers: {error_msg}"})
+
+    result = response.get("result", {})
+    logger.info("Selected fill/region copied to signal layers successfully")
+    return json_dumps(result, indent=2)
+
+@mcp.tool()
 async def add_tented_vias_around_keepout_contour(
     ctx: Context,
     via_diameter_mm: float = 0.4,
@@ -2050,10 +2006,6 @@ if __name__ == "__main__":
     # Create the AltiumScript directory if it doesn't exist
     script_dir = MCP_DIR / "AltiumScript"
     script_dir.mkdir(exist_ok=True)
-    
-    # Verify configuration before starting
-    if not altium_bridge.config.verify_paths():
-        print("Warning: Configuration not complete. Some functionality may not work.")
     
     # Print status
     print(f"Altium executable: {altium_bridge.config.altium_exe_path}")

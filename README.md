@@ -188,6 +188,7 @@ The server provides several tools to interact with Altium Designer:
 - `layout_duplicator_apply`: Action #2 of `layout_duplicator`. Agent will use part info automatically to predict the match between source and destination components, then will send those matches to the place script.
 - `layout_duplicator_apply_groups`: Multi-destination wrapper for `layout_duplicator_apply`. Use this after `layout_duplicator` when the selected source includes routing primitives and you want the same placement/routing copied to more than one destination group. It repeats the source designator list and flattens all destination groups into one Altium apply command, so tracks, vias, polygons, and regions are replicated for each group.
 - `copy_pcb_polygon_geometry`: Copy the geometry of one named PCB polygon to another named PCB polygon. The target polygon keeps its original name, net, and layer; the command replaces only the target polygon geometry and leaves the PCB document dirty for inspection. Pass `source_polygon` and `target_polygon` as polygon names; the bridge also falls back to matching by net name if a polygon name is not available. The command does not save the PCB document.
+- `copy_selected_fill_to_signal_layers`: Copy exactly one selected PCB fill or region to every other signal layer. The copies keep the source geometry and net, are selected when created, and the PCB document is left dirty for inspection. The command does not save the PCB document.
 - `add_tented_vias_around_keepout_contour`: Add fully tented vias around the active PCB Keep-Out Layer contour. Parameters are `via_diameter_mm`, `via_hole_mm`, `edge_clearance_mm`, `pitch_mm`, and optional `net_name`; for example use `0.4`, `0.2`, `0.4`, `1.5`, and `GND` for 0.4 mm vias with 0.2 mm holes on GND, 0.4 mm clearance from the via outer diameter to keepout, and 1.5 mm pitch. Via centers are offset inside the contour by `edge_clearance_mm + via_diameter_mm / 2`, solder mask expansion is set manually to `-via_diameter_mm / 2` for top/bottom tenting, and the created vias are selected when the command finishes. The command leaves the PCB document dirty for inspection and does not save it.
 
 When copying selected routing to multiple destinations, call `layout_duplicator_apply_groups` once instead of calling `layout_duplicator_apply` repeatedly. Repeated separate apply calls can move the same duplicated routing primitives from the previous destination to the next destination.
@@ -446,6 +447,92 @@ The `3D_BODY_EDITOR_CLEAN|layer|width` command follows this select-and-delete ap
 
 ### Server Status
 - `get_server_status`: Check the status of the MCP server, including paths to Altium and script files
+
+## Standalone document utilities
+
+The repository includes two read-only/generation utilities that can be used
+without starting Altium Designer or the MCP server. Both accept explicit input
+and output paths; they do not contain board-specific paths.
+
+### Inspecting Altium compound files
+
+`tools/altium_cfb_inspect.py` reads selected records directly from Altium's OLE
+compound-binary `PcbDoc` and `SchDoc` files. It does not modify the document.
+
+List the streams stored in any supported document:
+
+```powershell
+python tools\altium_cfb_inspect.py streams "D:\path\Board.PcbDoc"
+```
+
+Read the bounding box of the PCB board-region contour in millimetres:
+
+```powershell
+python tools\altium_cfb_inspect.py board-bounds "D:\path\Board.PcbDoc"
+python tools\altium_cfb_inspect.py board-bounds "D:\path\Board.PcbDoc" --json
+```
+
+Extract schematic text records from the `FileHeader` stream:
+
+```powershell
+python tools\altium_cfb_inspect.py schematic-text "D:\path\Sheet.SchDoc"
+python tools\altium_cfb_inspect.py schematic-text "D:\path\Sheet.SchDoc" --json
+```
+
+The board-bounds command reports the axis-aligned bounds of the primary contour
+stored in `BoardRegions/Data`. It is not a full parser for cut-outs or multiple
+board regions.
+
+### Generating a board-description DOCX
+
+`tools/generate_board_description_docx.py` fills a two-column Word template
+from UTF-8 JSON. The template controls the page size, margins, styles, table
+appearance, and page breaks. It must contain two non-empty title paragraphs
+before the first table and one two-column table per JSON section; every table
+must contain a header row and at least one body row that can be cloned.
+
+Install the project dependencies, then run:
+
+```powershell
+python tools\generate_board_description_docx.py `
+  --template "D:\path\board-description-template.docx" `
+  --data "D:\path\board-description.json" `
+  --output "D:\path\board-description.docx"
+```
+
+The JSON structure is:
+
+```json
+{
+  "title": "ТЕХНИЧЕСКИЕ ХАРАКТЕРИСТИКИ",
+  "subtitle": "печатной платы ExampleBoard",
+  "footer_label": "ExampleBoard",
+  "metadata": {
+    "title": "Технические характеристики печатной платы ExampleBoard",
+    "subject": "Назначение и основные параметры"
+  },
+  "layout": {
+    "left_column_dxa": 3685,
+    "right_column_dxa": 5783
+  },
+  "sections": [
+    {
+      "number": "01",
+      "title": "Общие сведения",
+      "rows": [
+        ["Назначение", "Описание назначения платы"],
+        ["Габаритные размеры", "100 × 50 мм"]
+      ]
+    }
+  ]
+}
+```
+
+The optional `colors` object can override `heading_number`, `heading_text`,
+`body_text`, `alternate_row`, `white`, and `footer` with six-digit RGB values.
+The generator uses the supplied template as its layout source and replaces the
+title, subtitle, section headings, table contents, footer label/page field, and
+core document metadata.
 
 ## How It Works
 

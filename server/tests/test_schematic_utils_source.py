@@ -424,7 +424,15 @@ class PcbLibraryCustomPadSourceTest(unittest.TestCase):
         )
 
         join_start = source.index("function AddJoinCustomPadContourTrack", source.index("function MoveComponentsByDesignators"))
-        join_end = source.index("function MoveSelectedViasByOffset", join_start)
+        following_helpers = (
+            "function PCBFillKindName",
+            "function MoveSelectedViasByOffset",
+        )
+        join_end = min(
+            source.index(marker, join_start)
+            for marker in following_helpers
+            if marker in source[join_start:]
+        )
         join_source = source[join_start:join_end]
 
         self.assertIn(

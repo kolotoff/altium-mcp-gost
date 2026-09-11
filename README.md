@@ -491,6 +491,10 @@ appearance, and page breaks. It must contain two non-empty title paragraphs
 before the first table and one two-column table per JSON section; every table
 must contain a header row and at least one body row that can be cloned.
 
+For the complete workflow—from inspecting the open Altium design through
+content reconciliation and visual DOCX verification—use the repository skill
+at `skills/create-board-description/SKILL.md`.
+
 Install the project dependencies, then run:
 
 ```powershell

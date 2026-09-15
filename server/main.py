@@ -5,6 +5,7 @@ import time
 import asyncio
 import logging
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Dict, Any, Optional
 import sys
@@ -12,11 +13,14 @@ import win32gui
 import win32ui
 import win32con
 import win32api
+import win32file
 from PIL import Image
 import io
 import base64
 import glob
 import re
+import math
+import xml.etree.ElementTree as ET
 
 # Configure logging
 logging.basicConfig(
@@ -48,9 +52,175 @@ EXCHANGE_DIR = Path("C:/Users/Public/altium_mcp")
 EXCHANGE_DIR.mkdir(exist_ok=True)
 REQUEST_FILE = EXCHANGE_DIR / "request.json"
 RESPONSE_FILE = EXCHANGE_DIR / "response.json"
+EASYEDA_PIPE = r"\\.\pipe\EasyEDA-Loader.CommandBridge"
 
 # Initialize FastMCP server
 mcp = FastMCP("AltiumMCP", description="Altium integration through the Model Context Protocol")
+
+
+def _absolute_output_path(value: str, extension: str) -> Path:
+    target = Path(value).expanduser()
+    if not target.is_absolute():
+        raise ValueError("Output paths must be absolute")
+    target = target.resolve()
+    if target.suffix.lower() != extension.lower():
+        raise ValueError(f"Output path must end in {extension}")
+    return target
+
+
+def _prepare_output_path(target: Path, overwrite: bool) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        if not overwrite:
+            raise FileExistsError(f"Output file already exists: {target}")
+        target.unlink()
+
+
+def _normalize_html_color(value: str, name: str) -> str:
+    color = (value or "").strip()
+    if not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
+        raise ValueError(f"{name} must be a #RRGGBB color")
+    return color.upper()
+
+
+def _altium_color(value: str, name: str) -> int:
+    color = _normalize_html_color(value, name)
+    red, green, blue = int(color[1:3], 16), int(color[3:5], 16), int(color[5:7], 16)
+    return red + (green << 8) + (blue << 16)
+
+
+def _run_easyeda_bridge_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
+    data = (json_dumps(payload) + "\n").encode("utf-8")
+    try:
+        handle = win32file.CreateFile(
+            EASYEDA_PIPE,
+            win32con.GENERIC_READ | win32con.GENERIC_WRITE,
+            0,
+            None,
+            win32con.OPEN_EXISTING,
+            0,
+            None,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            "EasyEDA-Loader command bridge is unavailable. Build/install the current "
+            "EasyEDA-Loader extension and keep Altium running."
+        ) from exc
+    try:
+        win32file.WriteFile(handle, data)
+        response = bytearray()
+        while b"\n" not in response:
+            _, chunk = win32file.ReadFile(handle, 65536)
+            if not chunk:
+                break
+            response.extend(chunk)
+        result = json.loads(bytes(response).split(b"\n", 1)[0].decode("utf-8"))
+    finally:
+        win32file.CloseHandle(handle)
+    if not result.get("success", False):
+        raise RuntimeError(result.get("message") or result.get("error") or "EasyEDA bridge command failed")
+    return result
+
+
+async def _run_easyeda_bridge(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return await asyncio.to_thread(_run_easyeda_bridge_sync, payload)
+
+
+def _svg_dimensions_mm(svg_path: Path) -> tuple[float, float]:
+    root = ET.parse(svg_path).getroot()
+    dimensions = []
+    for name in ("width", "height"):
+        value = root.attrib.get(name, "").strip().lower()
+        match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)mm", value)
+        if not match:
+            raise ValueError(f"SVG {name} must use millimetres: {svg_path}")
+        dimensions.append(float(match.group(1)))
+    return dimensions[0], dimensions[1]
+
+
+def _find_edge() -> Path:
+    candidates = [
+        Path(os.environ.get("PROGRAMFILES(X86)", "")) / "Microsoft/Edge/Application/msedge.exe",
+        Path(os.environ.get("PROGRAMFILES", "")) / "Microsoft/Edge/Application/msedge.exe",
+        Path(os.environ.get("PROGRAMFILES", "")) / "Google/Chrome/Application/chrome.exe",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise RuntimeError("Microsoft Edge or Google Chrome is required to rasterize assembly SVG files")
+
+
+def _recolor_svg(svg_path: Path, line_color: str, outline_color: str) -> None:
+    text = svg_path.read_text(encoding="utf-8-sig")
+    text = text.replace("#111111", line_color).replace("#555555", outline_color)
+    svg_path.write_text(text, encoding="utf-8")
+
+
+def _rasterize_svg_sync(svg_path: Path, png_path: Path, dpi: int) -> Dict[str, Any]:
+    if dpi < 72 or dpi > 2400:
+        raise ValueError("dpi must be between 72 and 2400")
+    width_mm, height_mm = _svg_dimensions_mm(svg_path)
+    width = max(1, math.ceil(width_mm * dpi / 25.4))
+    height = max(1, math.ceil(height_mm * dpi / 25.4))
+    if width > 32768 or height > 32768:
+        raise ValueError(f"Requested raster is too large: {width}x{height}")
+    tree = ET.parse(svg_path)
+    root = tree.getroot()
+    root.set("width", f"{width}px")
+    root.set("height", f"{height}px")
+    with tempfile.TemporaryDirectory(prefix="altium-svg-raster-") as temporary_directory:
+        raster_svg = Path(temporary_directory) / svg_path.name
+        tree.write(raster_svg, encoding="utf-8", xml_declaration=True)
+        command = [
+            str(_find_edge()),
+            "--headless=new",
+            "--disable-gpu",
+            "--hide-scrollbars",
+            "--default-background-color=00000000",
+            "--force-device-scale-factor=1",
+            f"--window-size={width},{height}",
+            f"--screenshot={png_path}",
+            raster_svg.as_uri(),
+        ]
+        completed = subprocess.run(command, capture_output=True, text=True, timeout=120)
+    if completed.returncode != 0 or not png_path.is_file():
+        raise RuntimeError("SVG rasterization failed: " + (completed.stderr or completed.stdout).strip())
+    with Image.open(png_path) as image:
+        rgba = image.convert("RGBA")
+        rgba.save(png_path, "PNG", dpi=(dpi, dpi))
+        width, height = rgba.size
+        alpha_extrema = rgba.getchannel("A").getextrema()
+    return {
+        "output_path": str(png_path),
+        "width": width,
+        "height": height,
+        "dpi": dpi,
+        "alpha_channel": True,
+        "has_transparent_pixels": alpha_extrema[0] < 255,
+        "file_size": png_path.stat().st_size,
+    }
+
+
+async def _rasterize_svg(svg_path: Path, png_path: Path, dpi: int) -> Dict[str, Any]:
+    return await asyncio.to_thread(_rasterize_svg_sync, svg_path, png_path, dpi)
+
+
+def _stamp_png_dpi_sync(png_path: Path, dpi: int) -> Dict[str, Any]:
+    """Persist physical-resolution metadata without changing rendered pixels."""
+    with Image.open(png_path) as image:
+        rendered = image.copy()
+        width, height = rendered.size
+        alpha_channel = "A" in rendered.getbands()
+        has_transparent_pixels = False
+        if alpha_channel:
+            has_transparent_pixels = rendered.getchannel("A").getextrema()[0] < 255
+    rendered.save(png_path, "PNG", dpi=(dpi, dpi))
+    return {
+        "width": width,
+        "height": height,
+        "alpha_channel": alpha_channel,
+        "has_transparent_pixels": has_transparent_pixels,
+    }
 
 class AltiumConfig:
     def __init__(self):
@@ -1379,6 +1549,251 @@ async def get_screenshot(ctx: Context, view_type: str = "pcb") -> str:
     except Exception as e:
         logger.error(f"Error in screenshot function: {str(e)}")
         return json_dumps({"success": False, "error": f"Failed to take screenshot: {str(e)}"})
+
+def _pcb_3d_color_params(
+    workspace_color: Optional[str],
+    board_color: Optional[str],
+    solder_mask_color: Optional[str],
+    silk_color: Optional[str],
+    copper_color: Optional[str],
+) -> Dict[str, Any]:
+    colors = {
+        "workspace_color": workspace_color,
+        "board_color": board_color,
+        "solder_mask_color": solder_mask_color,
+        "silk_color": silk_color,
+        "copper_color": copper_color,
+    }
+    supplied = {name: value for name, value in colors.items() if value}
+    result: Dict[str, Any] = {"use_system_colors": not bool(supplied)}
+    for name, value in supplied.items():
+        result[name] = _altium_color(value, name)
+    return result
+
+
+async def _export_one_pcb_3d_image(
+    target: Path,
+    side: str,
+    dpi: int,
+    color_params: Dict[str, Any],
+) -> Dict[str, Any]:
+    response = await _run_easyeda_bridge({
+        "command": "export-board-3d",
+        "output_path": str(target),
+        "side": side,
+        "dpi": dpi,
+        **color_params,
+    })
+    if not target.is_file():
+        raise RuntimeError("Altium returned without creating the requested image")
+    image_info = await asyncio.to_thread(_stamp_png_dpi_sync, target, dpi)
+    result = response
+    if not isinstance(result, dict):
+        result = {"result": result}
+    result.update({
+        "output_path": str(target),
+        "side": side,
+        "dpi": dpi,
+        "file_size": target.stat().st_size,
+        **image_info,
+    })
+    return result
+
+
+@mcp.tool()
+async def export_pcb_3d_image(
+    ctx: Context,
+    output_path: str,
+    side: str = "top",
+    dpi: int = 600,
+    workspace_color: Optional[str] = None,
+    board_color: Optional[str] = None,
+    solder_mask_color: Optional[str] = None,
+    silk_color: Optional[str] = None,
+    copper_color: Optional[str] = None,
+) -> str:
+    """Export one orthographic PCB 3D PNG directly, without an OutJob.
+
+    ``side`` is ``top`` or ``bottom`` and DPI defaults to 600. Omit all color
+    parameters to use the current Altium 3D view colors, or supply any #RRGGBB
+    overrides. The PCB document is not modified or saved.
+    """
+    target = Path(output_path).expanduser().resolve()
+    if target.suffix.lower() != ".png":
+        return json_dumps({"success": False, "error": "output_path must be a PNG file"})
+    side = side.strip().lower()
+    if side not in {"top", "bottom"}:
+        return json_dumps({"success": False, "error": "side must be top or bottom"})
+    if dpi not in {75, 150, 300, 600}:
+        return json_dumps({"success": False, "error": "dpi must be 75, 150, 300, or 600"})
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        target.unlink()
+    try:
+        colors = _pcb_3d_color_params(
+            workspace_color, board_color, solder_mask_color, silk_color, copper_color)
+        result = await _export_one_pcb_3d_image(target, side, dpi, colors)
+        return json_dumps({"success": True, **result}, indent=2)
+    except Exception as exc:
+        return json_dumps({"success": False, "error": str(exc), "output_path": str(target)})
+
+
+@mcp.tool()
+async def export_pcb_3d_images(
+    ctx: Context,
+    output_directory: str,
+    dpi: int = 600,
+    workspace_color: Optional[str] = None,
+    board_color: Optional[str] = None,
+    solder_mask_color: Optional[str] = None,
+    silk_color: Optional[str] = None,
+    copper_color: Optional[str] = None,
+    overwrite: bool = False,
+) -> str:
+    """Export orthographic top and bottom PCB 3D PNG files without an OutJob.
+
+    The files are named ``pcb-3d-top.png`` and ``pcb-3d-bottom.png``. DPI
+    defaults to 600. Optional #RRGGBB values configure the 3D view coloring;
+    when none are supplied, Altium's current system view colors are used.
+    """
+    try:
+        directory = Path(output_directory).expanduser()
+        if not directory.is_absolute():
+            raise ValueError("output_directory must be absolute")
+        directory = directory.resolve()
+        if dpi not in {75, 150, 300, 600}:
+            raise ValueError("dpi must be 75, 150, 300, or 600")
+        targets = {
+            "top": directory / "pcb-3d-top.png",
+            "bottom": directory / "pcb-3d-bottom.png",
+        }
+        for target in targets.values():
+            _prepare_output_path(target, overwrite)
+        colors = _pcb_3d_color_params(
+            workspace_color, board_color, solder_mask_color, silk_color, copper_color)
+        images = []
+        for side, target in targets.items():
+            images.append(await _export_one_pcb_3d_image(target, side, dpi, colors))
+        return json_dumps({
+            "success": True,
+            "dpi": dpi,
+            "images": images,
+            "document_modified": False,
+            "document_saved": False,
+        }, indent=2)
+    except Exception as exc:
+        return json_dumps({"success": False, "error": str(exc)})
+
+
+@mcp.tool()
+async def export_pcb_assembly_images(
+    ctx: Context,
+    output_directory: str,
+    dpi: int = 600,
+    top_color: str = "#111111",
+    bottom_color: str = "#111111",
+    outline_color: str = "#555555",
+    mirror_bottom: bool = True,
+    keep_svg: bool = False,
+    overwrite: bool = False,
+) -> str:
+    """Export top and bottom Mechanical-2 assembly PNGs with board contour.
+
+    PNG files have an alpha channel and a transparent background. Geometry is
+    produced by EasyEDA-Loader's existing Mechanical-2 SVG converter, so arcs,
+    regions, tracks, and assembly text match its normal SVG output. DPI defaults
+    to 600. ``mirror_bottom`` selects the conventional bottom-side view.
+    """
+    svg_paths = []
+    try:
+        directory = Path(output_directory).expanduser()
+        if not directory.is_absolute():
+            raise ValueError("output_directory must be absolute")
+        directory = directory.resolve()
+        if dpi < 72 or dpi > 2400:
+            raise ValueError("dpi must be between 72 and 2400")
+        colors = {
+            "top": _normalize_html_color(top_color, "top_color"),
+            "bottom": _normalize_html_color(bottom_color, "bottom_color"),
+        }
+        outline = _normalize_html_color(outline_color, "outline_color")
+        images = []
+        for side in ("top", "bottom"):
+            svg_path = directory / f"pcb-assembly-{side}.svg"
+            png_path = directory / f"pcb-assembly-{side}.png"
+            _prepare_output_path(svg_path, overwrite)
+            _prepare_output_path(png_path, overwrite)
+            svg_paths.append(svg_path)
+            bridge_result = await _run_easyeda_bridge({
+                "command": "export-board-assembly",
+                "side": side,
+                "output_path": str(svg_path),
+                "mirror_bottom": mirror_bottom,
+            })
+            _recolor_svg(svg_path, colors[side], outline)
+            png_result = await _rasterize_svg(svg_path, png_path, dpi)
+            images.append({
+                "side": side,
+                "svg_path": str(svg_path) if keep_svg else None,
+                "component_count": bridge_result.get("component_count"),
+                "primitive_count": bridge_result.get("primitive_count"),
+                **png_result,
+            })
+            if not keep_svg:
+                svg_path.unlink(missing_ok=True)
+        return json_dumps({
+            "success": True,
+            "images": images,
+            "document_modified": False,
+            "document_saved": False,
+        }, indent=2)
+    except Exception as exc:
+        return json_dumps({"success": False, "error": str(exc)})
+
+
+@mcp.tool()
+async def export_component_assembly(
+    ctx: Context,
+    component: str,
+    svg_path: str,
+    png_path: Optional[str] = None,
+    dpi: int = 600,
+    line_color: str = "#111111",
+    overwrite: bool = False,
+) -> str:
+    """Export one component's Mechanical-2 assembly artwork as SVG and RGBA PNG.
+
+    ``component`` is the PCB designator (for example ``U12``). In a PcbLib,
+    leave it empty to export the current footprint. ``svg_path`` is required;
+    ``png_path`` defaults to the same path with a .png suffix. Both output paths
+    must be absolute. The PNG background is transparent and DPI defaults to 600.
+    """
+    try:
+        svg_target = _absolute_output_path(svg_path, ".svg")
+        png_target = _absolute_output_path(png_path, ".png") if png_path else svg_target.with_suffix(".png")
+        if dpi < 72 or dpi > 2400:
+            raise ValueError("dpi must be between 72 and 2400")
+        _prepare_output_path(svg_target, overwrite)
+        _prepare_output_path(png_target, overwrite)
+        color = _normalize_html_color(line_color, "line_color")
+        bridge_result = await _run_easyeda_bridge({
+            "command": "export-component-assembly",
+            "component": component,
+            "output_path": str(svg_target),
+        })
+        _recolor_svg(svg_target, color, color)
+        png_result = await _rasterize_svg(svg_target, png_target, dpi)
+        return json_dumps({
+            "success": True,
+            "component": component,
+            "svg_path": str(svg_target),
+            "png": png_result,
+            "primitive_count": bridge_result.get("primitive_count"),
+            "document_modified": False,
+            "document_saved": False,
+        }, indent=2)
+    except Exception as exc:
+        return json_dumps({"success": False, "error": str(exc)})
     
 @mcp.tool()
 async def layout_duplicator(ctx: Context) -> str:

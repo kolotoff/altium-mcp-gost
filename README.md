@@ -151,6 +151,15 @@ The server provides several tools to interact with Altium Designer:
 - `get_output_job_containers`: Using currently open .OutJob file, reads all available output containers
 - `run_output_jobs`: Pass a list of output job container names from the currently open .OutJob to run any number of them. `.OutJob` must be the currently focused document.
 
+### PCB image exports
+
+- `export_pcb_3d_image`: Export one native orthographic top or bottom PCB 3D PNG without creating or opening an OutJob. The default is 600 DPI. Optional `workspace_color`, `board_color`, `solder_mask_color`, `silk_color`, and `copper_color` arguments accept `#RRGGBB`; omit all colors to use the current Altium 3D colors.
+- `export_pcb_3d_images`: Export both `pcb-3d-top.png` and `pcb-3d-bottom.png` with the same DPI and color options.
+- `export_pcb_assembly_images`: Export top and bottom Mechanical 2 assembly artwork with the actual board contour. PNG output is RGBA with transparent background and defaults to 600 DPI. `top_color`, `bottom_color`, `outline_color`, and bottom mirroring are configurable. Set `keep_svg=true` to retain the intermediate vector files.
+- `export_component_assembly`: Export the requested PCB component's Mechanical 2 assembly artwork as both SVG and transparent RGBA PNG. This reuses EasyEDA-Loader's normal shape SVG conversion, including its arc, region, track, text, flipped-layer, and component-origin handling.
+
+The two Mechanical 2 tools require the current EasyEDA-Loader Altium extension because they use its in-process named-pipe bridge. These commands are read-only: they do not modify or save the PCB/PcbLib document.
+
 ### Document Utilities
 - `save_current_document`: Save the currently focused Altium document. Requires `user_requested=true`; use it only when the user explicitly asks to save.
 

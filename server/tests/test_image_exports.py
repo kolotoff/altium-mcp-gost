@@ -9,6 +9,7 @@ from server.main import (
     _find_edge,
     _normalize_html_color,
     _rasterize_svg_sync,
+    _recolor_svg,
     _stamp_png_dpi_sync,
 )
 
@@ -50,6 +51,33 @@ class ImageExportHelpersTests(unittest.TestCase):
                 alpha_bounds = image.getchannel("A").getbbox()
                 self.assertIsNotNone(alpha_bounds)
                 self.assertGreater(alpha_bounds[2], 200)
+
+    def test_svg_recolor_preserves_pad_layer_and_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            svg_path = Path(directory) / "pads.svg"
+            svg_path.write_text(
+                '<?xml version="1.0" encoding="utf-8"?>\n'
+                '<svg xmlns="http://www.w3.org/2000/svg" width="10mm" height="5mm" viewBox="0 0 10 5">\n'
+                '  <g id="Pads" data-layer="pads" fill="#2F80ED">\n'
+                '    <path id="U1-pad-1" data-component="U1" data-footprint="QFN-32" '
+                'data-pad-number="1" data-pad-index="17" d="M 1 1 L 2 2"/>\n'
+                '  </g>\n'
+                '  <g id="Shape" data-layer="shape"><path stroke="#111111" d="M 0 0 L 1 1"/></g>\n'
+                '</svg>\n',
+                encoding="utf-8",
+            )
+
+            _recolor_svg(svg_path, "#ABCDEF", "#123456")
+
+            text = svg_path.read_text(encoding="utf-8")
+            self.assertIn('id="Pads" data-layer="pads"', text)
+            self.assertIn('id="U1-pad-1"', text)
+            self.assertIn('data-component="U1"', text)
+            self.assertIn('data-footprint="QFN-32"', text)
+            self.assertIn('data-pad-number="1"', text)
+            self.assertIn('data-pad-index="17"', text)
+            self.assertIn('fill="#2F80ED"', text)
+            self.assertIn('stroke="#ABCDEF"', text)
 
     def test_png_dpi_is_stamped_without_changing_pixels(self):
         with tempfile.TemporaryDirectory() as directory:

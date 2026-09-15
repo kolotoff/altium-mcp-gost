@@ -1701,8 +1701,18 @@ async def export_pcb_assembly_images(
 
     PNG files have an alpha channel and a transparent background. Geometry is
     produced by EasyEDA-Loader's existing Mechanical-2 SVG converter, so arcs,
-    regions, tracks, and assembly text match its normal SVG output. DPI defaults
-    to 600. ``mirror_bottom`` selects the conventional bottom-side view.
+    regions, tracks, assembly text, and pad geometry match its normal SVG
+    output. Retained SVGs put pads in a separate ``Pads`` group and store the
+    Altium pad number in each path's non-visible ``data-pad-number`` attribute.
+    DPI defaults to 600. ``mirror_bottom`` selects the conventional bottom-side
+    view. Pad geometry is visible in the raster PNG; SVG metadata is SVG-only.
+
+    When the task needs pad numbers or schematic-pin correspondence, set
+    ``keep_svg=True`` and read paths inside ``<g id="Pads">``. Use
+    ``data-pad-number`` as the Altium pad/pin designator instead of trying to
+    recognize a number from the PNG. Use ``data-component`` for the logical
+    designator and ``data-instance`` to distinguish repeated designators on a
+    panelized PCB.
     """
     svg_paths = []
     try:
@@ -1737,6 +1747,8 @@ async def export_pcb_assembly_images(
                 "svg_path": str(svg_path) if keep_svg else None,
                 "component_count": bridge_result.get("component_count"),
                 "primitive_count": bridge_result.get("primitive_count"),
+                "pad_count": bridge_result.get("pad_count"),
+                "pads_included": bridge_result.get("pads_included", True),
                 **png_result,
             })
             if not keep_svg:
@@ -1761,12 +1773,21 @@ async def export_component_assembly(
     line_color: str = "#111111",
     overwrite: bool = False,
 ) -> str:
-    """Export one component's Mechanical-2 assembly artwork as SVG and RGBA PNG.
+    """Export one component's Mechanical-2 assembly artwork and pads.
 
     ``component`` is the PCB designator (for example ``U12``). In a PcbLib,
     leave it empty to export the current footprint. ``svg_path`` is required;
     ``png_path`` defaults to the same path with a .png suffix. Both output paths
-    must be absolute. The PNG background is transparent and DPI defaults to 600.
+    must be absolute. Pads are in a separate SVG ``Pads`` group; each pad path
+    has non-visible component, footprint, pad-number, and pad-index metadata.
+    The PNG background is transparent, includes the pad geometry, and defaults
+    to 600 DPI.
+
+    When pad or schematic-pin numbers are needed, inspect the SVG paths inside
+    ``<g id="Pads">`` and use ``data-pad-number``. Do not infer the number from
+    path order, geometry, or PNG pixels. ``data-component`` identifies the
+    logical component and ``data-instance`` disambiguates repeated components
+    on panelized boards.
     """
     try:
         svg_target = _absolute_output_path(svg_path, ".svg")
@@ -1789,6 +1810,8 @@ async def export_component_assembly(
             "svg_path": str(svg_target),
             "png": png_result,
             "primitive_count": bridge_result.get("primitive_count"),
+            "pad_count": bridge_result.get("pad_count"),
+            "pads_included": bridge_result.get("pads_included", True),
             "document_modified": False,
             "document_saved": False,
         }, indent=2)

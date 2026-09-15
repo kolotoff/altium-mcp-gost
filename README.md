@@ -155,10 +155,31 @@ The server provides several tools to interact with Altium Designer:
 
 - `export_pcb_3d_image`: Export one native orthographic top or bottom PCB 3D PNG without creating or opening an OutJob. The default is 600 DPI. Optional `workspace_color`, `board_color`, `solder_mask_color`, `silk_color`, and `copper_color` arguments accept `#RRGGBB`; omit all colors to use the current Altium 3D colors.
 - `export_pcb_3d_images`: Export both `pcb-3d-top.png` and `pcb-3d-bottom.png` with the same DPI and color options.
-- `export_pcb_assembly_images`: Export top and bottom Mechanical 2 assembly artwork with the actual board contour. PNG output is RGBA with transparent background and defaults to 600 DPI. `top_color`, `bottom_color`, `outline_color`, and bottom mirroring are configurable. Set `keep_svg=true` to retain the intermediate vector files.
-- `export_component_assembly`: Export the requested PCB component's Mechanical 2 assembly artwork as both SVG and transparent RGBA PNG. This reuses EasyEDA-Loader's normal shape SVG conversion, including its arc, region, track, text, flipped-layer, and component-origin handling.
+- `export_pcb_assembly_images`: Export top and bottom Mechanical 2 assembly artwork, pad geometry, and the actual board contour. PNG output is RGBA with transparent background and defaults to 600 DPI. `top_color`, `bottom_color`, `outline_color`, and bottom mirroring are configurable. Set `keep_svg=true` to retain the vector files and their pad metadata.
+- `export_component_assembly`: Export the requested PCB component's Mechanical 2 assembly artwork and pads as both SVG and transparent RGBA PNG. This reuses EasyEDA-Loader's normal shape SVG conversion, including its arc, region, track, text, flipped-layer, component-origin, and pad-contour handling.
 
-The two Mechanical 2 tools require the current EasyEDA-Loader Altium extension because they use its in-process named-pipe bridge. These commands are read-only: they do not modify or save the PCB/PcbLib document.
+All SVG exports that include pads place them in `<g id="Pads" data-layer="pads">`. Each pad path stores its Altium pad number without drawing extra text, for example `<path id="U1-pad-1" data-component="U1" data-footprint="QFN-32" data-pad-number="1" data-pad-index="17" .../>`. The pad number is the PCB pad designator used by Altium's schematic-pin-to-footprint-pad mapping. On panelized boards, repeated designators receive unique SVG IDs and a `data-instance` suffix while retaining the original `data-component`. SVG grouping and metadata do not survive rasterization, but pad geometry is rendered into the PNG.
+
+The two Mechanical 2 tools require the current EasyEDA-Loader Altium extension because they use its in-process named-pipe bridge. These commands are read-only: they do not modify or save the PCB/PcbLib document. Responses include `pad_count` and `pads_included`.
+
+#### Using SVG pad numbers
+
+When a task needs pad numbers, pin callouts, connector pinouts, or correspondence
+with schematic pins, use the SVG metadata rather than OCR or the order of the
+paths:
+
+1. For a whole-board export, call `export_pcb_assembly_images` with
+   `keep_svg=true`. `export_component_assembly` always retains its SVG.
+2. Select `<path>` elements below `<g id="Pads" data-layer="pads">`.
+3. Read `data-pad-number` as the Altium PCB pad designator used by the
+   schematic-pin-to-footprint-pad mapping.
+4. Read `data-component` for the logical component designator. On panelized
+   boards, combine it with `data-instance` to distinguish repeated copies.
+5. Use `data-footprint` when the footprint identity is also required.
+
+Do not derive pad numbers from SVG path order, pad position, rendered PNG
+pixels, or OCR. PNG exports contain the visible pad shapes but cannot retain the
+SVG attributes.
 
 ### Document Utilities
 - `save_current_document`: Save the currently focused Altium document. Requires `user_requested=true`; use it only when the user explicitly asks to save.

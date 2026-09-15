@@ -155,7 +155,7 @@ The server provides several tools to interact with Altium Designer:
 
 - `export_pcb_3d_image`: Export one native orthographic top or bottom PCB 3D PNG without creating or opening an OutJob. The default is 600 DPI. Optional `workspace_color`, `board_color`, `solder_mask_color`, `silk_color`, and `copper_color` arguments accept `#RRGGBB`; omit all colors to use the current Altium 3D colors.
 - `export_pcb_3d_images`: Export both `pcb-3d-top.png` and `pcb-3d-bottom.png` with the same DPI and color options.
-- `export_pcb_assembly_images`: Export top and bottom Mechanical 2 assembly artwork, pad geometry, and the actual board contour. PNG output is RGBA with transparent background and defaults to 600 DPI. `top_color`, `bottom_color`, `outline_color`, and bottom mirroring are configurable. Set `keep_svg=true` to retain the vector files and their pad metadata.
+- `export_pcb_assembly_images`: Export top and bottom Mechanical 2 assembly artwork, pad geometry, and the actual board contour. PNG output is RGBA with transparent background and defaults to 600 DPI. The board contour is black and 0.1 mm wide by default; `top_color`, `bottom_color`, `outline_color`, and bottom mirroring are configurable. Set `keep_svg=true` to retain the vector files and their pad metadata.
 - `export_component_assembly`: Export the requested PCB component's Mechanical 2 assembly artwork and pads as both SVG and transparent RGBA PNG. This reuses EasyEDA-Loader's normal shape SVG conversion, including its arc, region, track, text, flipped-layer, component-origin, and pad-contour handling.
 
 All SVG exports that include pads place them in `<g id="Pads" data-layer="pads">`. Each pad path stores its Altium pad number without drawing extra text, for example `<path id="U1-pad-1" data-component="U1" data-footprint="QFN-32" data-pad-number="1" data-pad-index="17" .../>`. The pad number is the PCB pad designator used by Altium's schematic-pin-to-footprint-pad mapping. On panelized boards, repeated designators receive unique SVG IDs and a `data-instance` suffix while retaining the original `data-component`. SVG grouping and metadata do not survive rasterization, but pad geometry is rendered into the PNG.
@@ -180,6 +180,13 @@ paths:
 Do not derive pad numbers from SVG path order, pad position, rendered PNG
 pixels, or OCR. PNG exports contain the visible pad shapes but cannot retain the
 SVG attributes.
+
+All component and whole-board SVGs use millimetres for physical dimensions and
+view-box/path coordinates. The root records `data-coordinate-units="mm"` and
+uses `mm` suffixes for `width` and `height`. `BoardOutline` uses
+`stroke="#000000"`, `stroke-width="0.1"`, and
+`data-stroke-width-mm="0.1"`; because SVG user coordinates are millimetres, its
+rendered width is 0.1 mm.
 
 ### Document Utilities
 - `save_current_document`: Save the currently focused Altium document. Requires `user_requested=true`; use it only when the user explicitly asks to save.

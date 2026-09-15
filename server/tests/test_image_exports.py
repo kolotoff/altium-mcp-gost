@@ -57,12 +57,13 @@ class ImageExportHelpersTests(unittest.TestCase):
             svg_path = Path(directory) / "pads.svg"
             svg_path.write_text(
                 '<?xml version="1.0" encoding="utf-8"?>\n'
-                '<svg xmlns="http://www.w3.org/2000/svg" width="10mm" height="5mm" viewBox="0 0 10 5">\n'
+                '<svg xmlns="http://www.w3.org/2000/svg" data-coordinate-units="mm" width="10mm" height="5mm" viewBox="0 0 10 5">\n'
                 '  <g id="Pads" data-layer="pads" fill="#2F80ED">\n'
                 '    <path id="U1-pad-1" data-component="U1" data-footprint="QFN-32" '
                 'data-pad-number="1" data-pad-index="17" d="M 1 1 L 2 2"/>\n'
                 '  </g>\n'
                 '  <g id="Shape" data-layer="shape"><path stroke="#111111" d="M 0 0 L 1 1"/></g>\n'
+                '  <path id="BoardOutline" data-stroke-width-mm="0.1" stroke="#000000" stroke-width="0.1" d="M 0 0 L 10 0"/>\n'
                 '</svg>\n',
                 encoding="utf-8",
             )
@@ -76,8 +77,11 @@ class ImageExportHelpersTests(unittest.TestCase):
             self.assertIn('data-footprint="QFN-32"', text)
             self.assertIn('data-pad-number="1"', text)
             self.assertIn('data-pad-index="17"', text)
+            self.assertIn('data-coordinate-units="mm"', text)
+            self.assertIn('data-stroke-width-mm="0.1"', text)
             self.assertIn('fill="#2F80ED"', text)
             self.assertIn('stroke="#ABCDEF"', text)
+            self.assertIn('stroke="#123456"', text)
 
     def test_png_dpi_is_stamped_without_changing_pixels(self):
         with tempfile.TemporaryDirectory() as directory:

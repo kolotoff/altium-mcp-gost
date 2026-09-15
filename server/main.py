@@ -152,7 +152,11 @@ def _find_edge() -> Path:
 
 def _recolor_svg(svg_path: Path, line_color: str, outline_color: str) -> None:
     text = svg_path.read_text(encoding="utf-8-sig")
-    text = text.replace("#111111", line_color).replace("#555555", outline_color)
+    line_token = "__EASYEDA_ASSEMBLY_LINE_COLOR__"
+    outline_token = "__EASYEDA_BOARD_OUTLINE_COLOR__"
+    text = text.replace("#111111", line_token)
+    text = text.replace("#555555", outline_token).replace("#000000", outline_token)
+    text = text.replace(line_token, line_color).replace(outline_token, outline_color)
     svg_path.write_text(text, encoding="utf-8")
 
 
@@ -1692,7 +1696,7 @@ async def export_pcb_assembly_images(
     dpi: int = 600,
     top_color: str = "#111111",
     bottom_color: str = "#111111",
-    outline_color: str = "#555555",
+    outline_color: str = "#000000",
     mirror_bottom: bool = True,
     keep_svg: bool = False,
     overwrite: bool = False,
@@ -1713,6 +1717,10 @@ async def export_pcb_assembly_images(
     recognize a number from the PNG. Use ``data-component`` for the logical
     designator and ``data-instance`` to distinguish repeated designators on a
     panelized PCB.
+
+    SVG physical dimensions and path coordinates are in millimetres. The board
+    contour defaults to black and is exactly 0.1 mm wide. ``outline_color`` can
+    override its color without changing its width.
     """
     svg_paths = []
     try:
@@ -1788,6 +1796,9 @@ async def export_component_assembly(
     path order, geometry, or PNG pixels. ``data-component`` identifies the
     logical component and ``data-instance`` disambiguates repeated components
     on panelized boards.
+
+    SVG physical dimensions, view-box coordinates, pad geometry, and assembly
+    geometry are expressed in millimetres.
     """
     try:
         svg_target = _absolute_output_path(svg_path, ".svg")

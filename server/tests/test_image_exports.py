@@ -63,7 +63,12 @@ class ImageExportHelpersTests(unittest.TestCase):
                 'data-pad-number="1" data-pad-index="17" d="M 1 1 L 2 2"/>\n'
                 '  </g>\n'
                 '  <g id="Shape" data-layer="shape"><path stroke="#111111" d="M 0 0 L 1 1"/></g>\n'
-                '  <path id="BoardOutline" data-stroke-width-mm="0.1" stroke="#000000" stroke-width="0.1" d="M 0 0 L 10 0"/>\n'
+                '  <g id="BoardShape" data-layer="board-shape">\n'
+                '    <path id="BoardOutline" data-stroke-width-mm="0.1" stroke="#000000" stroke-width="0.1" d="M 0 0 L 10 0"/>\n'
+                '    <g id="StandaloneMountingPads" data-layer="standalone-mounting-pads" data-minimum-hole-diameter-mm="1">\n'
+                '      <circle id="standalone-pad-1" data-kind="standalone-mounting-pad" data-hole-diameter-mm="3.2" cx="2" cy="2" r="1.6" fill="none" stroke="#000000" stroke-width="0.1"/>\n'
+                '    </g>\n'
+                '  </g>\n'
                 '</svg>\n',
                 encoding="utf-8",
             )
@@ -77,6 +82,8 @@ class ImageExportHelpersTests(unittest.TestCase):
             self.assertIn('data-footprint="QFN-32"', text)
             self.assertIn('data-pad-number="1"', text)
             self.assertIn('data-pad-index="17"', text)
+            self.assertIn('data-kind="standalone-mounting-pad"', text)
+            self.assertIn('data-hole-diameter-mm="3.2"', text)
             self.assertIn('data-coordinate-units="mm"', text)
             self.assertIn('data-stroke-width-mm="0.1"', text)
             self.assertIn('fill="#2F80ED"', text)

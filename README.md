@@ -187,6 +187,11 @@ uses `mm` suffixes for `width` and `height`. `BoardOutline` uses
 `stroke="#000000"`, `stroke-width="0.1"`, and
 `data-stroke-width-mm="0.1"`; because SVG user coordinates are millimetres, its
 rendered width is 0.1 mm.
+The `BoardShape` layer also contains real SVG `<circle>` elements for holes in
+standalone pads when the drilled-hole diameter is at least 1 mm. These elements
+carry `data-kind="standalone-mounting-pad"` and `data-hole-diameter-mm`.
+Component-owned pads, standalone pads without holes, and vias are excluded from
+this mounting-hole subgroup.
 
 ### Document Utilities
 - `save_current_document`: Save the currently focused Altium document. Requires `user_requested=true`; use it only when the user explicitly asks to save.

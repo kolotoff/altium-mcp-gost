@@ -1721,6 +1721,10 @@ async def export_pcb_assembly_images(
     SVG physical dimensions and path coordinates are in millimetres. The board
     contour defaults to black and is exactly 0.1 mm wide. ``outline_color`` can
     override its color without changing its width.
+
+    ``BoardShape`` also contains SVG circles for holes in standalone pads when
+    their drilled-hole diameter is at least 1 mm. Component pads, hole-less
+    standalone pads, and vias are excluded from that mounting-hole subgroup.
     """
     svg_paths = []
     try:

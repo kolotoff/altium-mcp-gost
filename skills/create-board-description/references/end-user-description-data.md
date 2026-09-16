@@ -183,8 +183,9 @@ design or manufacturing description.
 - For top-side interface maps, place perimeter-connector labels outside the PCB
   first. Keep left/right labels horizontal and rotate top/bottom labels by 90°.
   Preserve `BoardShape/StandaloneMountingPads` from the current Altium assembly
-  export when hiding the copper `Pads` group so drilled mounting holes remain
-  visible on both top- and bottom-side maps.
+  export when hiding the copper `Pads` group so drilled mounting holes inside
+  the PCB outline remain visible on both top- and bottom-side maps. Exclude
+  panel-rail pads and any drilled circle that crosses the actual board contour.
   Then place internal-component labels outside the outline when this does not
   overlap or cross the first-priority labels. Use direct angled leaders rather
   than rectangular routes, preserve physical anchor order, and keep labels clear

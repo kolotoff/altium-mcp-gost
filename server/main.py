@@ -1723,8 +1723,9 @@ async def export_pcb_assembly_images(
     override its color without changing its width.
 
     ``BoardShape`` also contains SVG circles for holes in standalone pads when
-    their drilled-hole diameter is at least 1 mm. Component pads, hole-less
-    standalone pads, and vias are excluded from that mounting-hole subgroup.
+    their drilled-hole diameter is at least 1 mm and the full hole fits inside
+    the board outline. Component pads, hole-less standalone pads, vias, and
+    pads outside the PCB contour are excluded from that mounting-hole subgroup.
     """
     svg_paths = []
     try:

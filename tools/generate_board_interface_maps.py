@@ -45,6 +45,52 @@ def remove_pads(element: ET.Element) -> None:
             remove_pads(child)
 
 
+def circle_inside_outline(points: list[tuple[float, float]], cx: float, cy: float, radius: float) -> bool:
+    """Keep only drilled-hole circles wholly inside the PCB contour."""
+    if len(points) < 3 or radius < 0:
+        return False
+    inside = False
+    for index, (ax, ay) in enumerate(points):
+        bx, by = points[(index + 1) % len(points)]
+        dx, dy = bx - ax, by - ay
+        length_squared = dx * dx + dy * dy
+        if length_squared == 0:
+            continue
+        projection = max(0.0, min(1.0, ((cx - ax) * dx + (cy - ay) * dy) / length_squared))
+        edge_x, edge_y = cx - (ax + projection * dx), cy - (ay + projection * dy)
+        if edge_x * edge_x + edge_y * edge_y < radius * radius:
+            return False
+        if (ay > cy) != (by > cy) and cx < ax + (cy - ay) * dx / dy:
+            inside = not inside
+    return inside
+
+
+def remove_outside_mounting_holes(root: ET.Element) -> None:
+    """Ignore panel-rail pads in older assembly exports that lack this filter."""
+    groups = [element for element in root.iter() if element.get("id") == "StandaloneMountingPads"]
+    if not groups:
+        return
+    outline = next((element for element in root.iter() if element.get("id") == "BoardOutline"), None)
+    if outline is None:
+        raise ValueError("assembly SVG has mounting holes but no BoardOutline")
+    coordinates = parse_numbers(outline.get("d", ""))
+    if len(coordinates) < 6 or len(coordinates) % 2:
+        raise ValueError("assembly SVG has an invalid BoardOutline path")
+    points = list(zip(coordinates[0::2], coordinates[1::2]))
+    for group in groups:
+        for circle in list(group):
+            if circle.tag != qname("circle"):
+                continue
+            try:
+                cx = float(circle.attrib["cx"])
+                cy = float(circle.attrib["cy"])
+                radius = float(circle.attrib["r"])
+            except (KeyError, ValueError) as error:
+                raise ValueError("assembly SVG has an invalid mounting-hole circle") from error
+            if not circle_inside_outline(points, cx, cy, radius):
+                group.remove(circle)
+
+
 def component_positions(
     root: ET.Element,
     *,
@@ -849,6 +895,7 @@ def build_page(spec: dict, source_path: Path, output_path: Path, *, side: str) -
 
     clean = copy.deepcopy(source_root)
     remove_pads(clean)
+    remove_outside_mounting_holes(clean)
     nested = ET.SubElement(root, qname("svg"), {
         "x": f"{board_x:.3f}", "y": f"{board_y:.3f}", "width": f"{board_w:.3f}", "height": f"{board_h:.3f}",
         "viewBox": f"{view_x:.6f} {view_y:.6f} {board_w:.6f} {board_h:.6f}",

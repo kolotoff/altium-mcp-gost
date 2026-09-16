@@ -191,7 +191,8 @@ The `BoardShape` layer also contains real SVG `<circle>` elements for holes in
 standalone pads when the drilled-hole diameter is at least 1 mm. These elements
 carry `data-kind="standalone-mounting-pad"` and `data-hole-diameter-mm`.
 Component-owned pads, standalone pads without holes, and vias are excluded from
-this mounting-hole subgroup.
+this mounting-hole subgroup. The full drilled-hole circle must fit inside the
+actual PCB outline; panel-rail pads outside that contour are excluded.
 
 ### Document Utilities
 - `save_current_document`: Save the currently focused Altium document. Requires `user_requested=true`; use it only when the user explicitly asks to save.

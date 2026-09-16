@@ -190,7 +190,8 @@ interfaces in neutral gray. Mark the processor packages themselves on the
 applicable board side. Keep full-board map geometry at the physical SVG size so
 the PCB outline prints at 1:1 scale. Preserve the `BoardShape` mounting-hole
 circles from the Altium assembly SVG even when the separate copper `Pads` group
-is hidden. If an older cached export lacks `StandaloneMountingPads`, refresh the
+is hidden, but exclude any hole whose full circle lies outside the PCB outline.
+If an older cached export lacks `StandaloneMountingPads`, refresh the
 read-only assembly export before generating maps rather than inventing hole
 locations. Place top-side perimeter-connector labels
 outside the PCB first. Keep left/right labels horizontal and rotate top/bottom

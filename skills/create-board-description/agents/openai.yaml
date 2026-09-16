@@ -1,4 +1,4 @@
 interface:
   display_name: "Create Board Description"
-  short_description: "Create verified Russian PCB description DOCX"
-  default_prompt: "Use $create-board-description to inspect the open Altium board and create a verified Russian technical-description DOCX."
+  short_description: "Create verified board manuals and descriptions"
+  default_prompt: "Use $create-board-description to inspect the open Altium board and create a verified technical description or end-user connector manual."

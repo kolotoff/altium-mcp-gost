@@ -580,6 +580,49 @@ The generator uses the supplied template as its layout source and replaces the
 title, subtitle, section headings, table contents, footer label/page field, and
 core document metadata.
 
+### Generating an end-user connector manual
+
+Use the separate end-user workflow when the deliverable is a user-facing board
+manual rather than a PCB manufacturing description. Its JSON schema is
+documented in
+`skills/create-board-description/references/end-user-description-data.md`.
+The workflow produces physical connector pinouts from Altium assembly SVGs,
+1:1 top/bottom interface maps, and a DOCX with one pin per table row:
+
+```powershell
+python tools\crop_native_pcb_3d_export.py `
+  --top "D:\path\pcb-3d-top.png" `
+  --bottom "D:\path\pcb-3d-bottom.png" `
+  --components "D:\path\component-records.json" `
+  --board-width-mm 100 --board-height-mm 50 `
+  --board-origin-x-mil 0 --board-origin-y-mil 0 `
+  --output-dir "D:\path\connector-images"
+
+python tools\generate_altium_connector_svgs.py `
+  --data "D:\path\end-user-board.json" `
+  --source-dir "D:\path\component-svg" `
+  --board-top-svg "D:\path\pcb-assembly-top.svg" `
+  --board-bottom-svg "D:\path\pcb-assembly-bottom.svg" `
+  --output-dir "D:\path\pinout-svg"
+
+python tools\generate_board_interface_maps.py `
+  --data "D:\path\end-user-board.json" `
+  --top-svg "D:\path\pcb-assembly-top.svg" `
+  --bottom-svg "D:\path\pcb-assembly-bottom.svg" `
+  --output-dir "D:\path\interface-maps"
+
+python tools\generate_end_user_board_description_docx.py `
+  --data "D:\path\end-user-board.json" `
+  --output "D:\path\board-user-manual.docx"
+```
+
+Generate the assembly SVGs through the read-only Altium MCP exports with the
+requested solder-mask color. The interface-map generator hides copper pads but
+preserves `BoardShape/StandaloneMountingPads`; refresh stale assembly exports
+when that group is absent instead of estimating mounting-hole positions.
+Processor markers are data-driven through `interface_map_processors`, so the
+reusable generator contains no board-specific designators.
+
 ## How It Works
 
 The server communicates with Altium Designer using a scripting bridge:

@@ -611,6 +611,12 @@ python tools\generate_board_interface_maps.py `
   --bottom-svg "D:\path\pcb-assembly-bottom.svg" `
   --output-dir "D:\path\interface-maps"
 
+node tools\rasterize_svg_directory.cjs `
+  "D:\path\pinout-svg" "D:\path\pinout-svg" 300
+
+node tools\rasterize_svg_directory.cjs `
+  "D:\path\interface-maps" "D:\path\interface-maps" 300
+
 python tools\generate_end_user_board_description_docx.py `
   --data "D:\path\end-user-board.json" `
   --output "D:\path\board-user-manual.docx"
@@ -622,6 +628,8 @@ preserves `BoardShape/StandaloneMountingPads`; refresh stale assembly exports
 when that group is absent instead of estimating mounting-hole positions.
 Processor markers are data-driven through `interface_map_processors`, so the
 reusable generator contains no board-specific designators.
+The SVG rasterizer requires the `sharp` Node.js package. Its PNGs are mandatory
+fallbacks for Word clients that do not render the embedded SVG part directly.
 
 ## How It Works
 

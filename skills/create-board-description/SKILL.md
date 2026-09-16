@@ -140,8 +140,8 @@ explicit per-designator vertical crop flip for bottom-side exports whose local
 orientation differs from the rest of the board.
 
 The dedicated generator creates the layout directly and requires one native 3D
-crop, one SVG connector pinout, and one pin-by-pin table per item. A raster
-fallback may accompany each SVG for compatibility:
+crop, one SVG connector pinout, and one pin-by-pin table per item. Generate a
+PNG fallback for every SVG because Word embeds it as the compatibility image:
 
 ```powershell
 python tools\crop_native_pcb_3d_export.py `
@@ -164,6 +164,12 @@ python tools\generate_board_interface_maps.py `
   --top-svg "<pcb-assembly-top.svg>" `
   --bottom-svg "<pcb-assembly-bottom.svg>" `
   --output-dir "<interface-map-directory>"
+
+node tools\rasterize_svg_directory.cjs `
+  "<pinout-svg-directory>" "<pinout-svg-directory>" 300
+
+node tools\rasterize_svg_directory.cjs `
+  "<interface-map-directory>" "<interface-map-directory>" 300
 
 python tools\generate_end_user_board_description_docx.py `
   --data "<end-user-description.json>" `

@@ -6,6 +6,7 @@ import argparse
 import json
 import re
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
@@ -209,20 +210,34 @@ def add_board_renders(document: Document, spec: dict[str, Any]) -> None:
         document.add_page_break()
 
 
+def fit_svg_map(path: Path, *, max_width_cm: float, max_height_cm: float) -> tuple[float, float]:
+    root = ET.parse(path).getroot()
+    view_box = root.get("viewBox", "").replace(",", " ").split()
+    if len(view_box) != 4:
+        raise SpecError(f"map SVG has no four-value viewBox: {path}")
+    width, height = float(view_box[2]), float(view_box[3])
+    if width <= 0 or height <= 0:
+        raise SpecError(f"map SVG has an invalid aspect ratio: {path}")
+    scale = min(max_width_cm / width, max_height_cm / height)
+    return width * scale, height * scale
+
+
 def add_test_maps(document: Document, spec: dict[str, Any]) -> None:
-    for test_map in spec["test_maps"]:
+    for index, test_map in enumerate(spec["test_maps"]):
         add_heading(document, str(test_map["title"]), 1)
+        if index:
+            document.paragraphs[-1].paragraph_format.page_break_before = True
         paragraph = document.add_paragraph()
         paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        width, height = fit_svg_map(test_map["_image_path"], max_width_cm=26.7, max_height_cm=16.8)
         add_svg_picture(
             paragraph.add_run(),
             test_map["_image_path"],
             test_map["_fallback_path"],
-            width=Cm(26.6),
-            height=Cm(15.5),
+            width=Cm(width),
+            height=Cm(height),
             alt_text=str(test_map.get("alt", test_map["title"])),
         )
-        document.add_page_break()
 
 
 def add_pin_table(document: Document, item: dict[str, Any]) -> None:
@@ -250,8 +265,10 @@ def add_pin_table(document: Document, item: dict[str, Any]) -> None:
                 set_cell_fill(cell, COLORS["pale"])
 
 
-def add_item(document: Document, item: dict[str, Any]) -> None:
+def add_item(document: Document, item: dict[str, Any], *, page_break_before: bool = False) -> None:
     add_heading(document, f"{item['designator']}  {item['name']}", 2)
+    if page_break_before:
+        document.paragraphs[-1].paragraph_format.page_break_before = True
     meta = document.add_paragraph()
     meta.paragraph_format.space_after = Pt(2)
     set_keep_with_next(meta)
@@ -273,17 +290,15 @@ def add_item(document: Document, item: dict[str, Any]) -> None:
 
 def add_groups(document: Document, spec: dict[str, Any]) -> None:
     for group_index, group in enumerate(spec["groups"]):
-        if group_index:
-            document.add_page_break()
         add_heading(document, str(group["title"]), 1)
+        document.paragraphs[-1].paragraph_format.page_break_before = True
         intro = str(group.get("intro", "")).strip()
         if intro:
             paragraph = document.add_paragraph()
             add_text(paragraph, intro, size=8.5, color=COLORS["muted"])
         for index, item in enumerate(group["items"]):
-            if index and (index % 2 == 0 or "through-hole-signal" in item.get("categories", [])):
-                document.add_page_break()
-            add_item(document, item)
+            start_page = bool(index and (index % 2 == 0 or "through-hole-signal" in item.get("categories", [])))
+            add_item(document, item, page_break_before=start_page)
 
 
 def build_document(spec: dict[str, Any], output: Path) -> None:

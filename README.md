@@ -634,6 +634,28 @@ reusable generator contains no board-specific designators.
 The SVG rasterizer requires the `sharp` Node.js package. Its PNGs are mandatory
 fallbacks for Word clients that do not render the embedded SVG part directly.
 
+### Generating a board test-access description
+
+Use `skills/create-board-test-description/SKILL.md` for the complete workflow
+and `skills/create-board-test-description/references/test-description-data.md`
+for the inventory and DOCX specification. Read the active PCB through Altium;
+export top/bottom orthographic 3D images and assembly SVGs without saving the
+design. The default solder mask is dark green (`#0B3D2B`).
+
+`tools/generate_board_test_maps.py` produces top/bottom maps with actual
+designators, a leader and circled anchor for each callout, and per-pad source
+nets on qualifying drilled signal pads. It hides the copper `Pads` layer while
+retaining only `StandaloneMountingPads` hole circles whose *full circle* fits
+inside `BoardOutline`; panel-rail holes outside the PCB must not appear in the
+SVG or DOCX. The board image keeps its aspect ratio when fitted to the page.
+
+After changing a map, rasterize both SVGs again with
+`tools/rasterize_svg_directory.cjs`, rebuild the DOCX with
+`tools/generate_board_test_description_docx.py`, and verify that the embedded
+SVGs and PNG fallbacks match the regenerated files. Inspect the embedded SVG
+hole geometry as well as the rendered pages: clipping can hide stale
+out-of-board circles in a preview.
+
 ## How It Works
 
 The server communicates with Altium Designer using a scripting bridge:

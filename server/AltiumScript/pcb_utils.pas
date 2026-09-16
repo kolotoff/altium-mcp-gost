@@ -1275,6 +1275,7 @@ begin
                                 AddJSONProperty(PinProps, 'layer', Layer2String(Pad.Layer));
                                 AddJSONNumber(PinProps, 'width', CoordToMils(Pad.XSizeOnLayer[Pad.Layer]));
                                 AddJSONNumber(PinProps, 'height', CoordToMils(Pad.YSizeOnLayer[Pad.Layer]));
+                                AddJSONNumber(PinProps, 'hole_size', CoordToMils(Pad.HoleSize));
                                 AddJSONProperty(PinProps, 'shape', ShapeToString(Pad.ShapeOnLayer[Pad.Layer]));
                                 
                                 // Add to pins array

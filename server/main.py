@@ -1186,7 +1186,7 @@ async def get_all_designators(ctx: Context) -> str:
 @mcp.tool()
 async def get_component_pins(ctx: Context, cmp_designators: list) -> str:
     """
-    Get pin data for components in Altium
+    Get pin data for components in Altium, including pad drill hole_size in mils.
     
     Args:
         cmp_designators (list): List of designators of the components (e.g., ["R1", "C5", "U3"])

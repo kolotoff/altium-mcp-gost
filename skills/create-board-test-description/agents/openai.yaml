@@ -1,0 +1,4 @@
+interface:
+  display_name: "Create Board Test Description"
+  short_description: "Build a PCB test-access DOCX from the open Altium board"
+  default_prompt: "Create a board test description from the currently open PCB."

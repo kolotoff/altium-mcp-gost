@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
@@ -18,10 +20,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bottom", type=Path, required=True)
     parser.add_argument("--components", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--board-width-mm", type=float, required=True)
-    parser.add_argument("--board-height-mm", type=float, required=True)
-    parser.add_argument("--board-origin-x-mil", type=float, required=True)
-    parser.add_argument("--board-origin-y-mil", type=float, required=True)
+    parser.add_argument("--board-width-mm", type=float)
+    parser.add_argument("--board-height-mm", type=float)
+    parser.add_argument("--board-origin-x-mil", type=float)
+    parser.add_argument("--board-origin-y-mil", type=float)
+    parser.add_argument("--top-svg", type=Path)
+    parser.add_argument("--bottom-svg", type=Path)
     parser.add_argument("--crop-width-px", type=int, default=760)
     parser.add_argument("--crop-height-px", type=int, default=430)
     parser.add_argument(
@@ -91,6 +95,38 @@ def crop_with_padding(image: Image.Image, center: tuple[float, float], size: tup
     return canvas
 
 
+def parse_numbers(text: str) -> list[float]:
+    return [float(value) for value in re.findall(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?", text)]
+
+
+def svg_component_pixels(path: Path, image_size: tuple[int, int], *, bottom: bool) -> dict[str, tuple[float, float]]:
+    root = ET.parse(path).getroot()
+    view = parse_numbers(root.get("viewBox", ""))
+    if len(view) != 4:
+        raise ValueError(f"invalid board SVG viewBox: {path}")
+    view_x, view_y, view_width, view_height = view
+    positions: dict[str, tuple[float, float]] = {}
+    for suffix in ("-assembly", "-pads"):
+        for element in root.iter():
+            identifier = element.get("id", "")
+            designator = element.get("data-component")
+            if not designator or not identifier.endswith(suffix) or designator in positions:
+                continue
+            match = re.search(r"translate\(\s*([-+0-9.eE]+)[ ,]+([-+0-9.eE]+)\s*\)", element.get("transform", ""))
+            if not match:
+                continue
+            x, y = float(match.group(1)), float(match.group(2))
+            if bottom:
+                x = 2.0 * view_x + view_width - x
+            local_x = x - view_x
+            local_y = -y - view_y
+            positions[designator] = (
+                local_x / view_width * image_size[0],
+                local_y / view_height * image_size[1],
+            )
+    return positions
+
+
 def add_label(image: Image.Image, designator: str, side: str) -> None:
     draw = ImageDraw.Draw(image, "RGBA")
     font = load_font(28, bold=True)
@@ -150,22 +186,40 @@ def main() -> int:
     payload = json.loads(args.components.read_text(encoding="utf-8-sig"))
     components = payload.get("components", payload)
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    board_width_mil = args.board_width_mm / MM_PER_MIL
-    board_height_mil = args.board_height_mm / MM_PER_MIL
+    use_svg_positions = args.top_svg is not None or args.bottom_svg is not None
+    if use_svg_positions:
+        if args.top_svg is None or args.bottom_svg is None:
+            raise SystemExit("--top-svg and --bottom-svg must be supplied together")
+        top_positions = svg_component_pixels(args.top_svg, top.size, bottom=False)
+        bottom_positions = svg_component_pixels(args.bottom_svg, bottom.size, bottom=True)
+    else:
+        required = (args.board_width_mm, args.board_height_mm, args.board_origin_x_mil, args.board_origin_y_mil)
+        if any(value is None for value in required):
+            raise SystemExit(
+                "supply --top-svg/--bottom-svg, or all board width/height/origin arguments"
+            )
+        board_width_mil = args.board_width_mm / MM_PER_MIL
+        board_height_mil = args.board_height_mm / MM_PER_MIL
     vertical_flips = {str(value).upper() for value in args.flip_vertical_designator}
     outputs: list[Path] = []
     for component in sorted(components, key=lambda value: value["designator"]):
         side = "bottom" if component.get("layer") == "Bottom Layer" else "top"
         source = bottom if side == "bottom" else top
-        center = point_for_component(
-            component,
-            image_size=source.size,
-            board_width_mil=board_width_mil,
-            board_height_mil=board_height_mil,
-            origin_x_mil=args.board_origin_x_mil,
-            origin_y_mil=args.board_origin_y_mil,
-            bottom_transform=args.bottom_transform,
-        )
+        if use_svg_positions:
+            positions = bottom_positions if side == "bottom" else top_positions
+            if component["designator"] not in positions:
+                raise SystemExit(f"component {component['designator']} is missing from the {side} assembly SVG")
+            center = positions[component["designator"]]
+        else:
+            center = point_for_component(
+                component,
+                image_size=source.size,
+                board_width_mil=board_width_mil,
+                board_height_mil=board_height_mil,
+                origin_x_mil=args.board_origin_x_mil,
+                origin_y_mil=args.board_origin_y_mil,
+                bottom_transform=args.bottom_transform,
+            )
         crop = crop_with_padding(source, center, (args.crop_width_px, args.crop_height_px)).convert("RGBA")
         if str(component["designator"]).upper() in vertical_flips:
             crop = ImageOps.flip(crop)

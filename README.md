@@ -445,6 +445,8 @@ Use `3D_BODY_PROJECTION|<mechanical_layer>|<line_width_mm>` only as a fallback. 
 
 Do not save the PcbLib automatically after these operations. Leave the document dirty and let the user inspect the mechanical layer and save manually.
 
+#### PcbLib save-state recovery
+
 If a PcbLib-modifying script hit an access violation or Altium later refuses to save with `A command is currently active and save cannot be completed at this time`, first cancel any active interactive command with `Esc`, then run the PcbLib save-state recovery command once:
 
 ```text

@@ -649,12 +649,19 @@ retaining only `StandaloneMountingPads` hole circles whose *full circle* fits
 inside `BoardOutline`; panel-rail holes outside the PCB must not appear in the
 SVG or DOCX. The board image keeps its aspect ratio when fitted to the page.
 
-After changing a map, rasterize both SVGs again with
+`tools/generate_board_test_3d_maps.py` applies the same labels and leader
+routes to the corresponding orthographic 3D renders. Each annotated 3D page
+follows its side's assembly-SVG map. The overlay has no drawn endpoint
+circles; physical holes visible in the 3D render remain unchanged. The
+render's aspect ratio is preserved.
+
+After changing a map, regenerate both assembly and both annotated-3D SVGs,
+then rasterize all four with
 `tools/rasterize_svg_directory.cjs`, rebuild the DOCX with
 `tools/generate_board_test_description_docx.py`, and verify that the embedded
-SVGs and PNG fallbacks match the regenerated files. Inspect the embedded SVG
-hole geometry as well as the rendered pages: clipping can hide stale
-out-of-board circles in a preview.
+SVGs and PNG fallbacks match the regenerated files. Inspect the embedded
+assembly-SVG hole geometry and the 3D overlays as well as the rendered pages:
+clipping can hide stale out-of-board circles in a preview.
 
 ## How It Works
 

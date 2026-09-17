@@ -75,6 +75,15 @@ def parse_spec(path: Path) -> dict[str, Any]:
         test_map["_fallback_path"] = resolve_path(path, test_map.get("fallback_image"), f"test_maps[{index}].fallback_image")
         if test_map["_image_path"].suffix.lower() != ".svg":
             raise SpecError(f"test_maps[{index}].image must be SVG")
+        render_3d = test_map.get("render_3d")
+        if render_3d is not None:
+            if not isinstance(render_3d, dict):
+                raise SpecError(f"test_maps[{index}].render_3d must be an object")
+            require_text(render_3d.get("title"), f"test_maps[{index}].render_3d.title")
+            render_3d["_image_path"] = resolve_path(path, render_3d.get("image"), f"test_maps[{index}].render_3d.image")
+            render_3d["_fallback_path"] = resolve_path(path, render_3d.get("fallback_image"), f"test_maps[{index}].render_3d.fallback_image")
+            if render_3d["_image_path"].suffix.lower() != ".svg":
+                raise SpecError(f"test_maps[{index}].render_3d.image must be SVG")
 
     seen: set[str] = set()
     for group_index, group in enumerate(groups):
@@ -222,22 +231,28 @@ def fit_svg_map(path: Path, *, max_width_cm: float, max_height_cm: float) -> tup
     return width * scale, height * scale
 
 
+def add_svg_map_page(document: Document, entry: dict[str, Any], *, page_break_before: bool) -> None:
+    add_heading(document, str(entry["title"]), 1)
+    if page_break_before:
+        document.paragraphs[-1].paragraph_format.page_break_before = True
+    paragraph = document.add_paragraph()
+    paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    width, height = fit_svg_map(entry["_image_path"], max_width_cm=26.7, max_height_cm=16.8)
+    add_svg_picture(
+        paragraph.add_run(),
+        entry["_image_path"],
+        entry["_fallback_path"],
+        width=Cm(width),
+        height=Cm(height),
+        alt_text=str(entry.get("alt", entry["title"])),
+    )
+
+
 def add_test_maps(document: Document, spec: dict[str, Any]) -> None:
     for index, test_map in enumerate(spec["test_maps"]):
-        add_heading(document, str(test_map["title"]), 1)
-        if index:
-            document.paragraphs[-1].paragraph_format.page_break_before = True
-        paragraph = document.add_paragraph()
-        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        width, height = fit_svg_map(test_map["_image_path"], max_width_cm=26.7, max_height_cm=16.8)
-        add_svg_picture(
-            paragraph.add_run(),
-            test_map["_image_path"],
-            test_map["_fallback_path"],
-            width=Cm(width),
-            height=Cm(height),
-            alt_text=str(test_map.get("alt", test_map["title"])),
-        )
+        add_svg_map_page(document, test_map, page_break_before=bool(index))
+        if test_map.get("render_3d"):
+            add_svg_map_page(document, test_map["render_3d"], page_break_before=True)
 
 
 def add_pin_table(document: Document, item: dict[str, Any]) -> None:

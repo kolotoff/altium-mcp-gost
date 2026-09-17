@@ -25,6 +25,11 @@ python tools\generate_board_test_maps.py `
   --top-svg "<pcb-assembly-top.svg>" --bottom-svg "<pcb-assembly-bottom.svg>" `
   --output-dir "<maps>"
 
+python tools\generate_board_test_3d_maps.py `
+  --top-map "<maps>/pcb-test-map-top.svg" --bottom-map "<maps>/pcb-test-map-bottom.svg" `
+  --top-render "<pcb-3d-top.png>" --bottom-render "<pcb-3d-bottom.png>" `
+  --output-dir "<maps>"
+
 python tools\crop_native_pcb_3d_export.py `
   --top "<pcb-3d-top.png>" --bottom "<pcb-3d-bottom.png>" `
   --top-svg "<pcb-assembly-top.svg>" --bottom-svg "<pcb-assembly-bottom.svg>" `
@@ -50,8 +55,14 @@ The generator accepts a JSON object with this shape (paths may be absolute or re
     {"title": "Bottom 3D", "image": "pcb-3d-bottom.png"}
   ],
   "test_maps": [
-    {"title": "Top test map", "image": "pcb-test-map-top.svg", "fallback_image": "pcb-test-map-top.png"},
-    {"title": "Bottom test map", "image": "pcb-test-map-bottom.svg", "fallback_image": "pcb-test-map-bottom.png"}
+    {
+      "title": "Top test map", "image": "pcb-test-map-top.svg", "fallback_image": "pcb-test-map-top.png",
+      "render_3d": {"title": "Top annotated 3D map", "image": "pcb-test-3d-map-top.svg", "fallback_image": "pcb-test-3d-map-top.png"}
+    },
+    {
+      "title": "Bottom test map", "image": "pcb-test-map-bottom.svg", "fallback_image": "pcb-test-map-bottom.png",
+      "render_3d": {"title": "Bottom annotated 3D map", "image": "pcb-test-3d-map-bottom.svg", "fallback_image": "pcb-test-3d-map-bottom.png"}
+    }
   ],
   "groups": [
     {
@@ -71,4 +82,4 @@ The generator accepts a JSON object with this shape (paths may be absolute or re
 }
 ```
 
-Every in-scope designator must appear exactly once in `groups`; each selected pad must be listed. A component in more than one category is listed once and counted in all applicable category totals. Keep local board net and source net separate even when equal. The document generator rejects duplicate designators and unresolved generated source nets.
+Each `render_3d` entry is paired with the assembly-SVG map immediately before it. Use the same callout labels and leader routes, but omit drawn endpoint circles on the 3D overlay. Every in-scope designator must appear exactly once in `groups`; each selected pad must be listed. A component in more than one category is listed once and counted in all applicable category totals. Keep local board net and source net separate even when equal. The document generator rejects duplicate designators and unresolved generated source nets.

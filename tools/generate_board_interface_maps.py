@@ -12,8 +12,10 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import math
 import re
 import xml.etree.ElementTree as ET
+from collections import Counter
 from pathlib import Path
 
 
@@ -27,6 +29,19 @@ COLORS = {
     "other": "#475467",
 }
 
+POWER_COLORS = {
+    "main_5v": "#007F86",
+    "pwm1_5v": "#D62828",
+    "pwm2_5v": "#5B36C8",
+    "can_5v": "#718C00",
+    "usb_5v": "#C12F9F",
+    "logic_3v3": "#4361A8",
+    "vin": "#C49A00",
+    "sd_io": "#8C643A",
+    "backup": "#AF4545",
+}
+POWER_FILL_OPACITY = "0.30"
+
 
 def qname(name: str) -> str:
     return f"{{{SVG}}}{name}"
@@ -34,6 +49,34 @@ def qname(name: str) -> str:
 
 def parse_numbers(text: str) -> list[float]:
     return [float(value) for value in re.findall(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?", text)]
+
+
+def assembly_path_vertices(path_data: str) -> list[tuple[float, float]]:
+    """Read geometry coordinates, excluding SVG arc radii and control flags."""
+    tokens = re.findall(
+        r"[A-Za-z]|[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?",
+        path_data,
+    )
+    vertices: list[tuple[float, float]] = []
+    index = 0
+    while index < len(tokens):
+        command = tokens[index]
+        index += 1
+        if command in ("M", "L"):
+            if index + 1 >= len(tokens):
+                raise ValueError(f"incomplete assembly SVG {command} command")
+            vertices.append((float(tokens[index]), float(tokens[index + 1])))
+            index += 2
+        elif command == "A":
+            if index + 6 >= len(tokens):
+                raise ValueError("incomplete assembly SVG arc command")
+            vertices.append((float(tokens[index + 5]), float(tokens[index + 6])))
+            index += 7
+        elif command == "Z":
+            continue
+        else:
+            raise ValueError(f"unsupported assembly SVG path command: {command}")
+    return vertices
 
 
 def remove_pads(element: ET.Element) -> None:
@@ -119,6 +162,46 @@ def component_positions(
     return positions
 
 
+def component_body_polygons(
+    root: ET.Element, *, bottom: bool, view_x: float, view_y: float,
+    view_width: float, board_x: float, board_y: float,
+) -> dict[str, list[tuple[float, float]]]:
+    """Map unpadded assembly-body extents onto the printed board."""
+    polygons: dict[str, list[tuple[float, float]]] = {}
+    for element in root.iter(qname("g")):
+        designator = element.get("data-component")
+        if not designator or not element.get("id", "").endswith("-assembly"):
+            continue
+        transform = element.get("transform", "")
+        origin = re.search(r"translate\(\s*([-+0-9.eE]+)[ ,]+([-+0-9.eE]+)\s*\)", transform)
+        if origin is None:
+            continue
+        coordinates: list[tuple[float, float]] = []
+        for path in element.iter(qname("path")):
+            coordinates.extend(assembly_path_vertices(path.get("d", "")))
+        if not coordinates:
+            continue
+        min_x = min(point[0] for point in coordinates)
+        max_x = max(point[0] for point in coordinates)
+        min_y = min(point[1] for point in coordinates)
+        max_y = max(point[1] for point in coordinates)
+        angle_match = re.search(r"rotate\(\s*([-+0-9.eE]+)", transform)
+        angle = math.radians(float(angle_match.group(1))) if angle_match else 0.0
+        cosine, sine = math.cos(angle), math.sin(angle)
+        local_y_sign = -1.0 if re.search(r"scale\(\s*1[ ,]+-1\s*\)", transform) else 1.0
+        tx, ty = float(origin.group(1)), float(origin.group(2))
+        points = []
+        for local_x, local_y in ((min_x, min_y), (max_x, min_y), (max_x, max_y), (min_x, max_y)):
+            local_y *= local_y_sign
+            global_x = tx + local_x * cosine - local_y * sine
+            global_y = ty + local_x * sine + local_y * cosine
+            if bottom:
+                global_x = 2.0 * view_x + view_width - global_x
+            points.append((board_x + global_x - view_x, board_y - global_y - view_y))
+        polygons[designator] = points
+    return polygons
+
+
 def text(parent: ET.Element, x: float, y: float, value: str, **attrs: str) -> ET.Element:
     settings = {
         "x": f"{x:.3f}", "y": f"{y:.3f}",
@@ -138,7 +221,7 @@ def line(parent: ET.Element, x1: float, y1: float, x2: float, y2: float, color: 
 
 
 def label_width(value: str) -> float:
-    return max(12.0, min(28.0, 4.0 + len(value) * 0.88))
+    return max(12.0, min(28.0, 4.0 + max(len(line) for line in value.split("|")) * 0.88))
 
 
 def boxes_overlap(a: tuple[float, float, float, float], b: tuple[float, float, float, float], pad: float = 0.75) -> bool:
@@ -479,7 +562,6 @@ def arrange_local_labels(
 ) -> None:
     """Place local callouts as one collision-free set with short direct leaders."""
     bx, by, bw, bh = board_box
-    height = 4.2
     component_gap = 1.5
     fixed_boxes = [record["label_box"] for record in perimeter_records]
     fixed_leaders = [record["leader"] for record in perimeter_records]
@@ -529,6 +611,7 @@ def arrange_local_labels(
     for record in records:
         ax, ay = record["anchor_x"], record["anchor_y"]
         width = label_width(record["label"])
+        height = 4.2 if "|" not in record["label"] else 7.0
         bias = record.get("bias")
         if bias in {"left", "right", "top", "bottom"}:
             # An explicit side is a hard layout requirement. Search along that
@@ -603,7 +686,8 @@ def arrange_local_labels(
 
 def render_local_label(root: ET.Element, record: dict) -> None:
     color = COLORS.get(record["domain"], COLORS["other"])
-    height = 4.2
+    lines = record["label"].split("|")
+    height = 4.2 if len(lines) == 1 else 7.0
     start, end = record["leader"]
     line(root, start[0], start[1], end[0], end[1], color)
     x, y, width = record["label_x"], record["label_y"], record["label_w"]
@@ -611,8 +695,10 @@ def render_local_label(root: ET.Element, record: dict) -> None:
         "x": f"{x:.3f}", "y": f"{y:.3f}", "width": f"{width:.3f}", "height": f"{height:.3f}",
         "rx": "1.0", "fill": color,
     })
-    text(root, x + width / 2.0, y + 2.82, record["label"],
-         **{"font-size": "1.72", "font-weight": "700", "text-anchor": "middle", "fill": "#FFFFFF"})
+    for index, value in enumerate(lines):
+        baseline = y + (2.82 if len(lines) == 1 else 2.7 + index * 2.8)
+        text(root, x + width / 2.0, baseline, value,
+             **{"font-size": "1.72", "font-weight": "700", "text-anchor": "middle", "fill": "#FFFFFF"})
     ET.SubElement(root, qname("circle"), {
         "cx": f"{record['anchor_x']:.3f}", "cy": f"{record['anchor_y']:.3f}", "r": "0.58",
         "fill": "#FFFFFF", "stroke": color, "stroke-width": "0.45",
@@ -849,12 +935,65 @@ def add_legend(root: ET.Element, page_width: float, spec: dict) -> None:
         x += 24.5
 
 
-def add_processor_marker(root: ET.Element, designator: str, label: str, position: tuple[float, float], domain: str) -> None:
+def visible_power_domains(spec: dict) -> set[str]:
+    counts = Counter(
+        str(item.get("power_domain", "none")).lower()
+        for group in spec["connector_groups"]
+        for item in group["items"]
+    )
+    return {
+        domain for domain, count in counts.items()
+        if count > 1 and domain in POWER_COLORS
+    }
+
+
+def add_power_legend(root: ET.Element, visible_domains: set[str]) -> None:
+    if not visible_domains:
+        return
+    text(root, 8.0, 13.5, "Connector power source", **{"font-size": "2.2", "font-weight": "700"})
+    entries = [
+        ("main_5v", "main 5 V"), ("pwm1_5v", "PWM bank 1"),
+        ("pwm2_5v", "PWM bank 2"), ("can_5v", "CAN 5 V"),
+        ("usb_5v", "USB VBUS"), ("logic_3v3", "3.3/1.8 V"),
+        ("vin", "input rail"), ("sd_io", "SD I/O rail"),
+        ("backup", "RTC backup"),
+    ]
+    for index, (domain, label) in enumerate(
+        (entry for entry in entries if entry[0] in visible_domains)
+    ):
+        x = 8.0 + (index % 5) * 51.0
+        y = 16.0 + (index // 5) * 6.0
+        ET.SubElement(root, qname("rect"), {
+            "x": f"{x:.3f}", "y": f"{y:.3f}", "width": "3.6", "height": "3.6",
+            "rx": "0.5", "fill": POWER_COLORS[domain],
+            "fill-opacity": POWER_FILL_OPACITY,
+            "data-power-legend": domain,
+        })
+        text(root, x + 5.0, y + 2.8, label, **{"font-size": "2.05"})
+
+
+def add_power_highlight(root: ET.Element, record: dict, visible_domains: set[str]) -> None:
+    domain = record["power_domain"]
+    if domain not in visible_domains:
+        return
+    points = record.get("body_polygon")
+    if not points:
+        raise ValueError(f"{record['designator']}: missing native component body geometry")
+    ET.SubElement(root, qname("polygon"), {
+        "points": " ".join(f"{x:.3f},{y:.3f}" for x, y in points),
+        "fill": POWER_COLORS[domain], "fill-opacity": POWER_FILL_OPACITY,
+        "data-power-highlight": domain,
+        "data-designator": record["designator"],
+    })
+
+
+def add_processor_marker(root: ET.Element, designator: str, label: str, position: tuple[float, float], domain: str,
+                         body_polygon: list[tuple[float, float]]) -> None:
     x, y = position
     color = COLORS[domain]
-    ET.SubElement(root, qname("circle"), {
-        "cx": f"{x:.3f}", "cy": f"{y:.3f}", "r": "5.5", "fill": color,
-        "fill-opacity": "0.12", "stroke": color, "stroke-width": "0.8",
+    ET.SubElement(root, qname("polygon"), {
+        "points": " ".join(f"{px:.3f},{py:.3f}" for px, py in body_polygon),
+        "fill": color, "fill-opacity": "0.16",
     })
     label_x = x + 8.0
     label_y = y - 4.0
@@ -883,6 +1022,10 @@ def build_page(spec: dict, source_path: Path, output_path: Path, *, side: str) -
         view_y=view_y,
         view_width=board_w,
     )
+    body_polygons = component_body_polygons(
+        source_root, bottom=side == "bottom", view_x=view_x, view_y=view_y,
+        view_width=board_w, board_x=board_x, board_y=board_y,
+    )
 
     root = ET.Element(qname("svg"), {
         "version": "1.2", "baseProfile": "tiny", "data-coordinate-units": "mm",
@@ -892,6 +1035,8 @@ def build_page(spec: dict, source_path: Path, output_path: Path, *, side: str) -
     title = "TOP SIDE INTERFACE MAP 1:1" if side == "top" else "BOTTOM SIDE INTERFACE MAP 1:1"
     text(root, 2.0, 8.0, title, **{"font-size": "4.0", "font-weight": "700", "fill": "#000000"})
     add_legend(root, page_w, spec)
+    power_domains = visible_power_domains(spec)
+    add_power_legend(root, power_domains)
 
     clean = copy.deepcopy(source_root)
     remove_pads(clean)
@@ -913,14 +1058,19 @@ def build_page(spec: dict, source_path: Path, output_path: Path, *, side: str) -
             anchor_x, anchor_y = board_x + local_x, board_y + local_y
             label = f"{designator} {item.get('interface_label', item['name'])}"
             records.append({
+                "designator": designator,
                 "label": label, "domain": str(item.get("processor_domain", "other")).lower(),
+                "power_domain": str(item.get("power_domain", "none")).lower(),
                 "anchor_x": anchor_x, "anchor_y": anchor_y,
                 "layout": str(item.get("map_label_layout", "perimeter")).lower(),
                 "bias": str(item.get("map_label_bias", "nearest")).lower(),
                 "edge_lock": str(item.get("map_label_edge", "auto")).lower(),
                 "component_w": float(item.get("map_component_size_mm", [0.0, 0.0])[0]),
                 "component_h": float(item.get("map_component_size_mm", [0.0, 0.0])[1]),
+                "body_polygon": body_polygons.get(designator),
             })
+    for record in records:
+        add_power_highlight(root, record, power_domains)
     if side == "top":
         perimeter_records = [record for record in records if record["layout"] != "local"]
         local_records = [record for record in records if record["layout"] == "local"]
@@ -951,7 +1101,10 @@ def build_page(spec: dict, source_path: Path, output_path: Path, *, side: str) -
             domain = str(processor.get("processor_domain", "other")).lower()
             if designator in positions:
                 px, py = positions[designator]
-                add_processor_marker(root, designator, label, (board_x + px, board_y + py), domain)
+                if designator not in body_polygons:
+                    raise ValueError(f"{designator}: missing native processor body geometry")
+                add_processor_marker(root, designator, label, (board_x + px, board_y + py), domain,
+                                     body_polygons[designator])
 
     text(root, 2.0, page_h - 2.0, "Board artwork is shown at physical 1:1 scale. Pads are intentionally hidden.",
          **{"font-size": "2.0", "fill": "#637785"})

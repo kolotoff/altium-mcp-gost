@@ -631,8 +631,20 @@ preserves `BoardShape/StandaloneMountingPads`; refresh stale assembly exports
 when that group is absent instead of estimating mounting-hole positions.
 Processor markers are data-driven through `interface_map_processors`, so the
 reusable generator contains no board-specific designators.
+Power-domain highlights apply only to rails shared by multiple connectors;
+single-connector and mixed-rail domains stay unmarked. Each highlight follows
+the native assembly body's unpadded extent without a border. SVG arc radii and
+flags must not be treated as x/y coordinates when calculating that extent:
+doing so can make curved connector highlights several times too large. The
+power legend uses the same fill and opacity as the connector highlights, and
+nearby power domains use visibly distinct hues. Inspect the rendered overlays
+against the actual connector housings before embedding the maps in the DOCX.
 The SVG rasterizer requires the `sharp` Node.js package. Its PNGs are mandatory
 fallbacks for Word clients that do not render the embedded SVG part directly.
+The reviewed SwarmRK v1.6S maps are kept in
+`SwarmRK_v1.6S_interface_maps/`; the matching SVGs are embedded in
+`SwarmRK_v1.6S_User_Manual.docx`. The audited pin-to-net exports are
+`SwarmRK_v1.6S_port_pin_net_map.csv` and `.json`.
 
 ### Generating a board test-access description
 

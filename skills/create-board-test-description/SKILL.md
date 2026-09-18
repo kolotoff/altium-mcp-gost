@@ -5,6 +5,11 @@ description: Inspect the currently open Altium PCB and create a board test-acces
 
 # Create Board Test Description
 
+When the test deliverable includes connector-pin exports, firmware port
+mapping, or supply-source/voltage fields, also follow
+`skills/create-board-port-map/SKILL.md`; keep PCB pad nets distinct from traced
+source nets in the test inventory.
+
 Create a test-access document from the **currently open PCB**, without editing or saving the Altium design. Follow the repository `AGENTS.md` rules. This is a focused companion to `skills/create-board-description/SKILL.md`; its end-user mode is a useful reference for 3D/SVG export and net tracing, but a test description has different selection and layout rules.
 
 ## Inventory

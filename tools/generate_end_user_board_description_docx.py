@@ -12,6 +12,7 @@ import argparse
 import json
 import re
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
@@ -187,7 +188,7 @@ def set_picture_alt(inline_shape, alt_text: str) -> None:
     doc_pr.set("title", alt_text)
 
 
-def add_heading(document, text: str, level: int) -> None:
+def add_heading(document, text: str, level: int):
     paragraph = document.add_paragraph(style=f"Heading {level}")
     paragraph.paragraph_format.space_before = Pt(10 if level == 1 else 7)
     paragraph.paragraph_format.space_after = Pt(4)
@@ -199,6 +200,7 @@ def add_heading(document, text: str, level: int) -> None:
         bold=True,
         color="000000",
     )
+    return paragraph
 
 
 def parse_spec(path: Path) -> dict[str, Any]:
@@ -285,14 +287,23 @@ def parse_spec(path: Path) -> dict[str, Any]:
                 pinout_path = (path.parent / pinout_path).resolve()
             if not pinout_path.exists():
                 raise SpecError(f"missing pinout image for {designator}: {pinout_path}")
+            if pinout_path.suffix.lower() != ".svg":
+                raise SpecError(f"{designator}: a native-geometry SVG pinout is required")
+            try:
+                native_source = ET.parse(pinout_path).getroot().get("data-native-geometry", "")
+            except ET.ParseError as error:
+                raise SpecError(f"{designator}: invalid pinout SVG: {pinout_path}") from error
+            if native_source not in {
+                "altium-component-svg", "altium-board-assembly-svg", "altium-board-pad-svg"
+            }:
+                raise SpecError(f"{designator}: pinout SVG has no verified Altium geometry source")
             item["_pinout_path"] = pinout_path
-            if pinout_path.suffix.lower() == ".svg":
-                fallback_path = Path(require_text(item.get("pinout_fallback_image"), f"{prefix}.pinout_fallback_image"))
-                if not fallback_path.is_absolute():
-                    fallback_path = (path.parent / fallback_path).resolve()
-                if not fallback_path.exists():
-                    raise SpecError(f"missing SVG fallback image for {designator}: {fallback_path}")
-                item["_pinout_fallback_path"] = fallback_path
+            fallback_path = Path(require_text(item.get("pinout_fallback_image"), f"{prefix}.pinout_fallback_image"))
+            if not fallback_path.is_absolute():
+                fallback_path = (path.parent / fallback_path).resolve()
+            if not fallback_path.exists():
+                raise SpecError(f"missing SVG fallback image for {designator}: {fallback_path}")
+            item["_pinout_fallback_path"] = fallback_path
             pins = item.get("pins")
             if not isinstance(pins, list) or not pins:
                 raise SpecError(f"{prefix}.pins must be non-empty")
@@ -525,7 +536,7 @@ def add_interface_maps(document: Document, spec: dict[str, Any]) -> None:
         return
     add_heading(document, str(spec.get("interface_maps_title", "Board interface maps")), 1)
     intro = document.add_paragraph()
-    intro.paragraph_format.space_after = Pt(4)
+    intro.paragraph_format.space_after = Pt(0)
     add_text(
         intro,
         str(spec.get("interface_maps_intro", "Processor-related interfaces are color-coded on 1:1 vector views.")),
@@ -537,8 +548,8 @@ def add_interface_maps(document: Document, spec: dict[str, Any]) -> None:
             document.add_page_break()
         paragraph = document.add_paragraph()
         paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        paragraph.paragraph_format.space_before = Pt(1)
-        paragraph.paragraph_format.space_after = Pt(2)
+        paragraph.paragraph_format.space_before = Pt(0)
+        paragraph.paragraph_format.space_after = Pt(0)
         add_svg_picture(
             paragraph.add_run(),
             interface_map["_image_path"],
@@ -547,9 +558,6 @@ def add_interface_maps(document: Document, spec: dict[str, Any]) -> None:
             height=Cm(15.5),
             alt_text=str(interface_map.get("alt", interface_map["title"])),
         )
-    document.add_page_break()
-
-
 def add_item(document: Document, item: dict[str, Any]) -> None:
     add_heading(document, f"{item['designator']} — {item['name']}", 2)
     description = str(item.get("description", "")).strip()
@@ -611,8 +619,10 @@ def build_document(spec: dict[str, Any], output: Path) -> None:
     add_board_renders(document, spec)
     add_interface_maps(document, spec)
 
-    for overview_section in spec["overview"]:
-        add_heading(document, overview_section["title"], 1)
+    for index, overview_section in enumerate(spec["overview"]):
+        heading = add_heading(document, overview_section["title"], 1)
+        if index == 0 and spec.get("interface_maps"):
+            heading.paragraph_format.page_break_before = True
         add_overview_table(
             document,
             overview_section["rows"],

@@ -6,6 +6,8 @@ design or manufacturing description.
 
 ```json
 {
+  "board_id": "ExampleBoard_v1",
+  "firmware_source": "path/to/firmware/hwdef.dat",
   "title": "USER MANUAL",
   "subtitle": "ExampleBoard",
   "footer_label": "ExampleBoard",
@@ -80,21 +82,31 @@ design or manufacturing description.
           "pinout_image": "C:/absolute/path/pinout_X1.svg",
           "pinout_fallback_image": "C:/absolute/path/pinout_X1.png",
           "processor_domain": "stm32",
-          "interface_label": "UART3 / SERIAL3",
+          "power_domain": "main_5v",
+          "interface_label": "GNSS SERIAL3",
           "pinout_label_layout": "auto",
           "map_label_layout": "perimeter",
           "map_label_bias": "nearest",
           "pins": [
             {
               "pin": "1",
+              "connector_net": "VCC_GNSS",
               "net": "VCC_GNSS",
-              "function": "Receiver supply",
+              "function": "Receiver supply; source VCC_5V, 5 V",
+              "power_source_net": "VCC_5V",
+              "power_voltage": "5 V",
+              "power_path": "L1",
+              "power_domain": "main_5v",
               "group": "Power"
             },
             {
               "pin": "2",
+              "connector_net": "GNSS_TX_FILTERED",
               "net": "GNSS_TX",
               "function": "STM32 PC10; ArduPilot SERIAL3 TX",
+              "ardupilot_port": "SERIAL3",
+              "mcu_peripheral": "USART3_TX",
+              "mcu_pin": "PC10",
               "group": "UART / SERIAL3"
             }
           ]
@@ -127,12 +139,16 @@ design or manufacturing description.
   pinout unless the user explicitly asks for chassis or shield bonding details.
 - `group` is mandatory. Consecutive equal values are merged visually in the
   last table column while each physical contact retains its own row.
+- Keep the exact PCB pad `connector_net` separate from `net`, the traced and
+  user-facing source signal. If CSV/JSON exports are requested, follow
+  `skills/create-board-port-map/SKILL.md`; populate firmware ports, MCU pins,
+  power-source nets, voltages, paths, and `power_domain` from verified sources.
 - Put an ArduPilot mapping in `function` when the signal is defined by the
   selected hardware target. Include the firmware name and MCU pin when known;
   state that a line is unassigned when verified as such.
 - Use `NC` for a real physical contact with no assigned board net.
-- Use `body_style` to select a connector-family silhouette in the physical
-  pinout generator. Supported styles are `jst-gh`, `picoblade-ra`, `xt60`,
+- Use `body_style` to classify the contact geometry, never to select a
+  substitute housing. Supported styles are `jst-gh`, `picoblade-ra`, `xt60`,
   `mr60`, `board-to-board`, `usb-c`, `microcoax`, `keystone`, `dip-switch`,
   `solder-bridge`, `tactile-switch`, `buzzer`, and `coin-cell`.
 - Never expose an automatically generated PCB name such as `NetR42_2`. Replace
@@ -147,9 +163,13 @@ design or manufacturing description.
   projection verified as orthographic. Prefer direct 3D and assembly exports to
   screen capture.
 - Pinout diagrams must be generated from the same ordered `pins` records used
-  by the table. Prefer the real component assembly SVG body, keying, and pin-1
-  orientation. Read `data-pad-number` from the source Pads group to place each
-  net label, then omit the Pads group from the visible drawing. These are
+  by the table. A native Altium SVG is mandatory: use the component assembly
+  body, keying, and pin-1 orientation, or extract the assembly and numbered-pad
+  groups from the PCB assembly SVG if the separate component export is absent.
+  Read `data-pad-number` to place each net label; omit copper pads from the
+  visible drawing except where the actual pad is the only physical body, such
+  as a solder bridge or pad-only contact. Stop if native geometry or pin
+  metadata is unavailable; never generate a substitute silhouette. These are
   connector illustrations, not board block diagrams.
 - Rotate the real connector SVG body by 90 degrees when it reduces label-line
   overlap or intersections; rotate pad anchor coordinates with the body so the
@@ -167,14 +187,32 @@ design or manufacturing description.
   controls the side of an explicitly local callout or the search direction for
   a lower-priority perimeter slot. Treat an explicit local side as a hard
   constraint; it may slide along that side but must not migrate to another side.
-- For `jst-gh`, use the mating-face outline: show the contact channel and the
-  long locking/key opening beside it, matching the family-specific housing
-  rather than a generic rounded rectangle.
+- For `jst-gh`, preserve the Altium-exported housing and locking/key opening.
+  Never replace a missing housing SVG with a generic rounded rectangle.
 - Board-specific data and image paths belong in task-local JSON, not in the
   reusable generator or skill.
 - `processor_domain` may be `stm32`, `rk3588`, `shared`, or `other` and drives
   consistent color marking in pinouts and board maps. `interface_label` is the
-  concise nearby map label, for example `PWM7`, `UART1`, `CAN1`, or `CSI0`.
+  concise nearby map label. For ArduPilot-related connectors use target port
+  numbers such as `SERIAL3`, `BUS1` (ArduPilot I²C bus 1), `SERVO7`, or
+  `AP CAN2`, not generic `UART` or `I²C` labels. Include the numbered STM32
+  hardware peripheral alongside each applicable ArduPilot port, verified from
+  `hwdef.dat` (for example `USART3/SERIAL3` or `I2C2/BUS1`).
+- `power_domain` marks the connector body on the map independently of the
+  processor-colored label. Highlight only domains shared by at least two
+  connectors; omit single-connector and `mixed` domains from highlights and
+  power legend. Fill the exact component-body extent with no margin or border.
+  Use `mixed` for multiple supply classes and `none` for no supply.
+- Use the same fill and opacity for each power-legend swatch and its connector
+  highlight. Choose clearly different hues for power domains that appear near
+  one another on the board. When measuring native assembly SVG bodies, parse
+  path commands: arc radii and flags are not x/y coordinates. Compare the
+  resulting overlays with the actual housing outlines before embedding maps.
+- Processor-package highlights use their native Altium assembly-body extents
+  as well, without padding or a border; labels may remain separate.
+- Per-pin table power descriptions show the upstream source rail and voltage,
+  not intervening component designators. Keep the verified component path in
+  `power_path` for machine-readable CSV/JSON exports.
 - `interface_map_legend` may override the four domain captions without changing
   their colors. Declare processor callouts in `interface_map_processors`; each
   record supplies the real designator, displayed label, domain, and `top`,

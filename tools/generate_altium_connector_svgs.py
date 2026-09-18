@@ -1,9 +1,9 @@
-"""Create connector pinout SVGs from Altium Mechanical-2 component exports.
+"""Create pinout SVGs using native Altium component or PCB assembly geometry.
 
-The visible connector body comes from the SVG ``Shape`` group.  Copper pad
-geometry is never copied into the output.  Pad ``data-pad-number`` metadata is
-used only to anchor leader lines and to associate each physical pin with the
-net name supplied by the end-user board-description JSON.
+The component ``Shape`` group (or PCB assembly group) supplies the visible
+body. Pads supply numbered anchors but remain hidden except for pad-only
+contacts and solder bridges, where the real pad paths are the visible part.
+Missing native geometry is an error; no connector silhouette is synthesized.
 """
 
 from __future__ import annotations
@@ -58,44 +58,52 @@ def paths_bounds(paths: list[ET.Element]) -> tuple[float, float, float, float]:
     return min(xs), min(ys), max(xs), max(ys)
 
 
-def board_solder_bridge_geometry(
-    board_paths: list[Path], designator: str
-) -> tuple[ET.Element, dict[str, tuple[float, float]], float, float, float, float] | None:
-    """Extract the real local pad paths for a solder bridge from a board SVG."""
+def board_component_geometry(
+    board_paths: list[Path], designator: str, *, allow_pad_body: bool
+) -> tuple[ET.Element, dict[str, tuple[float, float]], float, float, float, float, bool] | None:
+    """Extract local assembly and numbered-pad geometry from a PCB SVG."""
     for board_path in board_paths:
         if not board_path or not board_path.exists():
             continue
         root = ET.parse(board_path).getroot()
         pad_group = None
+        assembly_group = None
         for element in root.iter(qname("g")):
             if element.get("data-component") != designator:
                 continue
             if element.get("id", "").endswith("-pads"):
                 pad_group = element
-                break
+            elif element.get("id", "").endswith("-assembly"):
+                assembly_group = element
         if pad_group is None:
             continue
         paths = [path for path in pad_group.iter(qname("path")) if path.get("data-pad-number")]
         if not paths:
             continue
-        min_x, min_y, max_x, max_y = paths_bounds(paths)
+        body_paths = list(assembly_group.iter(qname("path"))) if assembly_group is not None else []
+        pads_are_visible_body = not body_paths
+        if pads_are_visible_body and not allow_pad_body:
+            continue
+        min_x, min_y, max_x, max_y = paths_bounds(body_paths + paths)
         margin = 0.35
         view_x, view_y = min_x - margin, min_y - margin
         source_w = max_x - min_x + margin * 2.0
         source_h = max_y - min_y + margin * 2.0
-        visible = ET.Element(qname("g"), {"id": "SolderBridgePads"})
+        visible = ET.Element(qname("g"), {"id": "NativeBoardGeometry"})
         pad_centers: dict[str, tuple[float, float]] = {}
+        if not pads_are_visible_body:
+            for child in assembly_group:
+                visible.append(copy.deepcopy(child))
         for path in paths:
-            cloned = copy.deepcopy(path)
-            cloned.attrib.pop("id", None)
-            cloned.attrib.pop("data-component", None)
-            cloned.attrib.pop("data-instance", None)
-            cloned.attrib.pop("data-footprint", None)
-            visible.append(cloned)
+            if pads_are_visible_body:
+                cloned = copy.deepcopy(path)
+                for key in ("id", "data-component", "data-instance", "data-footprint"):
+                    cloned.attrib.pop(key, None)
+                visible.append(cloned)
             number = str(path.get("data-pad-number"))
             cx, cy = path_center(path)
             pad_centers[number] = (cx - view_x, cy - view_y)
-        return visible, pad_centers, view_x, view_y, source_w, source_h
+        return visible, pad_centers, view_x, view_y, source_w, source_h, pads_are_visible_body
     return None
 
 
@@ -174,47 +182,29 @@ def distribute(pins: list[dict], height: float, top: float) -> list[tuple[dict, 
     return [(pin, top + index * gap) for index, pin in enumerate(pins)]
 
 
-def fallback_body(root: ET.Element, x: float, y: float, width: float, height: float, style: str) -> None:
-    if style == "keystone":
-        ET.SubElement(root, qname("circle"), {
-            "cx": f"{x + width / 2:.3f}", "cy": f"{y + height / 2:.3f}",
-            "r": f"{min(width, height) * 0.32:.3f}", "fill": "none",
-            "stroke": "#1F2937", "stroke-width": "0.55",
-        })
-    else:
-        ET.SubElement(root, qname("rect"), {
-            "x": f"{x + 1:.3f}", "y": f"{y + 1:.3f}",
-            "width": f"{width - 2:.3f}", "height": f"{height - 2:.3f}",
-            "rx": "1.2", "fill": "none", "stroke": "#1F2937", "stroke-width": "0.55",
-        })
-
-
 def generate_one(item: dict, source: Path, output: Path, board_paths: list[Path]) -> None:
     pins = item["pins"]
     domain = str(item.get("processor_domain", "other")).lower()
     color = DOMAIN_COLORS.get(domain, DOMAIN_COLORS["other"])
     domain_label = {"stm32": "STM32", "rk3588": "RK3588", "shared": "STM32 + RK3588"}.get(domain, "BOARD")
 
-    source_root: ET.Element | None = None
     shape: ET.Element | None = None
     pad_centers: dict[str, tuple[float, float]] = {}
     view_x = view_y = 0.0
-    source_w, source_h = 20.0, 12.0
+    source_w = source_h = 0.0
     pads_are_visible_body = False
+    native_source = ""
 
-    if str(item.get("body_style", "")).lower() == "solder-bridge":
-        board_geometry = board_solder_bridge_geometry(board_paths, str(item["designator"]))
-        if board_geometry is not None:
-            shape, pad_centers, view_x, view_y, source_w, source_h = board_geometry
-            pads_are_visible_body = True
-
-    if source.exists() and not pads_are_visible_body:
+    if source.exists():
         source_root = ET.parse(source).getroot()
         view = numbers(source_root.get("viewBox", ""))
-        if len(view) == 4:
-            view_x, view_y, source_w, source_h = view
+        if len(view) != 4 or view[2] <= 0 or view[3] <= 0:
+            raise ValueError(f"{item['designator']}: invalid native component SVG viewBox: {source}")
+        view_x, view_y, source_w, source_h = view
         shape = source_root.find(f".//{qname('g')}[@id='Shape']")
         pads = source_root.find(f".//{qname('g')}[@id='Pads']")
+        if shape is not None and list(shape):
+            native_source = "altium-component-svg"
         if pads is not None:
             for path in pads.findall(f".//{qname('path')}"):
                 pad_number = path.get("data-pad-number")
@@ -224,20 +214,31 @@ def generate_one(item: dict, source: Path, output: Path, board_paths: list[Path]
                 # Altium component exports wrap pads in scale(1,-1).
                 pad_centers[pad_number] = (cx - view_x, -cy - view_y)
 
+    if not native_source:
+        allow_pad_body = str(item.get("body_style", "")).lower() in {"solder-bridge", "keystone"}
+        board_geometry = board_component_geometry(
+            board_paths, str(item["designator"]), allow_pad_body=allow_pad_body
+        )
+        if board_geometry is None:
+            raise ValueError(
+                f"{item['designator']}: native connector SVG missing or lacks Shape; "
+                "no usable assembly geometry in supplied PCB SVGs"
+            )
+        shape, pad_centers, view_x, view_y, source_w, source_h, pads_are_visible_body = board_geometry
+        native_source = "altium-board-pad-svg" if pads_are_visible_body else "altium-board-assembly-svg"
+
     missing = [str(pin["pin"]) for pin in pins if str(pin["pin"]) not in pad_centers]
-    if (source.exists() or pads_are_visible_body) and missing:
+    if missing:
         raise ValueError(f"{item['designator']}: SVG lacks pad metadata for {', '.join(missing)}")
 
-    source_w = max(source_w, 1.0)
-    source_h = max(source_h, 1.0)
-    rotation = choose_rotation(pad_centers, pins) if source.exists() else 0
+    rotation = choose_rotation(pad_centers, pins)
     rotated_w, rotated_h = rotated_size(source_w, source_h, rotation)
     if rotation:
         pad_centers = {
             number: rotated_point(x, y, source_w, source_h, rotation)
             for number, (x, y) in pad_centers.items()
         }
-    body_scale = 2.0 if source.exists() else 1.0
+    body_scale = 2.0
     body_w = max(rotated_w * body_scale, 10.0)
     body_h = max(rotated_h * body_scale, 8.0)
     header_h = 6.0
@@ -264,6 +265,7 @@ def generate_one(item: dict, source: Path, output: Path, board_paths: list[Path]
 
     root = ET.Element(qname("svg"), {
         "version": "1.2", "baseProfile": "tiny", "data-coordinate-units": "mm",
+        "data-native-geometry": native_source,
         "width": f"{total_w:.3f}mm", "height": f"{total_h:.3f}mm",
         "viewBox": f"0 0 {total_w:.3f} {total_h:.3f}",
     })
@@ -271,34 +273,25 @@ def generate_one(item: dict, source: Path, output: Path, board_paths: list[Path]
         "x": "0", "y": "0", "width": f"{total_w:.3f}", "height": f"{total_h:.3f}",
         "fill": "#FFFFFF",
     })
-    add_text(root, 2.0, 4.0, f"{item['designator']}  {domain_label}",
+    add_text(root, 2.0, 4.0, f"{item['designator']} / {domain_label}",
              **{"font-size": "3.0", "font-weight": "700", "fill": color})
 
-    if shape is not None:
-        nested = ET.SubElement(root, qname("svg"), {
-            "x": f"{body_x:.3f}", "y": f"{body_y:.3f}",
-            "width": f"{body_w:.3f}", "height": f"{body_h:.3f}",
-            "viewBox": f"0 0 {rotated_w:.6f} {rotated_h:.6f}",
-            "overflow": "visible",
+    nested = ET.SubElement(root, qname("svg"), {
+        "x": f"{body_x:.3f}", "y": f"{body_y:.3f}",
+        "width": f"{body_w:.3f}", "height": f"{body_h:.3f}",
+        "viewBox": f"0 0 {rotated_w:.6f} {rotated_h:.6f}",
+        "overflow": "visible",
+    })
+    wrapper_attrs = {
+        "transform": shape_transform(view_x, view_y, source_w, source_h, rotation),
+    }
+    if pads_are_visible_body:
+        wrapper_attrs.update({
+            "fill": "#D7A84D", "stroke": "#1F2937", "stroke-width": "0.10",
+            "stroke-linejoin": "round",
         })
-        wrapper_attrs = {
-            "transform": shape_transform(view_x, view_y, source_w, source_h, rotation),
-        }
-        if pads_are_visible_body:
-            wrapper_attrs.update({
-                "fill": "#D7A84D", "stroke": "#1F2937", "stroke-width": "0.10",
-                "stroke-linejoin": "round",
-            })
-        wrapper = ET.SubElement(nested, qname("g"), wrapper_attrs)
-        wrapper.append(copy.deepcopy(shape))
-    else:
-        fallback_body(root, body_x, body_y, body_w, body_h, str(item.get("body_style", "")))
-        count = max(1, len(pins))
-        for index, pin in enumerate(pins):
-            pad_centers[str(pin["pin"])] = (
-                body_w / 2.0,
-                body_h * (index + 1) / (count + 1),
-            )
+    wrapper = ET.SubElement(nested, qname("g"), wrapper_attrs)
+    wrapper.append(copy.deepcopy(shape))
 
     pin_records = []
     for pin in pins:
@@ -339,14 +332,14 @@ def generate_one(item: dict, source: Path, output: Path, board_paths: list[Path]
                 text_x = body_x + body_w + 4.0
                 add_line(root, ax, ay, elbow_x, label_y, color)
                 add_line(root, elbow_x, label_y, text_x - 0.8, label_y, color)
-                add_text(root, text_x, label_y + 0.85, f"{pin['pin']}  {pin['net']}",
+                add_text(root, text_x, label_y + 0.85, f"{pin['pin']}: {pin['net']}",
                          **{"font-size": "2.45", "font-weight": "600"})
             else:
                 elbow_x = body_x - 2.0
                 text_x = body_x - 4.0
                 add_line(root, ax, ay, elbow_x, label_y, color)
                 add_line(root, elbow_x, label_y, text_x + 0.8, label_y, color)
-                add_text(root, text_x, label_y + 0.85, f"{pin['pin']}  {pin['net']}",
+                add_text(root, text_x, label_y + 0.85, f"{pin['pin']}: {pin['net']}",
                          **{"font-size": "2.45", "font-weight": "600", "text-anchor": "end"})
 
     output.parent.mkdir(parents=True, exist_ok=True)

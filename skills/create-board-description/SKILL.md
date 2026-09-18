@@ -5,6 +5,11 @@ description: Inspect an open Altium PCB project and create or update a technical
 
 # Create Board Description
 
+For a final-user manual that needs connector pin/port exports or power-source
+coloring, also follow `skills/create-board-port-map/SKILL.md`. Build the CSV and
+JSON from the same reviewed per-pin specification used for the manual, and
+verify exact connector pad nets against `mcp__altium__get_component_pins`.
+
 Produce a concise Russian technical-description DOCX whose claims are traceable
 to the open Altium design, user-provided requirements, or explicitly requested
 external research. Do not edit or save the Altium design while preparing the
@@ -117,8 +122,12 @@ Generate connector pinouts from the exported component SVGs. Use the
 `data-pad-number` attributes in the source `<g id="Pads">` group to associate
 each physical contact with the ordered `pins` records, but do not copy or render
 the Pads group in the visible connector illustration. The visible body comes
-from the real Altium assembly geometry; a minimal vector silhouette is allowed
-only when the footprint has no exported assembly primitives.
+from the real Altium assembly geometry. A native Altium SVG is mandatory for
+every pinout: use the component export when available, otherwise extract the
+component's assembly and numbered-pad groups from the PCB assembly SVG. For a
+pad-only contact or solder bridge, show its actual pad paths. Never substitute
+a generic connector outline, guessed pad positions, or a generated silhouette;
+stop with a designator-specific error when no usable native SVG geometry exists.
 
 For the displayed net name, trace through connector-side ESD arrays, filters,
 common-mode chokes, selectors, and series parts to the named source net at the
@@ -191,6 +200,20 @@ applicable board side. Keep full-board map geometry at the physical SVG size so
 the PCB outline prints at 1:1 scale. Preserve the `BoardShape` mounting-hole
 circles from the Altium assembly SVG even when the separate copper `Pads` group
 is hidden, but exclude any hole whose full circle lies outside the PCB outline.
+For connector power-source marking, color only bodies sharing a power domain
+with at least one other connector. Do not color or list single-connector domains
+or mixed-rail connectors in the power legend. Fill the component body extent
+without added margin or border. Measure native SVG path coordinates by command;
+arc radii and flags are not point coordinates and must not enlarge a housing
+highlight. Match each legend swatch to its connector fill and opacity, and use
+clearly different colors for nearby power domains. Apply the same native-body-only,
+borderless highlight rule to processor package markers. Keep the exact upstream
+rail and voltage in the per-pin table, but do not print intervening component
+designators in that table; retain the verified path in machine-readable
+port-map exports.
+For ArduPilot-connected labels on interface maps, add the actual STM32 hardware
+peripheral number (for example, `USART3 / SERIAL3` or `I2C2 / BUS1`), not just
+the ArduPilot logical port. Verify it against the selected `hwdef.dat`.
 If an older cached export lacks `StandaloneMountingPads`, refresh the
 read-only assembly export before generating maps rather than inventing hole
 locations. Place top-side perimeter-connector labels

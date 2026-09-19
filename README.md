@@ -641,10 +641,10 @@ nearby power domains use visibly distinct hues. Inspect the rendered overlays
 against the actual connector housings before embedding the maps in the DOCX.
 The SVG rasterizer requires the `sharp` Node.js package. Its PNGs are mandatory
 fallbacks for Word clients that do not render the embedded SVG part directly.
-The reviewed SwarmRK v1.6S maps are kept in
-`SwarmRK_v1.6S_interface_maps/`; the matching SVGs are embedded in
-`SwarmRK_v1.6S_User_Manual.docx`. The audited pin-to-net exports are
-`SwarmRK_v1.6S_port_pin_net_map.csv` and `.json`.
+Write generated manuals, maps, pin-to-net exports, renders, reports, and
+temporary work beneath the repository-root `generated/` directory. That
+directory is intentionally ignored by Git; only generators, tests, skills,
+and source assets belong in version control.
 
 ### Generating a board test-access description
 

@@ -11,9 +11,9 @@ wheels/
 *.egg-info
 *.log
 *.json
-!SwarmRK_v1.6S_port_pin_net_map.json
 *.png
 *.dxt
+/generated/
 
 # Virtual environments
 .venv

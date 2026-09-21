@@ -652,7 +652,9 @@ Use `skills/create-board-test-description/SKILL.md` for the complete workflow
 and `skills/create-board-test-description/references/test-description-data.md`
 for the inventory and DOCX specification. Read the active PCB through Altium;
 export top/bottom orthographic 3D images and assembly SVGs without saving the
-design. The default solder mask is dark green (`#0B3D2B`).
+design. The default solder mask is dark green (`#0B3D2B`), and the 3D
+workspace is flat white. The export also writes `pcb-3d-registration.json`
+with the physical camera bounds used for both sides.
 
 `tools/generate_board_test_maps.py` produces top/bottom maps with actual
 designators, a leader and circled anchor for each callout, and per-pad source
@@ -665,7 +667,34 @@ SVG or DOCX. The board image keeps its aspect ratio when fitted to the page.
 routes to the corresponding orthographic 3D renders. Each annotated 3D page
 follows its side's assembly-SVG map. The overlay has no drawn endpoint
 circles; physical holes visible in the 3D render remain unchanged. The
-render's aspect ratio is preserved.
+render's aspect ratio is preserved. Pass the export's camera-registration JSON
+to both this generator and `tools/crop_native_pcb_3d_export.py`. Altium's 3D
+camera includes protruding component bodies, so mapping the assembly-SVG board
+bounds directly across the PNG—or compensating with left/right alignment—will
+shift labels and crop arrows. The bottom-side mirror is part of the recorded
+registration. This is the common rule for every board: registration belongs to
+one exact top/bottom PNG export and must be recreated when the board, DPI,
+camera bounds, side, or image dimensions change. Never add per-board pixel
+offsets or reuse another board's registration.
+
+Current exporters render the Altium scene transparently onto the requested
+flat workspace color. Older loaded extensions may still paint Altium's shaded
+workspace even when white is requested; use
+`tools/normalize_pcb_3d_background.py` for that legacy output, then reload the
+rebuilt extension before the next export.
+
+The test-description generators support `source`, `ru`, `en`, `zh`, and
+combined `en-zh` language modes. Apply one mode consistently to the vector maps, 3D
+maps, crop labels, and DOCX. Combined documents take a translation catalog for
+board-specific prose; designators, nets, pad numbers, dimensions, and other
+technical identifiers remain unchanged. See
+`skills/create-board-test-description/references/test-description-data.md` for
+the catalog schema and commands.
+
+Set `board_name` to the exact Altium document or approved project identifier.
+Do not remove or replace dots, underscores, hyphens, spaces, revision markers,
+or other symbols for display. The test-description generator validates that the
+localized title and subtitle both contain the verbatim board name.
 
 After changing a map, regenerate both assembly and both annotated-3D SVGs,
 then rasterize all four with

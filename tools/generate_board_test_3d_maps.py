@@ -10,6 +10,13 @@ from pathlib import Path
 
 from PIL import Image
 
+if __package__:
+    from .board_test_localization import LANGUAGE_MODES, ui_text
+    from .pcb_3d_registration import CameraRegistration, load_registration
+else:
+    from board_test_localization import LANGUAGE_MODES, ui_text
+    from pcb_3d_registration import CameraRegistration, load_registration
+
 
 SVG = "http://www.w3.org/2000/svg"
 ET.register_namespace("", SVG)
@@ -19,7 +26,16 @@ def qname(name: str) -> str:
     return f"{{{SVG}}}{name}"
 
 
-def build_page(map_path: Path, render_path: Path, output_path: Path) -> None:
+def build_page(
+    map_path: Path,
+    render_path: Path,
+    output_path: Path,
+    *,
+    registration: CameraRegistration,
+    side: str | None = None,
+    language_mode: str = "source",
+) -> None:
+    side = side or ("bottom" if registration.mirror_x else "top")
     root = ET.parse(map_path).getroot()
     boards = [element for element in root if element.tag == qname("svg")]
     if len(boards) != 1:
@@ -31,17 +47,54 @@ def build_page(map_path: Path, render_path: Path, output_path: Path) -> None:
     with Image.open(render_path) as render:
         if render.format != "PNG":
             raise ValueError(f"3D render must be PNG: {render_path}")
+        registration.validate_image_size(render.size)
         image_ratio = render.width / render.height
-    board_ratio = box_width / box_height
-    if abs(image_ratio / board_ratio - 1) > 0.02:
-        raise ValueError(f"3D render aspect ratio does not match board viewport: {render_path}")
+    camera_ratio = ((registration.right_mm - registration.left_mm) /
+                    (registration.top_mm - registration.bottom_mm))
+    if abs(image_ratio / camera_ratio - 1) > 0.002:
+        raise ValueError(f"3D render aspect ratio does not match camera registration: {render_path}")
 
-    image = ET.Element(qname("image"), {
+    view = [float(value) for value in board.get("viewBox", "").split()]
+    if len(view) != 4:
+        raise ValueError(f"invalid board viewBox in {map_path}")
+    view_x, view_y, view_width, view_height = view
+    board_x, board_y = float(board.attrib["x"]), float(board.attrib["y"])
+    if registration.mirror_x:
+        reflection_axis_twice = 2.0 * view_x + view_width
+        camera_left = reflection_axis_twice - registration.right_mm
+        camera_right = reflection_axis_twice - registration.left_mm
+    else:
+        camera_left = registration.left_mm
+        camera_right = registration.right_mm
+    camera_top = -registration.top_mm
+    camera_bottom = -registration.bottom_mm
+
+    image_x = board_x + (camera_left - view_x) / view_width * box_width
+    image_y = board_y + (camera_top - view_y) / view_height * box_height
+    image_width = (camera_right - camera_left) / view_width * box_width
+    image_height = (camera_bottom - camera_top) / view_height * box_height
+
+    clip_id = "board-3d-viewport"
+    defs = next((element for element in root if element.tag == qname("defs")), None)
+    if defs is None:
+        defs = ET.Element(qname("defs"))
+        root.insert(0, defs)
+    clip = ET.SubElement(defs, qname("clipPath"), {"id": clip_id})
+    ET.SubElement(clip, qname("rect"), {
         "x": board.attrib["x"],
         "y": board.attrib["y"],
         "width": board.attrib["width"],
         "height": board.attrib["height"],
+    })
+
+    image = ET.Element(qname("image"), {
+        "x": f"{image_x:.6f}",
+        "y": f"{image_y:.6f}",
+        "width": f"{image_width:.6f}",
+        "height": f"{image_height:.6f}",
         "preserveAspectRatio": "xMidYMid meet",
+        "clip-path": f"url(#{clip_id})",
+        "data-registration": "altium-camera-mm",
         "href": "data:image/png;base64," + base64.b64encode(render_path.read_bytes()).decode("ascii"),
     })
     position = list(root).index(board)
@@ -95,10 +148,14 @@ def build_page(map_path: Path, render_path: Path, output_path: Path) -> None:
     if any(element.tag == qname("circle") for element in root.iter()):
         raise ValueError("the annotated 3D map must contain no vector circles")
 
-    for element in root:
-        if element.tag == qname("text") and element.text and "КАРТА ТЕСТОВОГО ДОСТУПА" in element.text:
-            element.text = "3D КАРТА ТЕСТОВОГО ДОСТУПА"
-            break
+    title = next((element for element in root if element.get("data-map-title") == "2d"), None)
+    if title is None:
+        title = next((element for element in root if element.tag == qname("text")), None)
+    if title is None:
+        raise ValueError("the map has no title element")
+    title.text = ui_text(f"map_3d_{side}", language_mode, separator=" / ")
+    title.set("data-map-title", "3d")
+    root.set("data-language-mode", language_mode)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     ET.ElementTree(root).write(output_path, encoding="utf-8", xml_declaration=True)
@@ -110,10 +167,26 @@ def main() -> int:
     parser.add_argument("--bottom-map", type=Path, required=True)
     parser.add_argument("--top-render", type=Path, required=True)
     parser.add_argument("--bottom-render", type=Path, required=True)
+    parser.add_argument("--registration", type=Path, required=True)
+    parser.add_argument("--language-mode", choices=LANGUAGE_MODES, default="source")
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
-    build_page(args.top_map, args.top_render, args.output_dir / "pcb-test-3d-map-top.svg")
-    build_page(args.bottom_map, args.bottom_render, args.output_dir / "pcb-test-3d-map-bottom.svg")
+    build_page(
+        args.top_map,
+        args.top_render,
+        args.output_dir / "pcb-test-3d-map-top.svg",
+        registration=load_registration(args.registration, "top"),
+        side="top",
+        language_mode=args.language_mode,
+    )
+    build_page(
+        args.bottom_map,
+        args.bottom_render,
+        args.output_dir / "pcb-test-3d-map-bottom.svg",
+        registration=load_registration(args.registration, "bottom"),
+        side="bottom",
+        language_mode=args.language_mode,
+    )
     print(args.output_dir.resolve())
     return 0
 

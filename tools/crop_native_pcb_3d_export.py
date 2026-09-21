@@ -10,6 +10,13 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
+if __package__:
+    from .board_test_localization import LANGUAGE_MODES, ui_text
+    from .pcb_3d_registration import CameraRegistration, load_registration
+else:
+    from board_test_localization import LANGUAGE_MODES, ui_text
+    from pcb_3d_registration import CameraRegistration, load_registration
+
 
 MM_PER_MIL = 0.0254
 
@@ -26,8 +33,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--board-origin-y-mil", type=float)
     parser.add_argument("--top-svg", type=Path)
     parser.add_argument("--bottom-svg", type=Path)
+    parser.add_argument(
+        "--registration",
+        type=Path,
+        help="Camera registration JSON emitted with the orthographic 3D renders.",
+    )
     parser.add_argument("--crop-width-px", type=int, default=760)
     parser.add_argument("--crop-height-px", type=int, default=430)
+    parser.add_argument("--language-mode", choices=LANGUAGE_MODES, default="source")
     parser.add_argument(
         "--bottom-transform",
         choices=("flip-x", "flip-y", "rotate-180", "none"),
@@ -46,6 +59,7 @@ def parse_args() -> argparse.Namespace:
 def load_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     windows = Path("C:/Windows/Fonts")
     candidates = (
+        windows / ("msyhbd.ttc" if bold else "msyh.ttc"),
         windows / ("arialbd.ttf" if bold else "arial.ttf"),
         windows / ("segoeuib.ttf" if bold else "segoeui.ttf"),
     )
@@ -99,7 +113,31 @@ def parse_numbers(text: str) -> list[float]:
     return [float(value) for value in re.findall(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?", text)]
 
 
-def svg_component_pixels(path: Path, image_size: tuple[int, int], *, bottom: bool) -> dict[str, tuple[float, float]]:
+def exported_designator_aliases(element: ET.Element) -> list[str]:
+    """Return logical designator aliases for panelized Altium SVG instances."""
+    component = str(element.get("data-component") or "").strip()
+    if not component:
+        return []
+    aliases = [component]
+    instance = str(element.get("data-instance") or "").strip()
+    if instance == component:
+        aliases.append(f"{component}_1")
+    else:
+        match = re.fullmatch(re.escape(component) + r"-(\d+)", instance)
+        if match:
+            aliases.append(f"{component}_{match.group(1)}")
+        elif instance:
+            aliases.append(instance)
+    return list(dict.fromkeys(aliases))
+
+
+def svg_component_pixels(
+    path: Path,
+    image_size: tuple[int, int],
+    *,
+    bottom: bool,
+    registration: CameraRegistration | None = None,
+) -> dict[str, tuple[float, float]]:
     root = ET.parse(path).getroot()
     view = parse_numbers(root.get("viewBox", ""))
     if len(view) != 4:
@@ -109,28 +147,34 @@ def svg_component_pixels(path: Path, image_size: tuple[int, int], *, bottom: boo
     for suffix in ("-assembly", "-pads"):
         for element in root.iter():
             identifier = element.get("id", "")
-            designator = element.get("data-component")
-            if not designator or not identifier.endswith(suffix) or designator in positions:
+            aliases = exported_designator_aliases(element)
+            if not aliases or not identifier.endswith(suffix) or all(alias in positions for alias in aliases):
                 continue
             match = re.search(r"translate\(\s*([-+0-9.eE]+)[ ,]+([-+0-9.eE]+)\s*\)", element.get("transform", ""))
             if not match:
                 continue
             x, y = float(match.group(1)), float(match.group(2))
-            if bottom:
-                x = 2.0 * view_x + view_width - x
-            local_x = x - view_x
-            local_y = -y - view_y
-            positions[designator] = (
-                local_x / view_width * image_size[0],
-                local_y / view_height * image_size[1],
-            )
+            if registration is not None:
+                registration.validate_image_size(image_size)
+                center = registration.pixel_for_physical(x, y)
+            else:
+                if bottom:
+                    x = 2.0 * view_x + view_width - x
+                local_x = x - view_x
+                local_y = -y - view_y
+                center = (
+                    local_x / view_width * image_size[0],
+                    local_y / view_height * image_size[1],
+                )
+            for alias in aliases:
+                positions.setdefault(alias, center)
     return positions
 
 
-def add_label(image: Image.Image, designator: str, side: str) -> None:
+def add_label(image: Image.Image, designator: str, side: str, language_mode: str = "source") -> None:
     draw = ImageDraw.Draw(image, "RGBA")
     font = load_font(28, bold=True)
-    text = f"{designator}  |  {side}"
+    text = f"{designator}  |  {ui_text(side, language_mode, separator=' / ')}"
     box = draw.textbbox((0, 0), text, font=font)
     width = box[2] - box[0] + 28
     height = box[3] - box[1] + 20
@@ -190,8 +234,17 @@ def main() -> int:
     if use_svg_positions:
         if args.top_svg is None or args.bottom_svg is None:
             raise SystemExit("--top-svg and --bottom-svg must be supplied together")
-        top_positions = svg_component_pixels(args.top_svg, top.size, bottom=False)
-        bottom_positions = svg_component_pixels(args.bottom_svg, bottom.size, bottom=True)
+        if args.registration is None:
+            raise SystemExit(
+                "--registration is required with assembly SVGs so component origins "
+                "are mapped through the actual Altium 3D camera"
+            )
+        top_registration = load_registration(args.registration, "top")
+        bottom_registration = load_registration(args.registration, "bottom")
+        top_positions = svg_component_pixels(
+            args.top_svg, top.size, bottom=False, registration=top_registration)
+        bottom_positions = svg_component_pixels(
+            args.bottom_svg, bottom.size, bottom=True, registration=bottom_registration)
     else:
         required = (args.board_width_mm, args.board_height_mm, args.board_origin_x_mil, args.board_origin_y_mil)
         if any(value is None for value in required):
@@ -224,7 +277,7 @@ def main() -> int:
         if str(component["designator"]).upper() in vertical_flips:
             crop = ImageOps.flip(crop)
         add_locator_arrow(crop)
-        add_label(crop, component["designator"], side)
+        add_label(crop, component["designator"], side, args.language_mode)
         output = args.output_dir / f"{component['designator']}.png"
         crop.convert("RGB").save(output, optimize=True)
         outputs.append(output)

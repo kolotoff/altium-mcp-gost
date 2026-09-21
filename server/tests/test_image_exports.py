@@ -8,6 +8,7 @@ from server.main import (
     _altium_color,
     _find_edge,
     _normalize_html_color,
+    _pcb_3d_registration,
     _rasterize_svg_sync,
     _recolor_svg,
     _stamp_png_dpi_sync,
@@ -22,6 +23,23 @@ class ImageExportHelpersTests(unittest.TestCase):
 
     def test_altium_color_uses_red_green_blue_packing(self):
         self.assertEqual(0x563412, _altium_color("#123456", "color"))
+
+    def test_pcb_3d_registration_converts_internal_units_to_mm(self):
+        registration = _pcb_3d_registration({
+            "camera_look_at_x": 20000000,
+            "camera_look_at_y": 10000000,
+            "camera_view_x": 10000000,
+            "camera_view_y": 5000000,
+            "camera_units_per_inch": 10000000,
+            "camera_mirror_x": True,
+            "width": 600,
+            "height": 300,
+        })
+        self.assertAlmostEqual(38.1, registration["left_mm"])
+        self.assertAlmostEqual(63.5, registration["right_mm"])
+        self.assertAlmostEqual(19.05, registration["bottom_mm"])
+        self.assertAlmostEqual(31.75, registration["top_mm"])
+        self.assertTrue(registration["mirror_x"])
 
     def test_svg_raster_has_requested_dpi_and_alpha(self):
         try:

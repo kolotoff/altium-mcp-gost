@@ -18,28 +18,55 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, RGBColor
 
-from generate_end_user_board_description_docx import (
-    COLORS,
-    SpecError,
-    add_page_number,
-    add_svg_picture,
-    add_text,
-    clear_paragraph_borders,
-    fit_image,
-    require_text,
-    set_cant_split,
-    set_cell_fill,
-    set_cell_margins,
-    set_cell_text,
-    set_cell_width,
-    set_keep_with_next,
-    set_picture_alt,
-    set_repeat_header,
-    set_table_borders,
-)
+if __package__:
+    from .board_test_localization import LANGUAGE_MODES, localized_text, ui_text
+else:
+    from board_test_localization import LANGUAGE_MODES, localized_text, ui_text
+
+if __package__:
+    from .generate_end_user_board_description_docx import (
+        COLORS, SpecError, add_page_number, add_svg_picture, add_text,
+        clear_paragraph_borders, fit_image, require_text, set_cant_split,
+        set_cell_fill, set_cell_margins, set_cell_text, set_cell_width,
+        set_keep_with_next, set_picture_alt, set_repeat_header, set_table_borders,
+    )
+else:
+    from generate_end_user_board_description_docx import (
+        COLORS, SpecError, add_page_number, add_svg_picture, add_text,
+        clear_paragraph_borders, fit_image, require_text, set_cant_split,
+        set_cell_fill, set_cell_margins, set_cell_text, set_cell_width,
+        set_keep_with_next, set_picture_alt, set_repeat_header, set_table_borders,
+    )
 
 
 GENERATED_NET = re.compile(r"^Net[A-Za-z0-9_]+$")
+
+
+def load_translation_catalog(path: Path | None) -> dict[str, Any]:
+    if path is None:
+        return {}
+    payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    if not isinstance(payload, dict):
+        raise SpecError("the translation catalog root must be an object")
+    return payload
+
+
+def require_localized(
+    value: Any,
+    field: str,
+    language_mode: str,
+    translations: dict[str, Any],
+) -> str:
+    text = localized_text(value, language_mode, translations=translations).strip()
+    if not text:
+        raise SpecError(f"{field} must be non-empty")
+    return text
+
+
+def require_verbatim_board_name(value: Any, board_name: str, field: str) -> None:
+    if board_name not in str(value):
+        raise SpecError(
+            f"{field} must preserve board_name verbatim: {board_name!r}")
 
 
 def resolve_path(spec_path: Path, value: Any, field: str) -> Path:
@@ -51,12 +78,19 @@ def resolve_path(spec_path: Path, value: Any, field: str) -> Path:
     return path
 
 
-def parse_spec(path: Path) -> dict[str, Any]:
+def parse_spec(
+    path: Path,
+    *,
+    language_mode: str = "source",
+    translations: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     raw = json.loads(path.read_text(encoding="utf-8-sig"))
     if not isinstance(raw, dict):
         raise SpecError("the JSON root must be an object")
+    translations = translations or {}
+    board_name = require_text(raw.get("board_name"), "board_name")
     for field in ("title", "subtitle", "footer_label"):
-        require_text(raw.get(field), field)
+        require_localized(raw.get(field), field, language_mode, translations)
 
     renders = raw.get("board_renders")
     maps = raw.get("test_maps")
@@ -69,8 +103,10 @@ def parse_spec(path: Path) -> dict[str, Any]:
         raise SpecError("groups must be a non-empty array")
 
     for index, render in enumerate(renders):
+        require_localized(render.get("title"), f"board_renders[{index}].title", language_mode, translations)
         render["_image_path"] = resolve_path(path, render.get("image"), f"board_renders[{index}].image")
     for index, test_map in enumerate(maps):
+        require_localized(test_map.get("title"), f"test_maps[{index}].title", language_mode, translations)
         test_map["_image_path"] = resolve_path(path, test_map.get("image"), f"test_maps[{index}].image")
         test_map["_fallback_path"] = resolve_path(path, test_map.get("fallback_image"), f"test_maps[{index}].fallback_image")
         if test_map["_image_path"].suffix.lower() != ".svg":
@@ -79,7 +115,9 @@ def parse_spec(path: Path) -> dict[str, Any]:
         if render_3d is not None:
             if not isinstance(render_3d, dict):
                 raise SpecError(f"test_maps[{index}].render_3d must be an object")
-            require_text(render_3d.get("title"), f"test_maps[{index}].render_3d.title")
+            require_localized(
+                render_3d.get("title"), f"test_maps[{index}].render_3d.title",
+                language_mode, translations)
             render_3d["_image_path"] = resolve_path(path, render_3d.get("image"), f"test_maps[{index}].render_3d.image")
             render_3d["_fallback_path"] = resolve_path(path, render_3d.get("fallback_image"), f"test_maps[{index}].render_3d.fallback_image")
             if render_3d["_image_path"].suffix.lower() != ".svg":
@@ -87,7 +125,7 @@ def parse_spec(path: Path) -> dict[str, Any]:
 
     seen: set[str] = set()
     for group_index, group in enumerate(groups):
-        require_text(group.get("title"), f"groups[{group_index}].title")
+        require_localized(group.get("title"), f"groups[{group_index}].title", language_mode, translations)
         items = group.get("items")
         if not isinstance(items, list) or not items:
             raise SpecError(f"groups[{group_index}].items must be non-empty")
@@ -97,7 +135,7 @@ def parse_spec(path: Path) -> dict[str, Any]:
             if designator in seen:
                 raise SpecError(f"duplicate item designator: {designator}")
             seen.add(designator)
-            require_text(item.get("name"), f"{prefix}.name")
+            require_localized(item.get("name"), f"{prefix}.name", language_mode, translations)
             require_text(item.get("side"), f"{prefix}.side")
             item["_image_path"] = resolve_path(path, item.get("image"), f"{prefix}.image")
             pins = item.get("pins")
@@ -108,6 +146,42 @@ def parse_spec(path: Path) -> dict[str, Any]:
                     require_text(pin.get(field), f"{prefix}.pins[{pin_index}].{field}")
                 if GENERATED_NET.match(str(pin["source_net"])):
                     raise SpecError(f"unresolved generated source net: {designator}.{pin['pad']}={pin['source_net']}")
+    def localize(value: Any) -> str:
+        return localized_text(value, language_mode, translations=translations)
+
+    for field in ("title", "subtitle", "footer_label", "tagline", "summary_title", "summary_intro"):
+        if field in raw:
+            raw[field] = localize(raw[field])
+    for row in raw.get("summary_rows", []):
+        row[0], row[1] = localize(row[0]), localize(row[1])
+    for render in renders:
+        render["title"] = localize(render["title"])
+        if "alt" in render:
+            render["alt"] = localize(render["alt"])
+    for test_map in maps:
+        test_map["title"] = localize(test_map["title"])
+        if "alt" in test_map:
+            test_map["alt"] = localize(test_map["alt"])
+        render_3d = test_map.get("render_3d")
+        if render_3d:
+            render_3d["title"] = localize(render_3d["title"])
+            if "alt" in render_3d:
+                render_3d["alt"] = localize(render_3d["alt"])
+    for group in groups:
+        group["title"] = localize(group["title"])
+        if "intro" in group:
+            group["intro"] = localize(group["intro"])
+        for item in group["items"]:
+            item["name"] = localize(item["name"])
+            if item.get("description"):
+                item["description"] = localize(item["description"])
+    metadata = raw.get("metadata", {})
+    for field in ("title", "subject"):
+        if field in metadata:
+            metadata[field] = localize(metadata[field])
+    raw["_language_mode"] = language_mode
+    for field in ("title", "subtitle"):
+        require_verbatim_board_name(raw[field], board_name, field)
     return raw
 
 
@@ -124,24 +198,28 @@ def configure_document(document: Document, spec: dict[str, Any]) -> None:
     styles = document.styles
     normal = styles["Normal"]
     normal.font.name = "Aptos"
+    normal._element.rPr.rFonts.set(qn("w:eastAsia"), "Microsoft YaHei")
     normal.font.size = Pt(8.5)
     normal.font.color.rgb = RGBColor.from_string(COLORS["text"])
     normal.paragraph_format.space_after = Pt(3)
     title = styles["Title"]
     title.font.name = "Aptos Display"
+    title._element.rPr.rFonts.set(qn("w:eastAsia"), "Microsoft YaHei")
     title.font.bold = True
     title.font.color.rgb = RGBColor(0, 0, 0)
     clear_paragraph_borders(title)
     for level in (1, 2):
         style = styles[f"Heading {level}"]
         style.font.name = "Aptos Display"
+        style._element.rPr.rFonts.set(qn("w:eastAsia"), "Microsoft YaHei")
         style.font.bold = True
         style.font.color.rgb = RGBColor(0, 0, 0)
 
     footer = section.footer.paragraphs[0]
     footer.text = ""
     add_text(footer, spec["footer_label"], size=7.8, bold=True, color=COLORS["muted"])
-    add_text(footer, "    |    BOARD TEST ACCESS    |    ", size=7.8, color=COLORS["muted"])
+    footer_text = ui_text("footer", spec["_language_mode"], separator=" / ")
+    add_text(footer, f"    |    {footer_text}    |    ", size=7.8, color=COLORS["muted"])
     add_page_number(footer)
     metadata = spec.get("metadata", {})
     document.core_properties.title = str(metadata.get("title", spec["subtitle"]))
@@ -186,7 +264,11 @@ def add_summary(document: Document, spec: dict[str, Any]) -> None:
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
     table.autofit = False
     set_table_borders(table)
-    for cell, width, label in zip(table.rows[0].cells, (3900, 9300), ("Scope", "Result / rule")):
+    headers = (
+        ui_text("scope", spec["_language_mode"], separator=" / "),
+        ui_text("result_rule", spec["_language_mode"], separator=" / "),
+    )
+    for cell, width, label in zip(table.rows[0].cells, (3900, 9300), headers):
         set_cell_width(cell, width)
         set_cell_text(cell, label, bold=True, color=COLORS["white"], size=8.5)
         set_cell_fill(cell, COLORS["navy"])
@@ -231,13 +313,21 @@ def fit_svg_map(path: Path, *, max_width_cm: float, max_height_cm: float) -> tup
     return width * scale, height * scale
 
 
-def add_svg_map_page(document: Document, entry: dict[str, Any], *, page_break_before: bool) -> None:
+def add_svg_map_page(
+    document: Document,
+    entry: dict[str, Any],
+    *,
+    language_mode: str,
+    page_break_before: bool,
+) -> None:
     add_heading(document, str(entry["title"]), 1)
     if page_break_before:
         document.paragraphs[-1].paragraph_format.page_break_before = True
     paragraph = document.add_paragraph()
     paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    width, height = fit_svg_map(entry["_image_path"], max_width_cm=26.7, max_height_cm=16.8)
+    max_height = 15.2 if language_mode == "en-zh" else 16.8
+    width, height = fit_svg_map(
+        entry["_image_path"], max_width_cm=26.7, max_height_cm=max_height)
     add_svg_picture(
         paragraph.add_run(),
         entry["_image_path"],
@@ -250,18 +340,25 @@ def add_svg_map_page(document: Document, entry: dict[str, Any], *, page_break_be
 
 def add_test_maps(document: Document, spec: dict[str, Any]) -> None:
     for index, test_map in enumerate(spec["test_maps"]):
-        add_svg_map_page(document, test_map, page_break_before=bool(index))
+        add_svg_map_page(
+            document, test_map, language_mode=spec["_language_mode"],
+            page_break_before=bool(index))
         if test_map.get("render_3d"):
-            add_svg_map_page(document, test_map["render_3d"], page_break_before=True)
+            add_svg_map_page(
+                document, test_map["render_3d"], language_mode=spec["_language_mode"],
+                page_break_before=True)
 
 
-def add_pin_table(document: Document, item: dict[str, Any]) -> None:
+def add_pin_table(document: Document, item: dict[str, Any], language_mode: str) -> None:
     table = document.add_table(rows=1, cols=4)
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
     table.autofit = False
     set_table_borders(table)
     widths = (1200, 3550, 4300, 1450)
-    headers = ("Pad", "PCB net", "Source net", "Hole mm")
+    headers = tuple(
+        ui_text(key, language_mode, separator=" / ")
+        for key in ("pad", "pcb_net", "source_net", "hole_mm")
+    )
     for cell, width, label in zip(table.rows[0].cells, widths, headers):
         set_cell_width(cell, width)
         set_cell_text(cell, label, bold=True, color=COLORS["white"], size=7.2)
@@ -280,14 +377,21 @@ def add_pin_table(document: Document, item: dict[str, Any]) -> None:
                 set_cell_fill(cell, COLORS["pale"])
 
 
-def add_item(document: Document, item: dict[str, Any], *, page_break_before: bool = False) -> None:
+def add_item(
+    document: Document,
+    item: dict[str, Any],
+    *,
+    language_mode: str,
+    page_break_before: bool = False,
+) -> None:
     add_heading(document, f"{item['designator']}  {item['name']}", 2)
     if page_break_before:
         document.paragraphs[-1].paragraph_format.page_break_before = True
     meta = document.add_paragraph()
     meta.paragraph_format.space_after = Pt(2)
     set_keep_with_next(meta)
-    add_text(meta, f"{item['side']}  |  {item.get('footprint', '')}", size=7.6, bold=True, color=COLORS["muted"])
+    side = ui_text(item["side"], language_mode, separator=" / ")
+    add_text(meta, f"{side}  |  {item.get('footprint', '')}", size=7.6, bold=True, color=COLORS["muted"])
     description = str(item.get("description", "")).strip()
     if description:
         add_text(meta, f"  |  {description}", size=7.6, color=COLORS["muted"])
@@ -299,8 +403,8 @@ def add_item(document: Document, item: dict[str, Any], *, page_break_before: boo
     set_keep_with_next(paragraph)
     width, height = fit_image(item["_image_path"], max_width_cm=9.2, max_height_cm=5.2)
     shape = paragraph.add_run().add_picture(str(item["_image_path"]), width=Cm(width), height=Cm(height))
-    set_picture_alt(shape, f"Cropped orthographic PCB view locating {item['designator']}")
-    add_pin_table(document, item)
+    set_picture_alt(shape, ui_text("crop_alt", language_mode, designator=item["designator"]))
+    add_pin_table(document, item, language_mode)
 
 
 def add_groups(document: Document, spec: dict[str, Any]) -> None:
@@ -312,8 +416,17 @@ def add_groups(document: Document, spec: dict[str, Any]) -> None:
             paragraph = document.add_paragraph()
             add_text(paragraph, intro, size=8.5, color=COLORS["muted"])
         for index, item in enumerate(group["items"]):
-            start_page = bool(index and (index % 2 == 0 or "through-hole-signal" in item.get("categories", [])))
-            add_item(document, item, page_break_before=start_page)
+            start_page = bool(
+                index
+                and (
+                    index % 2 == 0
+                    or "through-hole-signal" in item.get("categories", [])
+                    or item.get("designator") == "SB4"
+                )
+            )
+            add_item(
+                document, item, language_mode=spec["_language_mode"],
+                page_break_before=start_page)
 
 
 def build_document(spec: dict[str, Any], output: Path) -> None:
@@ -332,11 +445,17 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--language-mode", choices=LANGUAGE_MODES, default="source")
+    parser.add_argument("--translations", type=Path)
     args = parser.parse_args()
     if args.data.resolve() == args.output.resolve():
         raise SystemExit("input and output paths must be different")
     try:
-        spec = parse_spec(args.data.resolve())
+        translations = load_translation_catalog(
+            args.translations.resolve() if args.translations else None)
+        spec = parse_spec(
+            args.data.resolve(), language_mode=args.language_mode,
+            translations=translations)
         build_document(spec, args.output.resolve())
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"error: {exc}", file=sys.stderr)

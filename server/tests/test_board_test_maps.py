@@ -3,7 +3,9 @@ import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from tools.generate_board_test_maps import build_page, qname
+from tools.crop_native_pcb_3d_export import svg_component_pixels
+from tools.generate_board_test_maps import build_page, component_positions, pad_positions, qname
+from tools.pcb_3d_registration import CameraRegistration
 
 
 class TestMapMountingHoleTests(unittest.TestCase):
@@ -30,6 +32,48 @@ class TestMapMountingHoleTests(unittest.TestCase):
                 holes = [element.get("id") for element in group if element.tag == qname("circle")]
                 self.assertEqual(["inside"], holes)
                 self.assertFalse(any(element.get("id") == "Pads" for element in root.iter()))
+
+
+class PanelizedDesignatorTests(unittest.TestCase):
+    def test_panel_instances_are_available_by_logical_designator(self):
+        source = (
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -20 40 20">'
+            '<g id="component-TP-assembly" data-component="TP" data-instance="TP" transform="translate(5 5)"/>'
+            '<g id="component-TP-2-pads" data-component="TP" data-instance="TP-2" transform="translate(15 5) rotate(0)">'
+            '<path data-pad-number="1" d="M -1 -1 L 1 -1 L 1 1 L -1 1 Z"/>'
+            '</g></svg>'
+        )
+        root = ET.fromstring(source)
+        positions = component_positions(root, bottom=False, view_x=0, view_y=-20, view_width=40)
+        pads = pad_positions(root, bottom=False, view_x=0, view_y=-20, view_width=40)
+        self.assertEqual((5.0, 15.0), positions["TP_1"])
+        self.assertEqual((15.0, 15.0), positions["TP_2"])
+        self.assertEqual((15.0, 15.0), pads[("TP_2", "1")])
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "assembly.svg"
+            path.write_text(source, encoding="utf-8")
+            pixels = svg_component_pixels(path, (400, 200), bottom=False)
+            self.assertEqual((50.0, 150.0), pixels["TP_1"])
+            self.assertEqual((150.0, 150.0), pixels["TP_2"])
+
+            registered = svg_component_pixels(
+                path,
+                (440, 200),
+                bottom=False,
+                registration=CameraRegistration(-2, 42, 0, 20, False, 440, 200),
+            )
+            self.assertEqual((70.0, 150.0), registered["TP_1"])
+            self.assertEqual((170.0, 150.0), registered["TP_2"])
+
+            mirrored = svg_component_pixels(
+                path,
+                (440, 200),
+                bottom=True,
+                registration=CameraRegistration(-2, 42, 0, 20, True, 440, 200),
+            )
+            self.assertEqual((370.0, 150.0), mirrored["TP_1"])
+            self.assertEqual((270.0, 150.0), mirrored["TP_2"])
 
 
 if __name__ == "__main__":

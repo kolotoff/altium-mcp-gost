@@ -1575,6 +1575,33 @@ def _pcb_3d_color_params(
     return result
 
 
+def _pcb_3d_registration(image: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Convert bridge camera metadata to physical millimetre bounds."""
+    required = (
+        "camera_look_at_x", "camera_look_at_y", "camera_view_x",
+        "camera_view_y", "camera_units_per_inch",
+    )
+    if any(image.get(name) is None for name in required):
+        return None
+    units_per_inch = float(image["camera_units_per_inch"])
+    if units_per_inch <= 0:
+        raise ValueError("camera_units_per_inch must be positive")
+    mm_per_unit = 25.4 / units_per_inch
+    look_x = float(image["camera_look_at_x"]) * mm_per_unit
+    look_y = float(image["camera_look_at_y"]) * mm_per_unit
+    width = float(image["camera_view_x"]) * mm_per_unit
+    height = float(image["camera_view_y"]) * mm_per_unit
+    return {
+        "left_mm": look_x - width / 2,
+        "right_mm": look_x + width / 2,
+        "bottom_mm": look_y - height / 2,
+        "top_mm": look_y + height / 2,
+        "mirror_x": bool(image.get("camera_mirror_x", False)),
+        "image_width_px": int(image["width"]),
+        "image_height_px": int(image["height"]),
+    }
+
+
 async def _export_one_pcb_3d_image(
     target: Path,
     side: str,
@@ -1610,7 +1637,7 @@ async def export_pcb_3d_image(
     output_path: str,
     side: str = "top",
     dpi: int = 600,
-    workspace_color: Optional[str] = None,
+    workspace_color: Optional[str] = "#FFFFFF",
     board_color: Optional[str] = None,
     solder_mask_color: Optional[str] = None,
     silk_color: Optional[str] = None,
@@ -1619,8 +1646,9 @@ async def export_pcb_3d_image(
     """Export one orthographic PCB 3D PNG directly, without an OutJob.
 
     ``side`` is ``top`` or ``bottom`` and DPI defaults to 600. Omit all color
-    parameters to use the current Altium 3D view colors, or supply any #RRGGBB
-    overrides. The PCB document is not modified or saved.
+    parameters to use the current Altium 3D object colors; the workspace is flat
+    white by default. Supply #RRGGBB overrides as needed. The PCB document is not
+    modified or saved.
     """
     target = Path(output_path).expanduser().resolve()
     if target.suffix.lower() != ".png":
@@ -1637,7 +1665,20 @@ async def export_pcb_3d_image(
         colors = _pcb_3d_color_params(
             workspace_color, board_color, solder_mask_color, silk_color, copper_color)
         result = await _export_one_pcb_3d_image(target, side, dpi, colors)
-        return json_dumps({"success": True, **result}, indent=2)
+        registration = _pcb_3d_registration(result)
+        registration_path = None
+        if registration is not None:
+            registration_path = target.with_name(target.stem + "-registration.json")
+            registration_path.write_text(json_dumps({
+                "version": 1,
+                "coordinate_units": "mm",
+                side: registration,
+            }, indent=2), encoding="utf-8")
+        return json_dumps({
+            "success": True,
+            **result,
+            "registration_path": str(registration_path) if registration_path else None,
+        }, indent=2)
     except Exception as exc:
         return json_dumps({"success": False, "error": str(exc), "output_path": str(target)})
 
@@ -1647,7 +1688,7 @@ async def export_pcb_3d_images(
     ctx: Context,
     output_directory: str,
     dpi: int = 600,
-    workspace_color: Optional[str] = None,
+    workspace_color: Optional[str] = "#FFFFFF",
     board_color: Optional[str] = None,
     solder_mask_color: Optional[str] = None,
     silk_color: Optional[str] = None,
@@ -1657,8 +1698,8 @@ async def export_pcb_3d_images(
     """Export orthographic top and bottom PCB 3D PNG files without an OutJob.
 
     The files are named ``pcb-3d-top.png`` and ``pcb-3d-bottom.png``. DPI
-    defaults to 600. Optional #RRGGBB values configure the 3D view coloring;
-    when none are supplied, Altium's current system view colors are used.
+    defaults to 600. The workspace is flat white by default. Optional #RRGGBB
+    values configure the remaining 3D view colors.
     """
     try:
         directory = Path(output_directory).expanduser()
@@ -1678,10 +1719,24 @@ async def export_pcb_3d_images(
         images = []
         for side, target in targets.items():
             images.append(await _export_one_pcb_3d_image(target, side, dpi, colors))
+        registrations = {
+            image["side"]: registration
+            for image in images
+            if (registration := _pcb_3d_registration(image)) is not None
+        }
+        registration_path = None
+        if len(registrations) == len(images):
+            registration_path = directory / "pcb-3d-registration.json"
+            registration_path.write_text(json_dumps({
+                "version": 1,
+                "coordinate_units": "mm",
+                **registrations,
+            }, indent=2), encoding="utf-8")
         return json_dumps({
             "success": True,
             "dpi": dpi,
             "images": images,
+            "registration_path": str(registration_path) if registration_path else None,
             "document_modified": False,
             "document_saved": False,
         }, indent=2)

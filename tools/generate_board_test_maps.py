@@ -12,8 +12,10 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 if __package__:
+    from .board_test_localization import LANGUAGE_MODES, ui_text
     from .generate_board_interface_maps import remove_outside_mounting_holes
 else:
+    from board_test_localization import LANGUAGE_MODES, ui_text
     from generate_board_interface_maps import remove_outside_mounting_holes
 
 
@@ -26,14 +28,6 @@ COLORS = {
     "keystone-5016": "#7C3AED",
     "through-hole-signal": "#475467",
 }
-LEGEND = {
-    "testpoint": "Контрольные точки",
-    "solder-bridge": "SB элементы",
-    "keystone-5016": "Keystone 5016",
-    "through-hole-signal": "Отверстия ≥ 1 мм",
-}
-
-
 def qname(name: str) -> str:
     return f"{{{SVG}}}{name}"
 
@@ -63,13 +57,31 @@ def remove_pads(element: ET.Element) -> None:
             remove_pads(child)
 
 
+def exported_designator_aliases(element: ET.Element) -> list[str]:
+    """Return logical designator aliases for panelized Altium SVG instances."""
+    component = str(element.get("data-component") or "").strip()
+    if not component:
+        return []
+    aliases = [component]
+    instance = str(element.get("data-instance") or "").strip()
+    if instance == component:
+        aliases.append(f"{component}_1")
+    else:
+        match = re.fullmatch(re.escape(component) + r"-(\d+)", instance)
+        if match:
+            aliases.append(f"{component}_{match.group(1)}")
+        elif instance:
+            aliases.append(instance)
+    return list(dict.fromkeys(aliases))
+
+
 def component_positions(root: ET.Element, *, bottom: bool, view_x: float, view_y: float, view_width: float) -> dict[str, tuple[float, float]]:
     positions: dict[str, tuple[float, float]] = {}
     for suffix in ("-assembly", "-pads"):
         for element in root.iter():
             identifier = element.get("id", "")
-            designator = element.get("data-component")
-            if not designator or not identifier.endswith(suffix) or designator in positions:
+            aliases = exported_designator_aliases(element)
+            if not aliases or not identifier.endswith(suffix) or all(alias in positions for alias in aliases):
                 continue
             match = re.search(r"translate\(\s*([-+0-9.eE]+)[ ,]+([-+0-9.eE]+)\s*\)", element.get("transform", ""))
             if not match:
@@ -77,7 +89,8 @@ def component_positions(root: ET.Element, *, bottom: bool, view_x: float, view_y
             x, y = float(match.group(1)), float(match.group(2))
             if bottom:
                 x = 2.0 * view_x + view_width - x
-            positions[designator] = (x - view_x, -y - view_y)
+            for alias in aliases:
+                positions.setdefault(alias, (x - view_x, -y - view_y))
     return positions
 
 
@@ -92,7 +105,8 @@ def pad_positions(root: ET.Element, *, bottom: bool, view_x: float, view_y: floa
     """Locate pad copper centers in the original export before hiding its Pads layer."""
     positions = {}
     for group in root.iter():
-        if not group.get("id", "").endswith("-pads") or not group.get("data-component"):
+        aliases = exported_designator_aliases(group)
+        if not group.get("id", "").endswith("-pads") or not aliases:
             continue
         match = re.search(r"translate\(\s*([-+0-9.eE]+)[ ,]+([-+0-9.eE]+)\s*\)\s*rotate\(\s*([-+0-9.eE]+)", group.get("transform", ""))
         if not match:
@@ -112,7 +126,8 @@ def pad_positions(root: ET.Element, *, bottom: bool, view_x: float, view_y: floa
             y = gy + local_x * math.sin(radians) + local_y * math.cos(radians)
             if bottom:
                 x = 2 * view_x + view_width - x
-            positions[(group.get("data-component"), number)] = (x - view_x, -y - view_y)
+            for alias in aliases:
+                positions.setdefault((alias, number), (x - view_x, -y - view_y))
     return positions
 
 
@@ -274,15 +289,25 @@ def legend_entry(root: ET.Element, item: dict, x: float, y: float, width: float)
     })
     source = ", ".join(dict.fromkeys(str(pin["source_net"]) for pin in item.get("pins", [])))
     designator = str(item["designator"])
-    text(root, x + 4.0, y - 0.25, designator, **{"font-size": "1.9", "font-weight": "700"})
-    source_x = x + 39.0
-    max_chars = max(8, int((width - (source_x - x) - 1.0) / 0.85))
+    source_x = x + 4.0
+    max_chars = max(8, int((width - 18.0) / 0.85))
     if len(source) > max_chars:
         source = source[: max_chars - 1] + "…"
-    text(root, source_x, y - 0.25, source, **{"font-size": "1.75", "fill": "#637785"})
+    # Keep each legend record in one SVG text node. Dense panelized maps can
+    # otherwise exceed Word's SVG text-object limit and lose the entire legend.
+    text(root, source_x, y - 0.25, f"{designator}    {source}", **{
+        "font-size": "1.75", "font-weight": "600", "fill": "#405769",
+    })
 
 
-def build_page(inventory: dict, source_path: Path, output_path: Path, *, side: str) -> None:
+def build_page(
+    inventory: dict,
+    source_path: Path,
+    output_path: Path,
+    *,
+    side: str,
+    language_mode: str = "source",
+) -> None:
     page_w, page_h = 270.0, 180.0
     source_root = ET.parse(source_path).getroot()
     view = parse_numbers(source_root.get("viewBox", ""))
@@ -320,15 +345,18 @@ def build_page(inventory: dict, source_path: Path, output_path: Path, *, side: s
 
     root = ET.Element(qname("svg"), {
         "version": "1.2", "baseProfile": "tiny", "data-coordinate-units": "mm",
+        "data-language-mode": language_mode,
         "width": f"{page_w}mm", "height": f"{page_h}mm", "viewBox": f"0 0 {page_w} {page_h}",
     })
     ET.SubElement(root, qname("rect"), {"x": "0", "y": "0", "width": str(page_w), "height": str(page_h), "fill": "#FFFFFF"})
-    side_title = "ВЕРХНЯЯ" if side == "top" else "НИЖНЯЯ"
-    text(root, 4.0, 5.6, f"{side_title} СТОРОНА  КАРТА ТЕСТОВОГО ДОСТУПА", **{"font-size": "3.6", "font-weight": "700", "fill": "#000000"})
+    text(root, 4.0, 5.6, ui_text(f"map_{side}", language_mode, separator=" / "), **{
+        "font-size": "3.6", "font-weight": "700", "fill": "#000000",
+        "data-map-title": "2d", "data-side": side,
+    })
     legend_x = 4.0
     for key in COLORS:
         ET.SubElement(root, qname("rect"), {"x": f"{legend_x:.2f}", "y": "8.2", "width": "3.2", "height": "2.5", "rx": "0.5", "fill": COLORS[key]})
-        text(root, legend_x + 4.4, 10.3, LEGEND[key], **{"font-size": "1.85", "font-weight": "600"})
+        text(root, legend_x + 4.4, 10.3, ui_text(key, language_mode, separator=" / "), **{"font-size": "1.85", "font-weight": "600"})
         legend_x += 59.0
 
     clean = copy.deepcopy(source_root)
@@ -364,11 +392,16 @@ def main() -> int:
     parser.add_argument("--inventory", type=Path, required=True)
     parser.add_argument("--top-svg", type=Path, required=True)
     parser.add_argument("--bottom-svg", type=Path, required=True)
+    parser.add_argument("--language-mode", choices=LANGUAGE_MODES, default="source")
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
     inventory = json.loads(args.inventory.read_text(encoding="utf-8-sig"))
-    build_page(inventory, args.top_svg, args.output_dir / "pcb-test-map-top.svg", side="top")
-    build_page(inventory, args.bottom_svg, args.output_dir / "pcb-test-map-bottom.svg", side="bottom")
+    build_page(
+        inventory, args.top_svg, args.output_dir / "pcb-test-map-top.svg",
+        side="top", language_mode=args.language_mode)
+    build_page(
+        inventory, args.bottom_svg, args.output_dir / "pcb-test-map-bottom.svg",
+        side="bottom", language_mode=args.language_mode)
     print(args.output_dir.resolve())
     return 0
 

@@ -150,6 +150,10 @@ DItemRevisionGUID=
 GenerateClassCluster=0
 DocumentUniqueId=
 
+[Document7]
+DocumentPath=project_variants.pas
+AnnotationEnabled=1
+
 [OutputGroup1]
 Name=Netlist Outputs
 Description=

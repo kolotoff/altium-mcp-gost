@@ -972,12 +972,10 @@ begin
                 if Pos(']', RequestData[i]) = 0 then
                 begin
                     i := i + 1;
-                    while (i < RequestData.Count) and (Pos(']', RequestData[i]) = 0) do
+                    while (i < RequestData.Count) and
+                          (Trim(RequestData[i]) <> ']') and (Trim(RequestData[i]) <> '],') do
                     begin
-                        ParamValue := RequestData[i];
-                        ParamValue := StringReplace(ParamValue, '"', '', REPLACEALL);
-                        ParamValue := StringReplace(ParamValue, ',', '', REPLACEALL);
-                        ParamValue := JSONUnescapeString(Trim(ParamValue));
+                        ParamValue := TrimJSONStringPreserveCommas(RequestData[i]);
                         if (ParamValue <> '') and (ParamValue <> '[') then
                             LayerMoves.Add(ParamValue);
                         i := i + 1;
@@ -986,7 +984,11 @@ begin
             end;
         end;
 
-        Result := MovePCBLibraryMechanicalLayers(ExcludeFootprints, LayerMoves);
+        // Compatibility transport for clients connected before variant tools
+        // were registered. Project commands never touch a PCB library.
+        Result := ExecuteProjectVariantMaintenance(LayerMoves);
+        if Result = '' then
+            Result := MovePCBLibraryMechanicalLayers(ExcludeFootprints, LayerMoves);
     finally
         ExcludeFootprints.Free;
         LayerMoves.Free;
@@ -1200,6 +1202,8 @@ begin
         'set_pcb_library_pad_shapes':
             Result := ExecuteSetPCBLibraryPadShapes(RequestData);
         'move_pcb_library_mechanical_layers':
+            Result := ExecuteMovePCBLibraryMechanicalLayers(RequestData);
+        'project_variant_maintenance':
             Result := ExecuteMovePCBLibraryMechanicalLayers(RequestData);
         'copy_pcb_polygon_geometry':
             Result := ExecuteCopyPCBPolygonGeometry(RequestData);

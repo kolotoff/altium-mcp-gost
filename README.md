@@ -197,6 +197,81 @@ actual PCB outline; panel-rail pads outside that contour are excluded.
 ### Document Utilities
 - `save_current_document`: Save the currently focused Altium document. Requires `user_requested=true`; use it only when the user explicitly asks to save.
 
+### Project variant material changes
+
+- `get_project_variants(project_name)`: Inspect one open PCB project's live
+  variants, component IDs, variation kinds, alternate-part strings, and parameter
+  overrides. Use the exact project basename without `.PrjPcb`, or its full path.
+  The displayed variant label is `DM_Description`; `DM_Name` can simply be
+  `Variant` and should not be used to select `E1_MOUNT`.
+- `copy_project_variant_materials(source_project, target_project, variant_name,
+  allow_missing=False, apply=False)`: Preflight a material-override copy. The
+  default checks all source changes without creating a variant. Set `apply=True`
+  to create the target variant. Missing components block by default; set
+  `allow_missing=True` only after reviewing `skipped_designators`.
+
+The implementation is in `server/AltiumScript/project_variants.pas`, registered in
+`Altium_API.PrjScr`, with MCP wrappers in `server/main.py`. It uses open projects
+and compiled schematic data. Each source designator must identify one component,
+and its stored variant ID must match the compiled source ID. Each target match
+must have the same base library reference, comment, and footprint. Overrides use
+the **target** component's ID, so copied hierarchy IDs cannot silently attach to
+another component. Ambiguous designators, stale source IDs, incompatible base
+parts, and conflicting existing variants block the operation. An identical
+existing variant returns `already_matches=true` without adding another variant.
+
+This helper supports fitted components with parameter/material overrides only
+(`DM_VariationKind=0`). It does not copy DNP states or alternate library models.
+It preserves the source alternate-part string and all parameter name/value
+overrides. In AD26, `DM_SetAlternatePart` automatically creates a `Comment`
+override; the copier reuses that parameter to avoid duplicates. Every new
+component variation is read back before success. On failure, the newly created
+variant is removed; inspect the live state before retrying.
+
+Example MCP arguments, first for preflight and then for applying reviewed skips:
+
+```json
+{"source_project":"SwarmRK_v1.6S","target_project":"MainRK_v1.6","variant_name":"E1_MOUNT"}
+{"source_project":"SwarmRK_v1.6S","target_project":"MainRK_v1.6","variant_name":"E1_MOUNT","allow_missing":true,"apply":true}
+```
+
+The `SwarmRK_v1.6S` -> `MainRK_v1.6` copy verified on 2026-10-19 has these
+14 applicable component changes and 28 parameter overrides:
+
+| MainRK components | Variant `Comment` | Variant `PartNumber` |
+| --- | --- | --- |
+| HL2, HL3, HL5, HL6, HL7, HL8, HL10 | XL-1608SYGC-06 | =Comment |
+| F1, F2, F3, F4, F5, F14, F16 | 0R | =Comment |
+
+The source's `HL11`, `HL12`, and `F6` are absent from MainRK and were skipped.
+Other MainRK components retain their base values. The strict preflight rejected
+those missing components, the reviewed copy passed readback, and a repeat apply
+returned `already_matches=true`.
+
+**Save-state recovery:** These tools issue no save command. Keep Altium open for
+inspection. On the tested AD26 project server, `SetModified(True)` did not make
+`GetModified` return true even though the live variant and all 28 overrides were
+present. Responses therefore expose `target_modified` and a `save_state_warning`
+when persistence cannot be confirmed. A successful live readback does not prove
+that the project is saved. Report this ambiguity; do not restart/close Altium,
+save, or accept a save-copy prompt without the user's explicit instruction.
+
+Existing MCP connections may need a **server reconnect** to discover the two new
+tool names; Altium itself does not need a restart. Until reconnection, the existing
+`move_pcb_library_mechanical_layers` tool can carry one project maintenance command
+in `layer_moves`, with `exclude_footprint_names=[]`:
+
+```text
+PROJECT_VARIANTS_INSPECT|MainRK_v1.6
+PROJECT_VARIANT_MATERIALS|SwarmRK_v1.6S|MainRK_v1.6|E1_MOUNT|TRUE|DRY_RUN
+PROJECT_VARIANT_MATERIALS|SwarmRK_v1.6S|MainRK_v1.6|E1_MOUNT|TRUE|APPLY
+```
+
+The parser dispatches these commands before PCB-library operations. The dedicated
+tools use `project_variant_maintenance`, which also bypasses document focusing.
+After any timeout, inspect the target variant and its exact overrides before
+retrying an apply. Put exported verification data under `generated/`.
+
 ### Component Information
 - `get_all_designators`: Get a list of all component designators in the current board
 - `get_all_component_property_names`: Get a list of all available component property names

@@ -99,7 +99,8 @@ begin
     DocumentKind := 'PCB'; // Default
 
     // Commands that handle their own document management - skip focusing
-    if (CommandName = 'search_library_symbol') or
+    if (CommandName = 'project_variant_maintenance') or
+       (CommandName = 'search_library_symbol') or
        (CommandName = 'save_current_document') or
        (CommandName = 'create_pcb_footprint') or
        (CommandName = 'take_view_screenshot') then

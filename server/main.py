@@ -2340,6 +2340,67 @@ async def set_pcb_library_pad_shapes(ctx: Context, exclude_footprint_names: list
     logger.info("PCB library pad shapes updated successfully")
     return json_dumps(result, indent=2)
 
+def _variant_command_field(value: str) -> str:
+    """Keep maintenance fields unambiguous, including Windows project paths."""
+    if not value.strip() or any(char in value for char in '|\r\n"'):
+        raise ValueError('Variant/project selectors must be nonempty and contain no pipe, quote, or newline.')
+    return value
+
+
+async def _project_variant_command(command: str) -> str:
+    response = await altium_bridge.execute_command(
+        "project_variant_maintenance",
+        {"exclude_footprint_names": [], "layer_moves": [command]},
+    )
+    if not response.get("success", False):
+        return json_dumps({"success": False, "error": response.get("error", "Altium command failed")})
+    return json_dumps(response.get("result", {}), indent=2)
+
+
+@mcp.tool()
+async def get_project_variants(ctx: Context, project_name: str) -> str:
+    """Read live variants and material parameter overrides for an open project.
+
+    project_name is an exact project basename (without .PrjPcb) or full path.
+    Returns component IDs, variation kinds, cached alternate-part strings, and
+    parameter name/value overrides. Does not save or edit the project.
+    """
+    return await _project_variant_command(
+        "PROJECT_VARIANTS_INSPECT|" + _variant_command_field(project_name)
+    )
+
+
+@mcp.tool()
+async def copy_project_variant_materials(
+    ctx: Context, source_project: str, target_project: str, variant_name: str,
+    allow_missing: bool = False, apply: bool = False,
+) -> str:
+    """Copy a named variant's parameter/material changes between open projects.
+
+    Select projects by exact basename without extension or full path. Default is
+    a dry run. Set apply=True to create the target variant, leaving it unsaved.
+    Matches unique designators, validates base library reference/comment/footprint,
+    and uses the target's compiled component IDs. Missing components block by
+    default; allow_missing=True skips them and reports their designators.
+    Ambiguous/mismatched components always block. Only normal fitted components
+    with parameter overrides are supported; alternate library models and DNP
+    states are rejected. An identical existing variant is a no-op; conflicting
+    variants are never overwritten. Read back after a timeout before retrying.
+    Live verification does not confirm persistence. If target_modified is false
+    after apply, save_state_warning reports the ambiguous project dirty state;
+    keep Altium open and do not save without an explicit user request.
+    """
+    fields = [
+        "PROJECT_VARIANT_MATERIALS",
+        _variant_command_field(source_project),
+        _variant_command_field(target_project),
+        _variant_command_field(variant_name),
+        "TRUE" if allow_missing else "FALSE",
+        "APPLY" if apply else "DRY_RUN",
+    ]
+    return await _project_variant_command("|".join(fields))
+
+
 @mcp.tool()
 async def move_pcb_library_mechanical_layers(ctx: Context, exclude_footprint_names: list, layer_moves: list) -> str:
     """

@@ -187,7 +187,7 @@ begin
     if Matches > 1 then Result := nil;
 end;
 
-function MaterialVariationMatches(Source, Target: IComponentVariation; TargetId: String): Boolean;
+function MaterialOverrideValuesMatch(Source, Target: IComponentVariation): Boolean;
 var
     i: Integer;
     SourceParameter, TargetParameter: IParameterVariation;
@@ -195,8 +195,6 @@ begin
     Result := False;
     if Target = nil then Exit;
     if Source.DM_VariationKind <> Target.DM_VariationKind then Exit;
-    if Source.DM_PhysicalDesignator <> Target.DM_PhysicalDesignator then Exit;
-    if Target.DM_UniqueId <> TargetId then Exit;
     if Source.DM_AlternatePart <> Target.DM_AlternatePart then Exit;
     if Source.DM_VariationCount <> Target.DM_VariationCount then Exit;
     for i := 0 to Source.DM_VariationCount - 1 do
@@ -207,6 +205,15 @@ begin
         if TargetParameter.DM_VariedValue <> SourceParameter.DM_VariedValue then Exit;
     end;
     Result := True;
+end;
+
+function MaterialVariationMatches(Source, Target: IComponentVariation; TargetId: String): Boolean;
+begin
+    Result := False;
+    if Target = nil then Exit;
+    if Source.DM_PhysicalDesignator <> Target.DM_PhysicalDesignator then Exit;
+    if Target.DM_UniqueId <> TargetId then Exit;
+    Result := MaterialOverrideValuesMatch(Source, Target);
 end;
 
 function MaterialComponentMatchCount(Flat: IDocument; Designator: String): Integer;
@@ -444,6 +451,250 @@ begin
     end;
 end;
 
+// Inspect every component in a material family, including components with no
+// variant record. Looking only at existing overrides cannot detect omissions.
+function InspectEffectiveVariantMaterials(ProjectSelector, VariantName, LibraryPrefix: String): String;
+var
+    Project: IProject;
+    ProjectVariant, ActiveVariant: IProjectVariant;
+    Flat: IDocument;
+    Component: IComponent;
+    Change: IComponentVariation;
+    Parameter: IParameterVariation;
+    Items, Props: TStringList;
+    i: Integer;
+    EffectiveComment: String;
+begin
+    Result := '{"success": false, "error": "Project or variant missing or ambiguous."}';
+    Project := FindVariantProject(ProjectSelector);
+    if Project = nil then Exit;
+    ProjectVariant := FindMaterialVariant(Project, VariantName);
+    if ProjectVariant = nil then Exit;
+    if Project.DM_NeedsCompile then
+        if not Project.DM_Compile then Exit;
+    Flat := Project.DM_DocumentFlattened;
+    if Flat = nil then Exit;
+    Items := TStringList.Create;
+    Props := TStringList.Create;
+    try
+        for i := 0 to Flat.DM_ComponentCount - 1 do
+        begin
+            Component := Flat.DM_Components(i);
+            if Pos(UpperCase(LibraryPrefix), UpperCase(Component.DM_LibraryReference)) = 1 then
+            begin
+                Change := ProjectVariant.DM_FindComponentVariationByUniqueId(Component.DM_UniqueId);
+                EffectiveComment := Component.DM_Comment;
+                if Change <> nil then
+                    EffectiveComment := Change.DM_CalculatedAlternatePart(Component);
+                Props.Clear;
+                AddJSONProperty(Props, 'designator', Component.DM_PhysicalDesignator);
+                AddJSONProperty(Props, 'base_library_reference', Component.DM_LibraryReference);
+                AddJSONProperty(Props, 'base_comment', Component.DM_Comment);
+                AddJSONProperty(Props, 'effective_comment', EffectiveComment);
+                AddJSONBoolean(Props, 'has_override', Change <> nil);
+                if Change <> nil then
+                begin
+                    Parameter := Change.DM_FindParameterVariation('PartNumber');
+                    if Parameter <> nil then
+                        AddJSONProperty(Props, 'effective_part_number', Parameter.DM_CalculatedValue(Component, Change));
+                end;
+                Items.Add(BuildJSONObject(Props, 0));
+            end;
+        end;
+        Props.Clear;
+        AddJSONBoolean(Props, 'success', True);
+        AddJSONProperty(Props, 'project', Project.DM_ProjectFullPath);
+        AddJSONProperty(Props, 'variant', VariantName);
+        ActiveVariant := Project.DM_CurrentProjectVariant;
+        if ActiveVariant <> nil then
+            AddJSONProperty(Props, 'active_variant', ActiveVariant.DM_Description);
+        Props.Add(BuildJSONArray(Items, 'materials'));
+        Result := BuildJSONObject(Props, 0);
+    finally
+        Props.Free;
+        Items.Free;
+    end;
+end;
+
+function SameBaseMaterial(Source, Target: IComponent): Boolean;
+begin
+    Result := (Source.DM_LibraryReference = Target.DM_LibraryReference) and
+              (Source.DM_Comment = Target.DM_Comment) and
+              (Source.DM_Footprint = Target.DM_Footprint);
+end;
+
+procedure PopulateMaterialOverride(Source, Target: IComponentVariation);
+var
+    SourceParameter, TargetParameter: IParameterVariation;
+    i: Integer;
+begin
+    Target.DM_SetVariationKind(Source.DM_VariationKind);
+    Target.DM_SetAlternatePart(Source.DM_AlternatePart);
+    for i := 0 to Source.DM_VariationCount - 1 do
+    begin
+        SourceParameter := Source.DM_Variations(i);
+        TargetParameter := Target.DM_FindParameterVariation(SourceParameter.DM_ParameterName);
+        if TargetParameter = nil then TargetParameter := Target.DM_AddParameterVariation;
+        TargetParameter.DM_SetParameterName(SourceParameter.DM_ParameterName);
+        TargetParameter.DM_SetVariedValue(SourceParameter.DM_VariedValue);
+    end;
+end;
+
+// Extend an existing copied variant to target-only instances of one explicitly
+// selected base material. Infer a rule only when ALL source instances are
+// overridden identically; a partial source substitution must not become global.
+function ExtendProjectVariantMaterial(SourceSelector, TargetSelector, VariantName,
+    LibraryReference: String; ApplyChanges: Boolean): String;
+var
+    SourceProject, TargetProject: IProject;
+    SourceVariant, TargetVariant: IProjectVariant;
+    SourceFlat, TargetFlat: IDocument;
+    Component, TemplateComponent: IComponent;
+    Change, TemplateChange, NewChange: IComponentVariation;
+    ServerDocument: IServerDocument;
+    Pending, Ids, Records, Props: TStringList;
+    i, SourceCount, TargetCount, NewIndex, AddedCount: Integer;
+    ErrorText: String;
+begin
+    Result := '{"success": false, "error": "Both open projects and existing named variants are required. Copy the variant first."}';
+    SourceProject := FindVariantProject(SourceSelector);
+    TargetProject := FindVariantProject(TargetSelector);
+    if (SourceProject = nil) or (TargetProject = nil) then Exit;
+    if SourceProject.DM_ProjectFullPath = TargetProject.DM_ProjectFullPath then Exit;
+    SourceVariant := FindMaterialVariant(SourceProject, VariantName);
+    TargetVariant := FindMaterialVariant(TargetProject, VariantName);
+    if (SourceVariant = nil) or (TargetVariant = nil) then Exit;
+    if SourceProject.DM_NeedsCompile then
+        if not SourceProject.DM_Compile then Exit;
+    if TargetProject.DM_NeedsCompile then
+        if not TargetProject.DM_Compile then Exit;
+    SourceFlat := SourceProject.DM_DocumentFlattened;
+    TargetFlat := TargetProject.DM_DocumentFlattened;
+    if (SourceFlat = nil) or (TargetFlat = nil) then Exit;
+    Pending := TStringList.Create;
+    Ids := TStringList.Create;
+    Records := TStringList.Create;
+    Props := TStringList.Create;
+    try
+        ErrorText := '';
+        SourceCount := 0;
+        TargetCount := 0;
+        AddedCount := 0;
+        TemplateComponent := nil;
+        TemplateChange := nil;
+        for i := 0 to SourceFlat.DM_ComponentCount - 1 do
+        begin
+            Component := SourceFlat.DM_Components(i);
+            if Component.DM_LibraryReference = LibraryReference then
+            begin
+                SourceCount := SourceCount + 1;
+                Change := SourceVariant.DM_FindComponentVariationByUniqueId(Component.DM_UniqueId);
+                if Change = nil then
+                    ErrorText := 'Source material is only partially overridden; refusing a global material rule.'
+                else if Ord(Change.DM_VariationKind) <> 0 then
+                    ErrorText := 'Only fitted parameter overrides are supported.'
+                else if TemplateChange = nil then
+                begin
+                    TemplateComponent := Component;
+                    TemplateChange := Change;
+                end
+                else if (not SameBaseMaterial(TemplateComponent, Component)) or
+                        (not MaterialOverrideValuesMatch(TemplateChange, Change)) then
+                    ErrorText := 'Source material has conflicting base values or override values.';
+            end;
+        end;
+        if (SourceCount = 0) or (TemplateChange = nil) then
+            ErrorText := 'No source material rule found for the exact library reference.';
+        if ErrorText = '' then
+            for i := 0 to TargetFlat.DM_ComponentCount - 1 do
+            begin
+                Component := TargetFlat.DM_Components(i);
+                if Component.DM_LibraryReference = LibraryReference then
+                begin
+                    TargetCount := TargetCount + 1;
+                    if not SameBaseMaterial(TemplateComponent, Component) then
+                        ErrorText := 'Target base material differs: ' + Component.DM_PhysicalDesignator;
+                    if (Component.DM_UniqueId = '') or
+                       (MaterialComponentMatchCount(TargetFlat, Component.DM_PhysicalDesignator) <> 1) then
+                        ErrorText := 'Target identity missing or ambiguous: ' + Component.DM_PhysicalDesignator;
+                    Change := TargetVariant.DM_FindComponentVariationByDesignator(Component.DM_PhysicalDesignator);
+                    if Change = nil then
+                    begin
+                        Pending.Add(Component.DM_PhysicalDesignator);
+                        Ids.Add(Component.DM_UniqueId);
+                        Records.Add('"' + JSONEscapeString(Component.DM_PhysicalDesignator) + '"');
+                    end
+                    else if (Change.DM_UniqueId <> Component.DM_UniqueId) or
+                            (not MaterialOverrideValuesMatch(TemplateChange, Change)) then
+                        ErrorText := 'Existing target override conflicts: ' + Component.DM_PhysicalDesignator;
+                end;
+            end;
+        if TargetCount = 0 then ErrorText := 'No compatible target material found.';
+        ServerDocument := TargetProject.DM_ServerDocument;
+        if ServerDocument = nil then ErrorText := 'Target project server document is unavailable.';
+        if (ErrorText = '') and ApplyChanges and (Pending.Count > 0) then
+        begin
+            NewIndex := TargetVariant.DM_VariationCount;
+            TargetProject.DM_BeginUpdate;
+            try
+                try
+                    for i := 0 to Pending.Count - 1 do
+                    begin
+                        NewChange := TargetVariant.DM_AddComponentVariation;
+                        NewChange.DM_SetPhysicalDesignator(Pending[i]);
+                        NewChange.DM_SetUniqueId(Ids[i]);
+                        PopulateMaterialOverride(TemplateChange, NewChange);
+                        if (NewChange.DM_UniqueId <> Ids[i]) or
+                           (not MaterialOverrideValuesMatch(TemplateChange, NewChange)) then
+                        begin
+                            ErrorText := 'New material override failed readback.';
+                            Break;
+                        end;
+                    end;
+                except
+                    ErrorText := 'Material extension failed; inspect live state before retrying.';
+                end;
+                if ErrorText <> '' then
+                begin
+                    while TargetVariant.DM_VariationCount > NewIndex do
+                        TargetVariant.DM_RemoveComponentVariation(TargetVariant.DM_VariationCount - 1);
+                end
+                else
+                    AddedCount := Pending.Count;
+            finally
+                TargetProject.DM_EndUpdate;
+            end;
+            if AddedCount > 0 then
+            begin
+                TargetProject.DM_RefreshInWorkspaceForm;
+                ServerDocument.SetModified(True);
+            end;
+        end;
+        AddJSONBoolean(Props, 'success', ErrorText = '');
+        AddJSONInteger(Props, 'source_material_count', SourceCount);
+        AddJSONInteger(Props, 'target_material_count', TargetCount);
+        AddJSONInteger(Props, 'pending_changes', Pending.Count);
+        AddJSONInteger(Props, 'added_changes', AddedCount);
+        AddJSONBoolean(Props, 'already_matches', Pending.Count = 0);
+        AddJSONProperty(Props, 'library_reference', LibraryReference);
+        AddJSONProperty(Props, 'variant', VariantName);
+        if TemplateChange <> nil then
+            AddJSONProperty(Props, 'replacement_comment', TemplateChange.DM_AlternatePart);
+        Props.Add(BuildJSONArray(Records, 'extension_designators'));
+        AddJSONBoolean(Props, 'save_requested', False);
+        if ServerDocument <> nil then
+            AddJSONBoolean(Props, 'target_modified', ServerDocument.GetModified);
+        AddJSONProperty(Props, 'save_state_warning', 'No save command issued. Keep Altium open; persistence and project dirty state require inspection.');
+        if ErrorText <> '' then AddJSONProperty(Props, 'error', ErrorText);
+        Result := BuildJSONObject(Props, 0);
+    finally
+        Props.Free;
+        Records.Free;
+        Ids.Free;
+        Pending.Free;
+    end;
+end;
+
 function ExecuteProjectVariantMaintenance(Commands: TStringList): String;
 var
     Fields: TStringList;
@@ -465,6 +716,18 @@ begin
         if Fields[0] = 'PROJECT_VARIANT_COMPONENTS' then
         begin
             if Fields.Count = 2 then Result := InspectVariantComponents(Fields[1]);
+        end;
+        if Fields[0] = 'PROJECT_VARIANT_EFFECTIVE_MATERIALS' then
+        begin
+            if Fields.Count = 4 then
+                Result := InspectEffectiveVariantMaterials(Fields[1], Fields[2], Fields[3]);
+        end;
+        if Fields[0] = 'PROJECT_VARIANT_EXTEND_MATERIAL' then
+        begin
+            if Fields.Count = 6 then
+                if (UpperCase(Fields[5]) = 'APPLY') or (UpperCase(Fields[5]) = 'DRY_RUN') then
+                    Result := ExtendProjectVariantMaterial(Fields[1], Fields[2], Fields[3], Fields[4],
+                        UpperCase(Fields[5]) = 'APPLY');
         end;
         if Fields[0] = 'PROJECT_VARIANT_MATERIALS' then
         begin

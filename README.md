@@ -209,6 +209,19 @@ actual PCB outline; panel-rail pads outside that contour are excluded.
   default checks all source changes without creating a variant. Set `apply=True`
   to create the target variant. Missing components block by default; set
   `allow_missing=True` only after reviewing `skipped_designators`.
+- `extend_project_variant_material(source_project, target_project, variant_name,
+  library_reference, apply=False)`: Extend an existing variant to missing
+  instances of one exact base material in the target. This is a separate dry-run
+  step after copying by designator. It requires **every** source instance of that
+  library reference to have the same base comment/footprint and identical fitted
+  material overrides. Partial or conflicting source substitutions cannot become
+  a global material rule. Conflicting existing target overrides also block the
+  operation. Matching overrides are preserved; only missing ones are appended.
+- `get_project_variant_materials(project_name, variant_name,
+  library_reference_prefix)`: Audit all compiled components in a material family,
+  including those with **no override**. Returns base and effective Comment,
+  calculated PartNumber where overridden, and the project's active variant label.
+  Use this to verify that a material substitution covers the full target BOM.
 
 The implementation is in `server/AltiumScript/project_variants.pas`, registered in
 `Altium_API.PrjScr`, with MCP wrappers in `server/main.py`. It uses open projects
@@ -235,28 +248,50 @@ Example MCP arguments, first for preflight and then for applying reviewed skips:
 {"source_project":"SwarmRK_v1.6S","target_project":"MainRK_v1.6","variant_name":"E1_MOUNT","allow_missing":true,"apply":true}
 ```
 
-The `SwarmRK_v1.6S` -> `MainRK_v1.6` copy verified on 2026-10-19 has these
-14 applicable component changes and 28 parameter overrides:
+The `SwarmRK_v1.6S` -> `MainRK_v1.6` copy, including the material-population
+correction verified on 2026-10-19, has these 18 component changes and 36 parameter
+overrides:
 
 | MainRK components | Variant `Comment` | Variant `PartNumber` |
 | --- | --- | --- |
 | HL2, HL3, HL5, HL6, HL7, HL8, HL10 | XL-1608SYGC-06 | =Comment |
-| F1, F2, F3, F4, F5, F14, F16 | 0R | =Comment |
+| F1, F2, F3, F4, F5, F8, F11, F12, F14, F15, F16 | 0R | =Comment |
 
 The source's `HL11`, `HL12`, and `F6` are absent from MainRK and were skipped.
-Other MainRK components retain their base values. The strict preflight rejected
-those missing components, the reviewed copy passed readback, and a repeat apply
-returned `already_matches=true`.
+Other MainRK components retain their base values. The initial exact-designator
+copy added 14 changes but missed MainRK-only `F8`, `F11`, `F12`, and `F15`. SwarmRK
+has eight `MFU0603FF00500P500` instances and replaces all eight with `0R`; MainRK
+has eleven. The material extension added the four missing target overrides.
+Altium's `DM_CalculatedAlternatePart` and `DM_CalculatedValue` then confirmed
+`Comment=0R` and resolved `PartNumber=0R` at **all eleven** fuse positions, with no
+remaining effective `MFU*` value. A repeat extension reported zero pending changes.
+An override-only audit would miss this regression; always include unoverridden
+target instances when verifying material replacements. The base library reference
+remains `MFU0603FF00500P500`; the substitution is applied within `E1_MOUNT`.
+
+After the initial copy, use these MCP arguments for the extension and audit:
+
+```json
+{"source_project":"SwarmRK_v1.6S","target_project":"MainRK_v1.6","variant_name":"E1_MOUNT","library_reference":"MFU0603FF00500P500"}
+{"source_project":"SwarmRK_v1.6S","target_project":"MainRK_v1.6","variant_name":"E1_MOUNT","library_reference":"MFU0603FF00500P500","apply":true}
+{"project_name":"MainRK_v1.6","variant_name":"E1_MOUNT","library_reference_prefix":"MFU"}
+```
+
+Run these through `extend_project_variant_material` (first two) and
+`get_project_variant_materials` (third). After extension, the target intentionally
+has more override records than the source. Repeating the exact-designator copier
+can therefore report a conflict; repeat the material-extension preflight to check
+its idempotence instead.
 
 **Save-state recovery:** These tools issue no save command. Keep Altium open for
 inspection. On the tested AD26 project server, `SetModified(True)` did not make
-`GetModified` return true even though the live variant and all 28 overrides were
+`GetModified` return true even though the live variant and its overrides were
 present. Responses therefore expose `target_modified` and a `save_state_warning`
 when persistence cannot be confirmed. A successful live readback does not prove
 that the project is saved. Report this ambiguity; do not restart/close Altium,
 save, or accept a save-copy prompt without the user's explicit instruction.
 
-Existing MCP connections may need a **server reconnect** to discover the two new
+Existing MCP connections may need a **server reconnect** to discover the new
 tool names; Altium itself does not need a restart. Until reconnection, the existing
 `move_pcb_library_mechanical_layers` tool can carry one project maintenance command
 in `layer_moves`, with `exclude_footprint_names=[]`:
@@ -265,6 +300,9 @@ in `layer_moves`, with `exclude_footprint_names=[]`:
 PROJECT_VARIANTS_INSPECT|MainRK_v1.6
 PROJECT_VARIANT_MATERIALS|SwarmRK_v1.6S|MainRK_v1.6|E1_MOUNT|TRUE|DRY_RUN
 PROJECT_VARIANT_MATERIALS|SwarmRK_v1.6S|MainRK_v1.6|E1_MOUNT|TRUE|APPLY
+PROJECT_VARIANT_EXTEND_MATERIAL|SwarmRK_v1.6S|MainRK_v1.6|E1_MOUNT|MFU0603FF00500P500|DRY_RUN
+PROJECT_VARIANT_EXTEND_MATERIAL|SwarmRK_v1.6S|MainRK_v1.6|E1_MOUNT|MFU0603FF00500P500|APPLY
+PROJECT_VARIANT_EFFECTIVE_MATERIALS|MainRK_v1.6|E1_MOUNT|MFU
 ```
 
 The parser dispatches these commands before PCB-library operations. The dedicated

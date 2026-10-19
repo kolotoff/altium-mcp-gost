@@ -2371,6 +2371,52 @@ async def get_project_variants(ctx: Context, project_name: str) -> str:
 
 
 @mcp.tool()
+async def get_project_variant_materials(
+    ctx: Context, project_name: str, variant_name: str, library_reference_prefix: str,
+) -> str:
+    """Audit resolved variant materials, including components without overrides.
+
+    Scope to one exact open PCB project and variant description, and a nonempty
+    library-reference prefix (for example MFU). Reports base comment, effective
+    Comment, calculated PartNumber where overridden, and active variant label.
+    Read-only; use this to detect target-only parts missed by designator copying.
+    """
+    fields = [
+        "PROJECT_VARIANT_EFFECTIVE_MATERIALS",
+        _variant_command_field(project_name),
+        _variant_command_field(variant_name),
+        _variant_command_field(library_reference_prefix),
+    ]
+    return await _project_variant_command("|".join(fields))
+
+
+@mcp.tool()
+async def extend_project_variant_material(
+    ctx: Context, source_project: str, target_project: str, variant_name: str,
+    library_reference: str, apply: bool = False,
+) -> str:
+    """Extend an existing variant to target-only parts of one exact base material.
+
+    Dry run by default. Requires ALL source components of library_reference to
+    have identical fitted material overrides and the same base comment/footprint.
+    Adds missing overrides to compatible target instances using their target IDs.
+    Existing conflicting overrides block the whole operation; matching overrides
+    are preserved. Does not change base schematics or save. After apply, audit
+    resolved values with get_project_variant_materials, including parts that
+    have no variant record. An identical repeat is a no-op.
+    """
+    fields = [
+        "PROJECT_VARIANT_EXTEND_MATERIAL",
+        _variant_command_field(source_project),
+        _variant_command_field(target_project),
+        _variant_command_field(variant_name),
+        _variant_command_field(library_reference),
+        "APPLY" if apply else "DRY_RUN",
+    ]
+    return await _project_variant_command("|".join(fields))
+
+
+@mcp.tool()
 async def copy_project_variant_materials(
     ctx: Context, source_project: str, target_project: str, variant_name: str,
     allow_missing: bool = False, apply: bool = False,
@@ -2386,6 +2432,10 @@ async def copy_project_variant_materials(
     with parameter overrides are supported; alternate library models and DNP
     states are rejected. An identical existing variant is a no-op; conflicting
     variants are never overwritten. Read back after a timeout before retrying.
+    This copies by designator and does not infer rules for target-only parts.
+    For a material substitution across differing component populations, use
+    extend_project_variant_material afterward and audit resolved values with
+    get_project_variant_materials.
     Live verification does not confirm persistence. If target_modified is false
     after apply, save_state_warning reports the ambiguous project dirty state;
     keep Altium open and do not save without an explicit user request.

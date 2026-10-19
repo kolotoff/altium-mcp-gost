@@ -72,6 +72,41 @@ class ProjectVariantToolsTest(unittest.IsolatedAsyncioTestCase):
                     result = await main.copy_project_variant_materials(None, "Source", "Target", "E1")
                 self.assertEqual(json.loads(result), payload)
 
+    async def test_material_extension_defaults_to_dry_run_for_exact_material(self):
+        payload = {"success": True, "pending_changes": 4,
+                   "extension_designators": ["F8", "F11", "F12", "F15"]}
+        bridge = AsyncMock(return_value={"success": True, "result": payload})
+        with patch.object(main.altium_bridge, "execute_command", bridge):
+            result = await main.extend_project_variant_material(
+                None, "SwarmRK_v1.6S", "MainRK_v1.6", "E1_MOUNT", "MFU0603FF00500P500"
+            )
+        self.assertEqual(json.loads(result), payload)
+        self.assertEqual(bridge.call_args.args[1]["layer_moves"], [
+            "PROJECT_VARIANT_EXTEND_MATERIAL|SwarmRK_v1.6S|MainRK_v1.6|E1_MOUNT|MFU0603FF00500P500|DRY_RUN"
+        ])
+
+    async def test_explicit_extension_apply_and_effective_audit_use_distinct_commands(self):
+        bridge = AsyncMock(return_value={"success": True, "result": {"success": True}})
+        with patch.object(main.altium_bridge, "execute_command", bridge):
+            await main.extend_project_variant_material(
+                None, "Source", "Target", "E1_MOUNT", "MFU0603FF00500P500", apply=True
+            )
+            await main.get_project_variant_materials(None, "Target", "E1_MOUNT", "MFU")
+        self.assertEqual([call.args[1]["layer_moves"] for call in bridge.await_args_list], [
+            ["PROJECT_VARIANT_EXTEND_MATERIAL|Source|Target|E1_MOUNT|MFU0603FF00500P500|APPLY"],
+            ["PROJECT_VARIANT_EFFECTIVE_MATERIALS|Target|E1_MOUNT|MFU"],
+        ])
+
+    async def test_material_scope_cannot_be_empty_or_inject_a_command(self):
+        bridge = AsyncMock()
+        with patch.object(main.altium_bridge, "execute_command", bridge):
+            for material in ("", "   ", "MFU|APPLY", "MFU\nAPPLY"):
+                with self.subTest(material=material), self.assertRaises(ValueError):
+                    await main.extend_project_variant_material(None, "Source", "Target", "E1", material)
+                with self.subTest(material=material), self.assertRaises(ValueError):
+                    await main.get_project_variant_materials(None, "Target", "E1", material)
+        bridge.assert_not_awaited()
+
 
 if __name__ == "__main__":
     unittest.main()

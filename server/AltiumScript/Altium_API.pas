@@ -12,6 +12,7 @@ var
 	REQUEST_FILE : String;
     RESPONSE_FILE : String;
     ROOT_DIR: String;
+    CURRENT_REQUEST_ID: String;
 
 {..............................................................................}
 { Initialize file paths using a fixed exchange directory.                      }
@@ -22,6 +23,7 @@ var
 procedure InitializeFilePaths();
 begin
     ROOT_DIR := 'C:\Users\Public\altium_mcp\';
+    CURRENT_REQUEST_ID := '';
 
     // Create the directory if it doesn't exist
     if not DirectoryExists(ROOT_DIR) then
@@ -1133,6 +1135,11 @@ end;
 function ExecuteCommand(CommandName: String): String;
 begin
     Result := '';
+    if CommandName = 'pcb_routing' then
+    begin
+        Result := ExecutePCBRouting;
+        Exit;
+    end;
     EnsureDocumentFocused(CommandName);
     
     // Direct command execution based on the command name
@@ -1242,7 +1249,7 @@ begin
 
     // Trim only if it's not an array
     if (Pos('[', ParamValue) = 0) then
-        ParamValue := TrimJSON(ParamValue);
+        ParamValue := TrimJSONStringPreserveCommas(ParamValue);
 
     // Add to parameters list
     if (ParamName <> '') and (ParamName <> 'command') then
@@ -1274,6 +1281,7 @@ begin
     try
         // Add properties
         AddJSONBoolean(ResultProps, 'success', ActualSuccess);
+        if CURRENT_REQUEST_ID <> '' then AddJSONProperty(ResultProps, 'request_id', CURRENT_REQUEST_ID);
         
         if ActualSuccess then
         begin
@@ -1290,7 +1298,9 @@ begin
         
         // Build response
         ResponseData.Text := BuildJSONObject(ResultProps);
-        ResponseData.SaveToFile(RESPONSE_FILE);
+        ResponseData.SaveToFile(RESPONSE_FILE + '.tmp');
+        if FileExists(RESPONSE_FILE) then DeleteFile(RESPONSE_FILE);
+        RenameFile(RESPONSE_FILE + '.tmp', RESPONSE_FILE);
     finally
         ResultProps.Free;
         ResponseData.Free;
@@ -1347,6 +1357,11 @@ begin
                     ExtractParameter(Line);
                 end;
             end;
+
+            CURRENT_REQUEST_ID := Params.Values['request_id'];
+            if Length(CURRENT_REQUEST_ID) = 32 then
+                RESPONSE_FILE := ROOT_DIR + 'response-' + CURRENT_REQUEST_ID + '.json'
+            else CURRENT_REQUEST_ID := '';
 
             // Execute the command if valid
             if CommandType <> '' then

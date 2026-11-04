@@ -326,6 +326,12 @@ class AltiumConfig:
             self.save_config()
         return bool(self.altium_exe_path and Path(self.altium_exe_path).is_file() and script_exists)
 
+# Keep package imports available when launched as server/main.py.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from server.altium_transport import FileCommandTransport
+from server.routing_mcp import register_routing_tools
+
+
 class AltiumBridge:
     def __init__(self):
         # Ensure the MCP directory exists
@@ -334,89 +340,12 @@ class AltiumBridge:
         # Load configuration
         self.config = AltiumConfig()
         self.config.verify_paths()
+        self._transport = FileCommandTransport(EXCHANGE_DIR, self.run_altium_script)
     
     async def execute_command(self, command: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute a command in Altium via the bridge script"""
-        try:
-            # Clean up any existing response file
-            if RESPONSE_FILE.exists():
-                RESPONSE_FILE.unlink()
-            
-            # Write the request file with command and parameters
-            with open(REQUEST_FILE, "w", encoding="utf-8-sig") as f:
-                f.write(json_dumps({
-                    "command": command,
-                    **params  # Include parameters directly in the main JSON object
-                }, indent=2))
-            
-            logger.info(f"Wrote request file for command: {command}")
-            
-            # Run the Altium script
-            success = await self.run_altium_script()
-            if not success:
-                return {"success": False, "error": "Failed to run Altium script"}
-            
-            # Wait for the response file
-            logger.info(f"Waiting for response file to appear...")
-            timeout = 120  # seconds
-            start_time = time.time()
-            while not RESPONSE_FILE.exists() and time.time() - start_time < timeout:
-                await asyncio.sleep(0.5)
-            
-            if not RESPONSE_FILE.exists():
-                logger.error("Timeout waiting for response from Altium")
-                return {"success": False, "error": "No response received from Altium (timeout)"}
-            
-            # Read the response file and print it for debugging
-            logger.info("Response file found, reading response")
-            response_text = ""
-            with open(RESPONSE_FILE, "r") as f:
-                response_text = f.read()
-            
-            # Log the raw response for debugging
-            logger.info(f"Raw response (first 200 chars): {response_text[:200]}")
-            
-            # Parse the JSON response with detailed error handling
-            try:
-                response = json.loads(response_text)
-                logger.info(f"Successfully parsed JSON response")
-                return response
-            except json.JSONDecodeError as e:
-                logger.error(f"Error parsing JSON response: {e}")
-                logger.error(f"Error at position {e.pos}, line {e.lineno}, column {e.colno}")
-                logger.error(f"Character at error position: '{response_text[e.pos:e.pos+10]}...'")
-                
-                # Try to manually fix common JSON issues
-                logger.info("Attempting to fix JSON response...")
-                fixed_text = response_text
-                
-                # Fix 1: If there's a quoted JSON array, try to fix it
-                if '"[' in fixed_text and ']"' in fixed_text:
-                    fixed_text = fixed_text.replace('"[', '[').replace(']"', ']')
-                    logger.info("Fixed double-quoted JSON array")
-                
-                # Fix 2: Handle escaped quotes in JSON strings
-                fixed_text = fixed_text.replace('\\"', '"')
-                
-                # Try to parse the fixed JSON
-                try:
-                    fixed_response = json.loads(fixed_text)
-                    logger.info("Successfully parsed fixed JSON response")
-                    return fixed_response
-                except json.JSONDecodeError as e2:
-                    logger.error(f"Still failed to parse JSON after fixes: {e2}")
-                
-                # If all else fails, return a structured error
-                return {
-                    "success": False, 
-                    "error": f"Invalid JSON response: {e}",
-                    "raw_response": response_text[:500]  # Include part of the raw response for diagnosis
-                }
-        
-        except Exception as e:
-            logger.error(f"Error executing command: {e}")
-            return {"success": False, "error": str(e)}
-    
+        """Serialize native commands and accept only their correlated response."""
+        return await self._transport.execute(command, params)
+
     @staticmethod
     def _resolve_msix_path(virtual_path: str) -> str:
         """Resolve an MSIX-virtualized path to the real filesystem path.
@@ -485,6 +414,7 @@ class AltiumBridge:
 
 # Create a global bridge instance
 altium_bridge = AltiumBridge()
+globals().update(register_routing_tools(mcp, altium_bridge))
 
 @mcp.tool()
 async def get_all_component_property_names(ctx: Context) -> str:

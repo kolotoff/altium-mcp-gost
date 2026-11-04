@@ -10,3 +10,10 @@ dependencies = [
     "python-docx>=1.1.2",
     "pywin32>=310",
 ]
+
+[project.optional-dependencies]
+capture = [
+    "windows-capture==2.0.1; sys_platform == 'win32'",
+    "imageio-ffmpeg>=0.6.0",
+]
+capture-tests = ["numpy>=2.0"]

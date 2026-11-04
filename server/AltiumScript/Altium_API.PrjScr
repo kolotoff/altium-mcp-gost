@@ -154,6 +154,10 @@ DocumentUniqueId=
 DocumentPath=project_variants.pas
 AnnotationEnabled=1
 
+[Document8]
+DocumentPath=pcb_routing.pas
+AnnotationEnabled=1
+
 [OutputGroup1]
 Name=Netlist Outputs
 Description=

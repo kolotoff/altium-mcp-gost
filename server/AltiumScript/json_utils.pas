@@ -75,12 +75,17 @@ end;
 
 // Helper function to escape JSON strings
 function JSONEscapeString(const S: String): String;
+var I, Code : Integer;
 begin
-    Result := StringReplace(S, '\', '\\', REPLACEALL);
-    Result := StringReplace(Result, '"', '\"', REPLACEALL);
-    Result := StringReplace(Result, #13#10, '\n', REPLACEALL);
-    Result := StringReplace(Result, #10, '\n', REPLACEALL);
-    Result := StringReplace(Result, #9, '\t', REPLACEALL);
+    Result := '';
+    for I := 1 to Length(S) do
+    begin
+        Code := Ord(S[I]);
+        if S[I] = '\' then Result := Result + '\\'
+        else if S[I] = '"' then Result := Result + '\"'
+        else if (Code < 32) or (Code > 126) then Result := Result + '\u' + IntToHex(Code, 4)
+        else Result := Result + S[I];
+    end;
 end;
 
 // Function to create a JSON name-value pair

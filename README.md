@@ -61,7 +61,7 @@ The older approach of bundling pre-compiled packages in `server/lib/` is no long
 3. Update `manifest.json`: set `entry_point` to `start_server.py`, remove any `env`/`PYTHONPATH` fields, and use `manifest_version: "0.3"`
 4. Package the DXT — either use `dxt pack` or manually zip and rename:
 ```powershell
-Compress-Archive -Path manifest.json, start_server.py, pyproject.toml, server -DestinationPath altium-mcp.zip
+Compress-Archive -Path manifest.json, start_server.py, pyproject.toml, server, LICENSES -DestinationPath altium-mcp.zip
 Rename-Item altium-mcp.zip altium-mcp.dxt
 ```
 
@@ -146,6 +146,19 @@ When launching claude for the first time, the server will automatically try to l
 ## Available Tools
 
 The server provides several tools to interact with Altium Designer:
+
+### Routing inspection, audits and explicit edits
+
+The server includes versioned PCB snapshots, exact before/after comparisons,
+native DRC report ledgers, object-specific routing-rule queries, net/object
+selection, explicit track/via batches, polygon outlines and repour, layer-use
+audits, and approximate clearance previews. Write-capable routing tools default
+to dry run and never save the board. See [the routing guide](docs/routing.md) for
+schemas, units, recovery and validation limits. Reconnect MCP after updating to
+discover the new tools.
+
+Passive capture/timelapse and verified saved-file checkpoints remain standalone
+[optional utilities](tools/optional/README.md), outside the MCP request loop.
 
 ### Output Jobs
 - `get_output_job_containers`: Using currently open .OutJob file, reads all available output containers

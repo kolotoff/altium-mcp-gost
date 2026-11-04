@@ -71,6 +71,21 @@ def rectangle(center, x_size, y_size, rotation):
     ]
 
 
+def via_overlaps_pad_bounds(via, pad):
+    """Conservative circle/rotated-pad-rectangle overlap in native units.
+
+    Full pad stacks and shape cutouts are unavailable in the snapshot. Treat
+    overlap with these bounds as requiring explicit same-net permission.
+    """
+    angle = math.radians(float(pad["rotation_degrees"]))
+    c, s = math.cos(angle), math.sin(angle)
+    dx = int(via["x_raw"]) - int(pad["x_raw"])
+    dy = int(via["y_raw"]) - int(pad["y_raw"])
+    u = max(0, abs(dx * c + dy * s) - int(pad["top_x_size_raw"]) / 2)
+    v = max(0, abs(-dx * s + dy * c) - int(pad["top_y_size_raw"]) / 2)
+    return u * u + v * v <= (int(via["size_raw"]) / 2) ** 2
+
+
 def finite_number(value, field):
     if isinstance(value, bool):
         raise ValueError(f"{field} must be a finite number")

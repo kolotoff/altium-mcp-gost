@@ -1,13 +1,15 @@
 { Generalized inventory and explicit geometry tools. Never saves a document.
   Portions adapted from Quilter routing scripts, MIT, copyright 2026 Allegro
-  Labs, Inc. See LICENSES/Quilter-MIT.txt. No experiment net/coordinate policy. }
+  Labs, Inc. See LICENSES/Quilter-MIT.txt. No experiment net/coordinate policy.
+  Native operations pass replies through var output parameters all the way to
+  Run. AD 26.11.1 corrupted nested function Result values around selection;
+  keep these operations outside the String-returning ExecuteCommand path. }
 
 var RoutingFailure : String;
 
 procedure RoutingFail(ErrorText : String);
 begin
-    RoutingFailure := ErrorText;
-    Raise(ErrorText);
+    if RoutingFailure = '' then RoutingFailure := ErrorText;
 end;
 
 function RoutingField(Value : String) : String;
@@ -63,16 +65,22 @@ end;
 function RoutingBoard(ExpectedPath : String) : IPCB_Board;
 begin
     Result := PCBServer.GetPCBBoardByPath(ExpectedPath);
-    if Result = nil then RoutingFail('The exact requested PCB is not open.');
-    if UpperCase(Result.FileName) <> UpperCase(ExpectedPath) then RoutingFail('PCB full-path mismatch.');
+    if Result = nil then begin RoutingFail('The exact requested PCB is not open.'); Exit; end;
+    if UpperCase(Result.FileName) <> UpperCase(ExpectedPath) then begin RoutingFail('PCB full-path mismatch.'); Exit; end;
 end;
 
 procedure RoutingRequireActive(Board : IPCB_Board);
-var Active : IPCB_Board;
+var Active : IPCB_Board; ActiveView : IServerDocumentView; ActiveDocument : IServerDocument;
 begin
     Active:=PCBServer.GetCurrentPCBBoard;
-    if Active=nil then RoutingFail('Activate the exact requested PCB first.');
-    if UpperCase(Active.FileName)<>UpperCase(Board.FileName) then RoutingFail('The requested PCB must be active.');
+    if Active=nil then begin RoutingFail('Activate the exact requested PCB first.'); Exit; end;
+    if UpperCase(Active.FileName)<>UpperCase(Board.FileName) then begin RoutingFail('The requested PCB must be active.'); Exit; end;
+    ActiveView:=Client.CurrentView;
+    if ActiveView=nil then begin RoutingFail('The exact PCB must have an active document view.'); Exit; end;
+    ActiveDocument:=ActiveView.GetOwnerDocument;
+    if ActiveDocument=nil then begin RoutingFail('The active view has no PCB document.'); Exit; end;
+    if UpperCase(ActiveDocument.FileName)<>UpperCase(Board.FileName) then
+    begin RoutingFail('The active document view must belong to the exact requested PCB.'); Exit; end;
 end;
 
 procedure RoutingWrite(Path, Value : String);
@@ -164,7 +172,7 @@ procedure RoutingCollect(Board : IPCB_Board; Tables : TStringList; Signature : T
 var Iterator : IPCB_BoardIterator; Primitive : IPCB_Primitive;
     Net : IPCB_Net; Pad : IPCB_Pad; Track : IPCB_Track; Via : IPCB_Via;
     Connection : IPCB_Connection; Rule : IPCB_Rule; Component : IPCB_Component;
-    Arc : IPCB_Arc; Polygon : IPCB_Polygon; Stack : IPCB_LayerStack; LayerObject : IPCB_LayerObject;
+    Arc : IPCB_Arc; Polygon : IPCB_Polygon; Stack : IPCB_LayerStack_V7; LayerObject : IPCB_LayerObject;
     Nets, Pads, Tracks, Vias, Connections, Rules, Components, Layers, Arcs, Polygons, Summary : TStringList;
     Row, Refdes, ModeName : String; RatsnestCount, RedundantCount, InvalidNetCount, LayerCount : Integer;
 begin
@@ -260,14 +268,14 @@ begin
         finally
             Board.BoardIterator_Destroy(Iterator);
         end;
-        Stack:=Board.LayerStack;
-        if Stack=nil then RoutingFail('PCB has no legacy layer stack.');
+        Stack:=Board.LayerStack_V7;
+        if Stack=nil then begin RoutingFail('PCB has no V7 layer stack.'); Exit; end;
         LayerCount:=0; LayerObject:=Stack.FirstLayer;
         while LayerObject<>nil do
         begin
             Inc(LayerCount);
-            if LayerCount>64 then RoutingFail('Layer stack iteration exceeded 64 entries.');
-            Row:=IntToStr(LayerCount)+#9+IntToStr(LayerObject.LayerID)+#9+RoutingField(LayerObject.Name)+#9+IntToStr(LayerObject.CopperThickness);
+            if LayerCount>64 then begin RoutingFail('Layer stack iteration exceeded 64 entries.'); Exit; end;
+            Row:=IntToStr(LayerCount)+#9+IntToStr(LayerObject.V6_LayerID)+#9+RoutingField(LayerObject.Name)+#9+IntToStr(LayerObject.CopperThickness);
             Layers.Add(Row); Signature.Add('layer'+#9+Row);
             LayerObject:=Stack.NextLayer(LayerObject);
         end;
@@ -301,7 +309,7 @@ begin
     Tables:=TStringList.Create; Signature:=TStringList.Create; Names:=TStringList.Create;
     try
         RoutingWrite(Directory+'\inventory-status.txt','exporting');
-        RoutingCollect(Board,Tables,Signature);
+        RoutingCollect(Board,Tables,Signature); if RoutingFailure<>'' then Exit;
         Names.CommaText:='board,nets,pads,tracks,vias,connections,rules,components,layers,arcs,polygons';
         for I:=0 to Names.Count-1 do
         begin
@@ -321,8 +329,8 @@ begin
     Tables:=TStringList.Create; Signature:=TStringList.Create; Baseline:=TStringList.Create;
     try
         Baseline.LoadFromFile(Directory+'\baseline-signature.txt');
-        RoutingCollect(Board,Tables,Signature);
-        if Baseline.Text<>Signature.Text then RoutingFail('PCB changed since baseline snapshot; refresh and replan.');
+        RoutingCollect(Board,Tables,Signature); if RoutingFailure<>'' then Exit;
+        if Baseline.Text<>Signature.Text then begin RoutingFail('PCB changed since baseline snapshot; refresh and replan.'); Exit; end;
     finally
         Baseline.Free; Signature.Free; Tables.Free;
     end;
@@ -366,7 +374,7 @@ begin
     finally
         Board.BoardIterator_Destroy(Iterator);
     end;
-    if Count<>1 then RoutingFail('Net must resolve to exactly one existing PCB net.');
+    if Count<>1 then begin RoutingFail('Net must resolve to exactly one existing PCB net.'); Exit; end;
 end;
 
 procedure RoutingSetGeometry(Primitive : IPCB_Primitive; Geometry : String);
@@ -375,25 +383,41 @@ begin
     Fields:=TStringList.Create;
     try
         RoutingSplit(Geometry,',',Fields);
-        if Fields.Count<>6 then RoutingFail('Track/via geometry requires six integer fields.');
+        if Fields.Count<>6 then begin RoutingFail('Track/via geometry requires six integer fields.'); Exit; end;
         case Primitive.ObjectId of
             eTrackObject:
             begin
                 Track:=Primitive; Track.X1:=StrToInt(Fields[0]); Track.Y1:=StrToInt(Fields[1]);
                 Track.X2:=StrToInt(Fields[2]); Track.Y2:=StrToInt(Fields[3]);
                 Track.Width:=StrToInt(Fields[4]); Track.Layer:=StrToInt(Fields[5]);
-                if (Track.Width<=0) or ((Track.X1=Track.X2) and (Track.Y1=Track.Y2)) then RoutingFail('Invalid track dimensions.');
+                if (Track.Width<=0) or ((Track.X1=Track.X2) and (Track.Y1=Track.Y2)) then begin RoutingFail('Invalid track dimensions.'); Exit; end;
             end;
             eViaObject:
             begin
                 Via:=Primitive; Via.X:=StrToInt(Fields[0]); Via.Y:=StrToInt(Fields[1]);
                 Via.Size:=StrToInt(Fields[2]); Via.HoleSize:=StrToInt(Fields[3]);
                 Via.LowLayer:=StrToInt(Fields[4]); Via.HighLayer:=StrToInt(Fields[5]);
-                if (Via.HoleSize<=0) or (Via.Size<=Via.HoleSize) then RoutingFail('Invalid via dimensions.');
+                if (Via.HoleSize<=0) or (Via.Size<=Via.HoleSize) then begin RoutingFail('Invalid via dimensions.'); Exit; end;
             end;
-        else RoutingFail('Unsupported geometry kind.');
+        else begin RoutingFail('Unsupported geometry kind.'); Exit; end;
         end;
     finally Fields.Free; end;
+end;
+
+function RoutingViaOverlapsPadBounds(Via : IPCB_Via; Pad : IPCB_Pad) : Boolean;
+var Angle, C, S, DX, DY, U, V, Radius : Double;
+begin
+    { Conservative rotated top-pad rectangle, including the via's radius.
+      Full custom pad stacks remain subject to native DRC. }
+    Angle:=Pad.Rotation*0.017453292519943295;
+    C:=Cos(Angle); S:=Sin(Angle);
+    DX:=1.0*(Via.X-Pad.X); DY:=1.0*(Via.Y-Pad.Y);
+    U:=Abs(DX*C+DY*S)-Pad.TopXSize/2.0;
+    V:=Abs(-DX*S+DY*C)-Pad.TopYSize/2.0;
+    if U<0 then U:=0.0;
+    if V<0 then V:=0.0;
+    Radius:=Via.Size/2.0;
+    Result:=U*U+V*V<=Radius*Radius;
 end;
 
 procedure RoutingCheckViaCenter(Board : IPCB_Board; Candidate, Target : IPCB_Primitive; AllowViaInPad : Boolean);
@@ -412,33 +436,34 @@ begin
             if Primitive.ObjectId=eViaObject then
             begin
                 Existing:=Primitive;
-                if (Existing.X=Via.X) and (Existing.Y=Via.Y) and not SameTarget then RoutingFail('Via center is already occupied.');
+                if (Existing.X=Via.X) and (Existing.Y=Via.Y) and not SameTarget then begin RoutingFail('Via center is already occupied.'); Exit; end;
             end
             else
             begin
                 Pad:=Primitive;
-                if (Pad.X=Via.X) and (Pad.Y=Via.Y) then
-                    if not AllowViaInPad or (RoutingNet(Pad)<>RoutingNet(Via)) then RoutingFail('Via in pad requires explicit same-net allowance.');
+                if RoutingViaOverlapsPadBounds(Via,Pad) then
+                    if not AllowViaInPad or (RoutingNet(Pad)<>RoutingNet(Via)) then begin RoutingFail('Via in pad requires explicit same-net allowance.'); Exit; end;
             end;
             Primitive:=Iterator.NextPCBObject;
         end;
     finally Board.BoardIterator_Destroy(Iterator); end;
 end;
 
-function RoutingRules(Board : IPCB_Board; Directory : String) : String;
+procedure RoutingRules(Board : IPCB_Board; Directory : String; var ResponseText : String);
 var Lines, Fields, Rows : TStringList; I, Matches, QueryLayer : Integer;
     Primitive : IPCB_Primitive; WidthRule : IPCB_MaxMinWidthConstraint; PairRule : IPCB_DifferentialPairsRoutingRule;
     Row, WidthJSON, PairJSON : String;
 begin
+    ResponseText:='';
     Lines:=TStringList.Create; Fields:=TStringList.Create; Rows:=TStringList.Create;
     try
         Lines.LoadFromFile(Directory+'\selectors.tsv');
         for I:=1 to Lines.Count-1 do
         begin
             RoutingSplit(Lines[I],#9,Fields);
-            if Fields.Count<>4 then RoutingFail('Rule selector requires four columns.');
+            if Fields.Count<>4 then begin RoutingFail('Rule selector requires four columns.'); Exit; end;
             Primitive:=RoutingFind(Board,Fields[0],Fields[1],Fields[2],Matches);
-            if Matches<>1 then RoutingFail('Rule query must identify exactly one existing primitive.');
+            if Matches<>1 then begin RoutingFail('Rule query must identify exactly one existing primitive.'); Exit; end;
             QueryLayer:=StrToInt(Fields[3]); WidthJSON:='null'; PairJSON:='null';
             WidthRule:=Board.FindDominantRuleForObject(Primitive,eRule_MaxMinWidth);
             if WidthRule<>nil then
@@ -456,25 +481,27 @@ begin
                 ',"layer_id":'+IntToStr(QueryLayer)+',"width_rule":'+WidthJSON+',"differential_rule":'+PairJSON+'}';
             Rows.Add(Row);
         end;
-        Result:='{"objects":'+BuildJSONArray(Rows)+',"scope":"existing_object_on_requested_layer","prospective_geometry_qualified":false}';
+        ResponseText:='{"objects":'+BuildJSONArray(Rows)+',"scope":"existing_object_on_requested_layer","prospective_geometry_qualified":false}';
     finally Rows.Free; Fields.Free; Lines.Free; end;
 end;
 
-function RoutingSelect(Board : IPCB_Board; Directory : String; Zoom : Boolean) : String;
+procedure RoutingSelect(Board : IPCB_Board; Directory : String; Zoom : Boolean; var ResponseText : String);
 var Lines, Fields, MatchesList : TStringList; Iterator : IPCB_BoardIterator;
     Primitive : IPCB_Primitive; Kinds, Nets, Geometries : array[1..256] of String;
+    RequestedNet : IPCB_Net;
     I, Count, SelectedCount : Integer; Wanted : Boolean;
 begin
+    ResponseText:='';
     Lines:=TStringList.Create; Fields:=TStringList.Create; MatchesList:=TStringList.Create;
     try
         Lines.LoadFromFile(Directory+'\selectors.tsv'); Count:=Lines.Count-1;
-        if (Count<1) or (Count>256) then RoutingFail('Selection requires 1-256 selectors.');
+        if (Count<1) or (Count>256) then begin RoutingFail('Selection requires 1-256 selectors.'); Exit; end;
         for I:=1 to Count do
         begin
             RoutingSplit(Lines[I],#9,Fields);
-            if Fields.Count<>4 then RoutingFail('Selection requires four columns.');
+            if Fields.Count<>4 then begin RoutingFail('Selection requires four columns.'); Exit; end;
             Kinds[I]:=Fields[0]; Nets[I]:=Fields[1]; Geometries[I]:=Fields[2];
-            RoutingFindNet(Board,Nets[I]); MatchesList.Add('0');
+            RequestedNet:=RoutingFindNet(Board,Nets[I]); if RoutingFailure<>'' then Exit; MatchesList.Add('0');
         end;
         { Resolve every selector before replacing the user's selection. }
         Iterator:=Board.BoardIterator_Create;
@@ -491,8 +518,8 @@ begin
                 Primitive:=Iterator.NextPCBObject;
             end;
         finally Board.BoardIterator_Destroy(Iterator); end;
-        for I:=0 to Count-1 do if MatchesList[I]='0' then RoutingFail('A selector matched no primitives; selection preserved.');
-        RoutingRequireActive(Board);
+        for I:=0 to Count-1 do if MatchesList[I]='0' then begin RoutingFail('A selector matched no primitives; selection preserved.'); Exit; end;
+        RoutingRequireActive(Board); if RoutingFailure<>'' then Exit;
         Iterator:=Board.BoardIterator_Create;
         try
             Iterator.AddFilter_ObjectSet(AllPrimitives); Iterator.AddFilter_LayerSet(AllLayers); Iterator.AddFilter_Method(eProcessAll);
@@ -522,97 +549,91 @@ begin
         finally Board.BoardIterator_Destroy(Iterator); end;
         if Zoom then Client.SendMessage('PCB:Zoom','Action=Selected',255,Client.CurrentView)
         else Client.SendMessage('PCB:Zoom','Action=Redraw',255,Client.CurrentView);
-        Result:='{"selected_count":'+IntToStr(SelectedCount)+',"saved":false}';
+        ResponseText:='{"selected_count":'+IntToStr(SelectedCount)+',"saved":false}';
     finally MatchesList.Free; Fields.Free; Lines.Free; end;
 end;
 
-function RoutingBatch(Board : IPCB_Board; Directory, SnapshotID, RequestID : String; var Completed : Integer) : String;
+procedure RoutingBatch(Board : IPCB_Board; Directory, SnapshotID, RequestID : String; var Completed : Integer; var ResponseText : String);
 var Lines, Fields, Values, Audit : TStringList; I, J, Count, Matches : Integer;
     Kinds, Actions, Nets, OldGeometry, NewGeometry : array[1..256] of String;
     Targets, Candidates : array[1..256] of IPCB_Primitive;
     TargetNets : array[1..256] of IPCB_Net;
     Primitive, Existing : IPCB_Primitive; Track : IPCB_Track; Via : IPCB_Via;
-    WidthRule : IPCB_MaxMinWidthConstraint; ActiveBoard : IPCB_Board;
+    WidthRule : IPCB_MaxMinWidthConstraint; AllowViaInPad : Boolean;
 begin
+    ResponseText:='';
     Lines:=TStringList.Create; Fields:=TStringList.Create; Values:=TStringList.Create; Audit:=TStringList.Create;
     Count:=0; Completed:=0;
+    AllowViaInPad:=Params.Values['allow_via_in_pad']='true';
     for I:=1 to 256 do begin Targets[I]:=nil; Candidates[I]:=nil; end;
     try
-        RoutingCheckBaseline(Board,Directory);
+        RoutingCheckBaseline(Board,Directory); if RoutingFailure<>'' then Exit;
         Lines.LoadFromFile(Directory+'\operations.tsv'); Count:=Lines.Count-1;
-        if (Count<1) or (Count>256) then RoutingFail('Batch requires 1-256 rows.');
-        if Lines[0]<>'kind'+#9+'action'+#9+'net'+#9+'old_geometry'+#9+'new_geometry' then RoutingFail('Invalid batch header.');
+        if (Count<1) or (Count>256) then begin RoutingFail('Batch requires 1-256 rows.'); Exit; end;
+        if Lines[0]<>'kind'+#9+'action'+#9+'net'+#9+'old_geometry'+#9+'new_geometry' then begin RoutingFail('Invalid batch header.'); Exit; end;
         Audit.Add('row'+#9+'kind'+#9+'action'+#9+'result');
         for I:=1 to Count do
         begin
             RoutingStatus(Directory,RequestID,'preflight',I,Completed);
             RoutingSplit(Lines[I],#9,Fields);
-            if Fields.Count<>5 then RoutingFail('Batch row requires five columns.');
+            if Fields.Count<>5 then begin RoutingFail('Batch row requires five columns.'); Exit; end;
             Kinds[I]:=Fields[0]; Actions[I]:=Fields[1]; Nets[I]:=Fields[2];
             OldGeometry[I]:=Fields[3]; NewGeometry[I]:=Fields[4];
-            if (Kinds[I]<>'track') and (Kinds[I]<>'via') then RoutingFail('Unsupported batch primitive.');
-            if (Actions[I]<>'add') and (Actions[I]<>'edit') and (Actions[I]<>'remove') then RoutingFail('Unsupported batch action.');
+            if (Kinds[I]<>'track') and (Kinds[I]<>'via') then begin RoutingFail('Unsupported batch primitive.'); Exit; end;
+            if (Actions[I]<>'add') and (Actions[I]<>'edit') and (Actions[I]<>'remove') then begin RoutingFail('Unsupported batch action.'); Exit; end;
             if Nets[I]<>'' then TargetNets[I]:=RoutingFindNet(Board,Nets[I]) else TargetNets[I]:=nil;
-            if (Actions[I]='add') and (TargetNets[I]=nil) then RoutingFail('New copper requires an assigned net.');
+            if RoutingFailure<>'' then Exit;
+            if (Actions[I]='add') and (TargetNets[I]=nil) then begin RoutingFail('New copper requires an assigned net.'); Exit; end;
             if Actions[I]<>'add' then
             begin
                 Targets[I]:=RoutingFind(Board,Kinds[I],Nets[I],OldGeometry[I],Matches);
-                if Matches<>1 then RoutingFail('Old target does not resolve exactly once.');
+                if Matches<>1 then begin RoutingFail('Old target does not resolve exactly once.'); Exit; end;
                 for J:=1 to I-1 do
                     if Targets[J]<>nil then
-                        if Targets[J].I_ObjectAddress=Targets[I].I_ObjectAddress then RoutingFail('Repeated old target.');
+                        if Targets[J].I_ObjectAddress=Targets[I].I_ObjectAddress then begin RoutingFail('Repeated old target.'); Exit; end;
             end
-            else if OldGeometry[I]<>'-' then RoutingFail('Add must omit old geometry.');
+            else if OldGeometry[I]<>'-' then begin RoutingFail('Add must omit old geometry.'); Exit; end;
             if Actions[I]<>'remove' then
             begin
                 if Kinds[I]='track' then Candidates[I]:=PCBServer.PCBObjectFactory(eTrackObject,eNoDimension,eCreate_Default)
                 else Candidates[I]:=PCBServer.PCBObjectFactory(eViaObject,eNoDimension,eCreate_Default);
-                if Candidates[I]=nil then RoutingFail('Primitive factory failed.');
-                Candidates[I].Net:=TargetNets[I]; RoutingSetGeometry(Candidates[I],NewGeometry[I]);
-                if RoutingGeometry(Candidates[I])<>NewGeometry[I] then RoutingFail('Noncanonical geometry request.');
-                if Kinds[I]='track' then
-                begin
-                    Track:=Candidates[I];
-                    WidthRule:=Board.FindDominantRuleForObject(Track,eRule_MaxMinWidth);
-                    if WidthRule=nil then RoutingFail('No dominant width rule for proposed track geometry.');
-                    if (Track.Width<WidthRule.MinWidth(Track.Layer)) or (Track.Width>WidthRule.MaxWidth(Track.Layer)) then RoutingFail('Track width is outside its native dominant rule.');
-                end
-                else
+                if Candidates[I]=nil then begin RoutingFail('Primitive factory failed.'); Exit; end;
+                Candidates[I].Net:=TargetNets[I]; RoutingSetGeometry(Candidates[I],NewGeometry[I]); if RoutingFailure<>'' then Exit;
+                if RoutingGeometry(Candidates[I])<>NewGeometry[I] then begin RoutingFail('Noncanonical geometry request.'); Exit; end;
+                if Kinds[I]='via' then
                 begin
                     Via:=Candidates[I];
-                    RoutingCheckViaCenter(Board,Candidates[I],Targets[I],Params.Values['allow_via_in_pad']='true');
+                    RoutingCheckViaCenter(Board,Candidates[I],Targets[I],AllowViaInPad); if RoutingFailure<>'' then Exit;
                     if Actions[I]='add' then
-                        if (Via.LowLayer<>eTopLayer) or (Via.HighLayer<>eBottomLayer) then RoutingFail('New vias support through span only.');
+                        if (Via.LowLayer<>eTopLayer) or (Via.HighLayer<>eBottomLayer) then begin RoutingFail('New vias support through span only.'); Exit; end;
                     if Actions[I]='edit' then
                     begin
                         Via:=Targets[I];
                         RoutingSplit(NewGeometry[I],',',Values);
-                        if (Via.LowLayer<>StrToInt(Values[4])) or (Via.HighLayer<>StrToInt(Values[5])) then RoutingFail('Via edits must preserve drill span.');
+                        if (Via.LowLayer<>StrToInt(Values[4])) or (Via.HighLayer<>StrToInt(Values[5])) then begin RoutingFail('Via edits must preserve drill span.'); Exit; end;
                     end;
                 end;
                 Existing:=RoutingFind(Board,Kinds[I],Nets[I],NewGeometry[I],Matches);
                 if Matches>0 then
                 begin
-                    if Targets[I]=nil then RoutingFail('Destination already exists.');
-                    if Matches<>1 then RoutingFail('Destination is ambiguous.');
-                    if Existing.I_ObjectAddress<>Targets[I].I_ObjectAddress then RoutingFail('Destination already exists.');
+                    if Targets[I]=nil then begin RoutingFail('Destination already exists.'); Exit; end;
+                    if Matches<>1 then begin RoutingFail('Destination is ambiguous.'); Exit; end;
+                    if Existing.I_ObjectAddress<>Targets[I].I_ObjectAddress then begin RoutingFail('Destination already exists.'); Exit; end;
                 end;
                 for J:=1 to I-1 do
-                    if (Kinds[J]=Kinds[I]) and (NewGeometry[J]=NewGeometry[I]) then RoutingFail('Repeated destination.');
+                    if (Kinds[J]=Kinds[I]) and (NewGeometry[J]=NewGeometry[I]) then begin RoutingFail('Repeated destination.'); Exit; end;
             end
-            else if NewGeometry[I]<>'-' then RoutingFail('Remove must omit new geometry.');
+            else if NewGeometry[I]<>'-' then begin RoutingFail('Remove must omit new geometry.'); Exit; end;
             Audit.Add(IntToStr(I)+#9+Kinds[I]+#9+Actions[I]+#9+'preflight_ok');
         end;
         Audit.SaveToFile(Directory+'\batch-audit.tsv');
         { The sole writer rechecks all baseline records immediately before writes. }
-        RoutingCheckBaseline(Board,Directory);
+        RoutingCheckBaseline(Board,Directory); if RoutingFailure<>'' then Exit;
         for I:=1 to Count do
         begin
-            ActiveBoard:=PCBServer.GetCurrentPCBBoard;
-            if ActiveBoard=nil then RoutingFail('Activate the exact requested PCB before applying a batch.');
-            if UpperCase(ActiveBoard.FileName)<>UpperCase(Board.FileName) then RoutingFail('Active PCB changed.');
+            RoutingRequireActive(Board); if RoutingFailure<>'' then Exit;
             if Targets[I]<>nil then
-                if (RoutingNet(Targets[I])<>Nets[I]) or (RoutingGeometry(Targets[I])<>OldGeometry[I]) then RoutingFail('Target changed during batch.');
+                if (RoutingNet(Targets[I])<>Nets[I]) or (RoutingGeometry(Targets[I])<>OldGeometry[I]) then begin RoutingFail('Target changed during batch.'); Exit; end;
             RoutingStatus(Directory,RequestID,'applying_partial_changes_possible',I,Completed);
             Audit[I]:=IntToStr(I)+#9+Kinds[I]+#9+Actions[I]+#9+'mutation_attempted';
             Audit.SaveToFile(Directory+'\batch-audit.tsv');
@@ -627,48 +648,63 @@ begin
                 else if Actions[I]='add' then
                 begin
                     Primitive:=Candidates[I]; Board.AddPCBObject(Primitive);
-                    PCBServer.SendMessageToRobots(Board.I_ObjectAddress,c_Broadcast,PCBM_BoardRegisteration,Primitive.I_ObjectAddress);
                     Candidates[I]:=nil;
-                    if RoutingGeometry(Primitive)<>NewGeometry[I] then RoutingFail('Added primitive readback failed.');
+                    PCBServer.SendMessageToRobots(Board.I_ObjectAddress,c_Broadcast,PCBM_BoardRegisteration,Primitive.I_ObjectAddress);
+                    if RoutingGeometry(Primitive)<>NewGeometry[I] then begin RoutingFail('Added primitive readback failed.'); Exit; end;
                 end
                 else
                 begin
                     Primitive:=Targets[I];
                     PCBServer.SendMessageToRobots(Primitive.I_ObjectAddress,c_Broadcast,PCBM_BeginModify,c_NoEventData);
-                    try RoutingSetGeometry(Primitive,NewGeometry[I]);
+                    try RoutingSetGeometry(Primitive,NewGeometry[I]); if RoutingFailure<>'' then Exit;
                     finally PCBServer.SendMessageToRobots(Primitive.I_ObjectAddress,c_Broadcast,PCBM_EndModify,c_NoEventData); end;
-                    if RoutingGeometry(Primitive)<>NewGeometry[I] then RoutingFail('Edited primitive readback failed.');
+                    if RoutingGeometry(Primitive)<>NewGeometry[I] then begin RoutingFail('Edited primitive readback failed.'); Exit; end;
                 end;
             finally PCBServer.PostProcess; end;
+            { Dominant-rule lookup requires an attached object in AD 26.11.1.
+              This is post-write validation: failure leaves the attempted row
+              explicitly partial, with its Undo transaction and audit intact. }
+            if (Kinds[I]='track') and (Actions[I]<>'remove') then
+            begin
+                Track:=Primitive;
+                WidthRule:=Board.FindDominantRuleForObject(Track,eRule_MaxMinWidth);
+                if WidthRule=nil then
+                begin RoutingFail('Attached track has no dominant width rule; inspect the attempted row and Undo before retrying.'); Exit; end;
+                if (Track.Width<WidthRule.MinWidth(Track.Layer)) or (Track.Width>WidthRule.MaxWidth(Track.Layer)) then
+                begin RoutingFail('Applied track width is outside its native dominant rule; inspect the attempted row and Undo before retrying.'); Exit; end;
+            end;
             Inc(Completed);
             Audit[I]:=IntToStr(I)+#9+Kinds[I]+#9+Actions[I]+#9+'readback_pending_exact_batch_comparison';
             Audit.SaveToFile(Directory+'\batch-audit.tsv');
         end;
-        RoutingExport(Board,Directory,SnapshotID);
+        RoutingExport(Board,Directory,SnapshotID); if RoutingFailure<>'' then Exit;
         RoutingStatus(Directory,RequestID,'complete_native_drc_not_checked',Count,Completed);
         Client.SendMessage('PCB:Zoom','Action=Redraw',255,Client.CurrentView);
-        Result:='{"applied":true,"completed_rows":'+IntToStr(Completed)+',"native_drc_checked":false,"saved":false}';
+        ResponseText:='{"applied":true,"completed_rows":'+IntToStr(Completed)+',"native_drc_checked":false,"saved":false}';
     finally
         { Factory objects never added to the board are released exactly once. }
-        for I:=1 to Count do if Candidates[I]<>nil then PCBServer.DestroyPCBObject(Candidates[I]);
+        for I:=1 to 256 do if Candidates[I]<>nil then PCBServer.DestroyPCBObject(Candidates[I]);
         Audit.Free; Values.Free; Fields.Free; Lines.Free;
     end;
 end;
 
-function RoutingPolygonOutline(Board : IPCB_Board; Directory, SnapshotID, RequestID : String; var Completed : Integer) : String;
+procedure RoutingPolygonOutline(Board : IPCB_Board; Directory, SnapshotID, RequestID : String; var Completed : Integer; var ResponseText : String);
 var Lines, Fields, Vertices : TStringList; Iterator : IPCB_BoardIterator;
     Polygon, Target : IPCB_Polygon; Net : IPCB_Net; Segment : TPolySegment;
     I, Matches, LayerID : Integer; Name, OldDefinition, Action : String;
+    DetachedTarget : Boolean;
 begin
-    Lines:=TStringList.Create; Fields:=TStringList.Create; Vertices:=TStringList.Create; Target:=nil;
+    ResponseText:='';
+    Lines:=TStringList.Create; Fields:=TStringList.Create; Vertices:=TStringList.Create; Target:=nil; DetachedTarget:=False;
     try
-        RoutingCheckBaseline(Board,Directory);
+        RoutingCheckBaseline(Board,Directory); if RoutingFailure<>'' then Exit;
         Lines.LoadFromFile(Directory+'\polygon.tsv');
-        if (Lines.Count<5) or (Lines.Count>258) then RoutingFail('Polygon requires header, settings, and 3-256 vertices.');
+        if (Lines.Count<5) or (Lines.Count>258) then begin RoutingFail('Polygon requires header, settings, and 3-256 vertices.'); Exit; end;
         RoutingSplit(Lines[1],#9,Fields);
-        if Fields.Count<>5 then RoutingFail('Polygon settings require five fields.');
+        if Fields.Count<>5 then begin RoutingFail('Polygon settings require five fields.'); Exit; end;
         Action:=Fields[0]; Name:=Fields[1]; Net:=RoutingFindNet(Board,Fields[2]); LayerID:=StrToInt(Fields[3]); OldDefinition:=Fields[4];
-        if (Action<>'add') and (Action<>'edit') then RoutingFail('Unsupported polygon action.');
+        if RoutingFailure<>'' then Exit;
+        if (Action<>'add') and (Action<>'edit') then begin RoutingFail('Unsupported polygon action.'); Exit; end;
         Matches:=0; Iterator:=Board.BoardIterator_Create;
         try
             Iterator.AddFilter_ObjectSet(MkSet(ePolyObject)); Iterator.AddFilter_LayerSet(AllLayers); Iterator.AddFilter_Method(eProcessAll);
@@ -679,26 +715,27 @@ begin
                 Polygon:=Iterator.NextPCBObject;
             end;
         finally Board.BoardIterator_Destroy(Iterator); end;
-        if (Action='add') and (Matches<>0) then RoutingFail('Polygon name already exists.');
+        if (Action='add') and (Matches<>0) then begin RoutingFail('Polygon name already exists.'); Exit; end;
         if Action='edit' then
         begin
-            if Matches<>1 then RoutingFail('Polygon name must resolve exactly once.');
-            if (RoutingPolygonDefinition(Target)<>OldDefinition) or (Target.Layer<>LayerID) or (RoutingNet(Target)<>Net.Name) then RoutingFail('Polygon target changed.');
+            if Matches<>1 then begin RoutingFail('Polygon name must resolve exactly once.'); Exit; end;
+            if (RoutingPolygonDefinition(Target)<>OldDefinition) or (Target.Layer<>LayerID) or (RoutingNet(Target)<>Net.Name) then begin RoutingFail('Polygon target changed.'); Exit; end;
         end;
         for I:=2 to Lines.Count-1 do
         begin
             RoutingSplit(Lines[I],#9,Fields);
-            if Fields.Count<>2 then RoutingFail('Vertex requires two integers.');
+            if Fields.Count<>2 then begin RoutingFail('Vertex requires two integers.'); Exit; end;
             StrToInt(Fields[0]); StrToInt(Fields[1]); Vertices.Add(Lines[I]);
         end;
-        RoutingRequireActive(Board);
+        RoutingRequireActive(Board); if RoutingFailure<>'' then Exit;
         RoutingStatus(Directory,RequestID,'polygon_mutation_attempted',1,Completed);
         PCBServer.PreProcess;
         try
             if Action='add' then
             begin
                 Target:=PCBServer.PCBObjectFactory(ePolyObject,eNoDimension,eCreate_Default);
-                if Target=nil then RoutingFail('Polygon factory failed.');
+                if Target=nil then begin RoutingFail('Polygon factory failed.'); Exit; end;
+                DetachedTarget:=True;
                 Target.Name:=Name; Target.Net:=Net; Target.Layer:=LayerID;
                 Target.SetState_PolygonType(eSignalLayerPolygon); Target.SetState_PolyHatchStyle(ePolySolid);
                 Target.SetState_PourOver(ePolygonPourOver_SameNet); Target.SetState_RemoveDead(True);
@@ -719,61 +756,148 @@ begin
             end;
             if Action='add' then
             begin
-                Board.AddPCBObject(Target);
+                Board.AddPCBObject(Target); DetachedTarget:=False;
                 PCBServer.SendMessageToRobots(Board.I_ObjectAddress,c_Broadcast,PCBM_BoardRegisteration,Target.I_ObjectAddress);
             end;
         finally PCBServer.PostProcess; end;
-        Completed:=1; RoutingExport(Board,Directory,SnapshotID);
+        Completed:=1; RoutingExport(Board,Directory,SnapshotID); if RoutingFailure<>'' then Exit;
         RoutingStatus(Directory,RequestID,'complete_repour_and_native_drc_required',1,Completed);
-        Result:='{"applied":true,"polygon_definition":'+RoutingQuote(RoutingPolygonDefinition(Target))+',"repour_required":true,"saved":false}';
-    finally Vertices.Free; Fields.Free; Lines.Free; end;
+        ResponseText:='{"applied":true,"polygon_definition":'+RoutingQuote(RoutingPolygonDefinition(Target))+',"repour_required":true,"saved":false}';
+    finally
+        if DetachedTarget then if Target<>nil then PCBServer.DestroyPCBObject(Target);
+        Vertices.Free; Fields.Free; Lines.Free;
+    end;
 end;
 
-function ExecutePCBRouting : String;
-var Board, ActiveBoard : IPCB_Board; Operation, Directory, SnapshotID, RequestID : String;
+procedure RoutingCopperStats(Board : IPCB_Board; Path : String; var PolygonCount, ChildCount, RegionCount : Integer);
+var Iterator : IPCB_BoardIterator; Children : IPCB_GroupIterator;
+    Polygon : IPCB_Polygon; Primitive : IPCB_Primitive; Rows : TStringList;
+    Tracks, Arcs, Regions, Fills : Integer;
+begin
+    PolygonCount:=0; ChildCount:=0; RegionCount:=0;
+    Rows:=TStringList.Create;
+    try
+        Rows.Add('name'+#9+'net'+#9+'layer_id'+#9+'tracks'+#9+'arcs'+#9+'regions'+#9+'fills');
+        Iterator:=Board.BoardIterator_Create;
+        try
+            Iterator.AddFilter_ObjectSet(MkSet(ePolyObject));
+            Iterator.AddFilter_LayerSet(AllLayers); Iterator.AddFilter_Method(eProcessAll);
+            Polygon:=Iterator.FirstPCBObject;
+            while Polygon<>nil do
+            begin
+                Inc(PolygonCount); Tracks:=0; Arcs:=0; Regions:=0; Fills:=0;
+                Children:=Polygon.GroupIterator_Create;
+                try
+                    Children.AddFilter_ObjectSet(MkSet(eTrackObject,eArcObject,eRegionObject,eFillObject));
+                    Children.AddFilter_LayerSet(AllLayers);
+                    Primitive:=Children.FirstPCBObject;
+                    while Primitive<>nil do
+                    begin
+                        Inc(ChildCount);
+                        case Primitive.ObjectId of
+                            eTrackObject: Inc(Tracks);
+                            eArcObject: Inc(Arcs);
+                            eRegionObject: begin Inc(Regions); Inc(RegionCount); end;
+                            eFillObject: Inc(Fills);
+                        end;
+                        Primitive:=Children.NextPCBObject;
+                    end;
+                finally Polygon.GroupIterator_Destroy(Children); end;
+                Rows.Add(RoutingField(Polygon.Name)+#9+RoutingField(RoutingNet(Polygon))+#9+IntToStr(Polygon.Layer)+#9+
+                    IntToStr(Tracks)+#9+IntToStr(Arcs)+#9+IntToStr(Regions)+#9+IntToStr(Fills));
+                Polygon:=Iterator.NextPCBObject;
+            end;
+        finally Board.BoardIterator_Destroy(Iterator); end;
+        Rows.SaveToFile(Path);
+    finally Rows.Free; end;
+end;
+
+procedure RoutingExecute(Operation, Directory, SnapshotID, RequestID : String; var Completed : Integer; var DispatchText : String);
+var Board : IPCB_Board; Steps, UndoIndex, PolygonCount, BeforeChildren, AfterChildren, BeforeRegions, AfterRegions : Integer; WantZoom : Boolean;
+begin
+    DispatchText:='';
+    Board:=RoutingBoard(Params.Values['expected_board']);
+    if RoutingFailure<>'' then Exit;
+    RoutingStatus(Directory,RequestID,'started',0,0);
+    if Operation='snapshot' then
+    begin
+        RoutingExport(Board,Directory,SnapshotID); if RoutingFailure<>'' then Exit;
+        DispatchText:='{"exported":true,"snapshot_id":'+RoutingQuote(SnapshotID)+'}';
+    end
+    else if Operation='rules' then
+    begin
+        RoutingCheckBaseline(Board,Directory); if RoutingFailure<>'' then Exit;
+        RoutingRules(Board,Directory,DispatchText);
+    end
+    else if Operation='select' then
+    begin
+        RoutingCheckBaseline(Board,Directory); if RoutingFailure<>'' then Exit;
+        WantZoom:=Params.Values['zoom']='true';
+        RoutingSelect(Board,Directory,WantZoom,DispatchText);
+    end
+    else if Operation='batch' then
+    begin
+        RoutingBatch(Board,Directory,SnapshotID,RequestID,Completed,DispatchText);
+    end
+    else if Operation='polygon' then RoutingPolygonOutline(Board,Directory,SnapshotID,RequestID,Completed,DispatchText)
+    else if Operation='undo' then
+    begin
+        RoutingCheckBaseline(Board,Directory); if RoutingFailure<>'' then Exit;
+        Steps:=StrToInt(Params.Values['steps']);
+        if (Steps<1) or (Steps>256) then
+        begin RoutingFail('Undo requires 1-256 steps.'); Exit; end;
+        for UndoIndex:=1 to Steps do
+        begin
+            RoutingRequireActive(Board); if RoutingFailure<>'' then Exit;
+            RoutingStatus(Directory,RequestID,'undo_requested',UndoIndex,Completed);
+            ResetParameters;
+            RunProcess('PCB:Undo');
+            Inc(Completed);
+        end;
+        RoutingExport(Board,Directory,SnapshotID); if RoutingFailure<>'' then Exit;
+        RoutingStatus(Directory,RequestID,'complete_compare_restoration_required',Steps,Completed);
+        DispatchText:='{"undo_requested":'+IntToStr(Steps)+',"saved":false}';
+    end
+    else if Operation='repour' then
+    begin
+        RoutingCheckBaseline(Board,Directory); if RoutingFailure<>'' then Exit;
+        RoutingRequireActive(Board); if RoutingFailure<>'' then Exit;
+        RoutingCopperStats(Board,Directory+'\polygon-copper-before.tsv',PolygonCount,BeforeChildren,BeforeRegions);
+        RoutingStatus(Directory,RequestID,'repour_requested',0,0);
+        Client.SendMessage('PCB:ChangeObject','ContextObject=Polygon|Action=RepourAllPolygons',255,Client.CurrentView);
+        RoutingCopperStats(Board,Directory+'\polygon-copper-after.tsv',PolygonCount,AfterChildren,AfterRegions);
+        RoutingExport(Board,Directory,SnapshotID); if RoutingFailure<>'' then Exit;
+        RoutingStatus(Directory,RequestID,'complete_native_drc_not_checked',0,0);
+        DispatchText:='{"repour_requested":true,"native_drc_checked":false,"saved":false,"copper_observations":'+
+            '{"polygon_count":'+IntToStr(PolygonCount)+',"before_child_count":'+IntToStr(BeforeChildren)+
+            ',"after_child_count":'+IntToStr(AfterChildren)+',"before_region_count":'+IntToStr(BeforeRegions)+
+            ',"after_region_count":'+IntToStr(AfterRegions)+'}}';
+    end
+    else begin RoutingFail('Unsupported routing operation.'); Exit; end;
+end;
+
+procedure ExecutePCBRouting(var ReplyText : String);
+var Operation, Directory, SnapshotID, RequestID, ResponseText : String;
     Completed : Integer;
 begin
     Operation:=Params.Values['operation']; Directory:=Params.Values['operation_directory'];
     SnapshotID:=Params.Values['snapshot_id']; RequestID:=Params.Values['request_id'];
-    if not DirectoryExists(Directory) then begin Result:='ERROR: Operation directory does not exist.'; Exit; end;
-    Completed:=0; RoutingFailure:='';
+    RoutingFailure:=''; Completed:=0; ResponseText:='';
+    if not DirectoryExists(Directory) then
+    begin ReplyText:='ERROR: Operation directory does not exist.'; Exit; end;
     try
-        Board:=RoutingBoard(Params.Values['expected_board']);
-        RoutingStatus(Directory,RequestID,'started',0,0);
-        if Operation='snapshot' then
-        begin
-            RoutingExport(Board,Directory,SnapshotID);
-            Result:='{"exported":true,"snapshot_id":'+RoutingQuote(SnapshotID)+'}';
-        end
-        else if Operation='rules' then
-        begin
-            RoutingCheckBaseline(Board,Directory);
-            Result:=RoutingRules(Board,Directory);
-        end
-        else if Operation='select' then
-        begin
-            RoutingCheckBaseline(Board,Directory);
-            Result:=RoutingSelect(Board,Directory,Params.Values['zoom']='true');
-        end
-        else if Operation='batch' then Result:=RoutingBatch(Board,Directory,SnapshotID,RequestID,Completed)
-        else if Operation='polygon' then Result:=RoutingPolygonOutline(Board,Directory,SnapshotID,RequestID,Completed)
-        else if Operation='repour' then
-        begin
-            RoutingCheckBaseline(Board,Directory);
-            ActiveBoard:=PCBServer.GetCurrentPCBBoard;
-            if ActiveBoard=nil then RoutingFail('Activate the exact PCB before repouring.');
-            if UpperCase(ActiveBoard.FileName)<>UpperCase(Board.FileName) then RoutingFail('Wrong active PCB for repour.');
-            RoutingStatus(Directory,RequestID,'repour_requested',0,0);
-            Client.SendMessage('PCB:ChangeObject','ContextObject=Polygon|Action=RepourAllPolygons',255,Client.CurrentView);
-            RoutingExport(Board,Directory,SnapshotID);
-            RoutingStatus(Directory,RequestID,'complete_native_drc_not_checked',0,0);
-            Result:='{"repour_requested":true,"native_drc_checked":false,"saved":false}';
-        end
-        else RoutingFail('Unsupported routing operation.');
-        if (Operation='snapshot') or (Operation='rules') or (Operation='select') then RoutingStatus(Directory,RequestID,'complete',0,0);
+        RoutingExecute(Operation,Directory,SnapshotID,RequestID,Completed,ResponseText);
     except
-        if RoutingFailure='' then RoutingFailure:='Native API or file call failed; inspect operation status and exact PCB before retry.';
-        RoutingStatus(Directory,RequestID,'failed_inspect_artifacts_before_retry',0,Completed);
-        Result:='ERROR: '+RoutingFailure;
+        RoutingFail('Native API or file call failed; inspect exact PCB and operation artifacts before retry.');
     end;
+    if RoutingFailure='' then
+        if Copy(ResponseText,1,1)<>'{' then RoutingFail('Native routing returned an invalid response object.');
+    if RoutingFailure<>'' then
+    begin
+        RoutingStatus(Directory,RequestID,'failed_inspect_artifacts_before_retry',0,Completed);
+        ResponseText:='ERROR: '+RoutingFailure;
+    end
+    else if (Operation='snapshot') or (Operation='rules') or (Operation='select') then
+        RoutingStatus(Directory,RequestID,'complete',0,Completed);
+    ReplyText:=ResponseText;
 end;

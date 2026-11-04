@@ -232,6 +232,59 @@ class SnapshotTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "through span"):
             plan_batch(before, [dict(kind="via", action="add", new=via)])
 
+    def test_batch_rejects_unrequested_same_net_arc_removal(self):
+        tables = example_tables()
+        tables["arcs"] = [
+            dict(
+                net="Signal",
+                x_raw="1000",
+                y_raw="2000",
+                radius_raw="500",
+                start_angle="0",
+                end_angle="90",
+                width_raw="100",
+                layer_id="1",
+                selected="false",
+            )
+        ]
+        before = write_snapshot(self.root / "before", tables)
+        old = before["tables"]["tracks"][0]
+        plan = plan_batch(
+            before,
+            [
+                dict(
+                    kind="track", action="edit", old=old, new=dict(old, width_raw="150")
+                )
+            ],
+        )
+        tables["tracks"][0]["width_raw"] = "150"
+        tables["arcs"] = []
+        after = write_snapshot(self.root / "after", tables)
+        self.assertFalse(reconcile_batch(before, after, plan)["verified"])
+
+    def test_offcenter_via_overlapping_pad_requires_same_net_allowance(self):
+        before = write_snapshot(self.root / "before")
+        via = dict(
+            before["tables"]["vias"][0],
+            net="Signal",
+            x_raw="1050",
+            y_raw="2000",
+            size_raw="100",
+            hole_size_raw="20",
+        )
+        operations = [dict(kind="via", action="add", new=via)]
+        with self.assertRaisesRegex(ValueError, "Via in pad"):
+            plan_batch(before, operations)
+        self.assertEqual(
+            1, len(plan_batch(before, operations, allow_via_in_pad=True)["operations"])
+        )
+        with self.assertRaisesRegex(ValueError, "Via in pad"):
+            plan_batch(
+                before,
+                [dict(kind="via", action="add", new=dict(via, net="GND"))],
+                allow_via_in_pad=True,
+            )
+
     def test_reversed_endpoint_targets_are_identical(self):
         row = example_tables()["tracks"][0]
         reverse = dict(row, x1_raw=row["x2_raw"], x2_raw=row["x1_raw"])
@@ -330,6 +383,102 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.patch.start()
         self.addCleanup(self.patch.stop)
         self.before = write_snapshot(self.root / "before")
+
+    async def test_undo_dry_run_does_not_touch_native_stack(self):
+        native = AsyncMock()
+        service = workflow.RoutingService(native)
+        for steps in (0, 257, True):
+            with self.assertRaises(ValueError):
+                await service.undo(self.root / "before", steps)
+        result = await service.undo(self.root / "before", 6)
+        self.assertFalse(result["applied"])
+        native.assert_not_awaited()
+
+    async def test_undo_exports_actual_readback_on_the_bound_board(self):
+        async def native(command, params):
+            self.assertEqual("undo", params["operation"])
+            self.assertEqual(
+                self.before["board"]["board_file"], params["expected_board"]
+            )
+            self.assertEqual("6", params["steps"])
+            write_snapshot(
+                params["operation_directory"],
+                example_tables(),
+                params["snapshot_id"],
+                seal=False,
+            )
+            return dict(success=True, result=dict(undo_requested=6))
+
+        result = await workflow.RoutingService(native).undo(
+            self.root / "before", 6, True
+        )
+        self.assertEqual(6, result["undo_requested"])
+        self.assertFalse(result["saved"])
+        self.assertTrue(
+            audit.read_snapshot(Path(result["snapshot_directory"]))["manifest"]
+        )
+
+    async def test_polygon_readback_rejects_wrong_target_and_collateral_copper(self):
+        vertices = [[0, 0], [100, 0], [100, 100], [0, 100]]
+        for defect in (
+            "none",
+            "net",
+            "layer",
+            "arc_segment",
+            "track",
+            "arc",
+            "settings",
+        ):
+            with self.subTest(defect=defect):
+
+                async def native(command, params):
+                    tables = example_tables()
+                    segments = [
+                        f"{1 if defect == 'arc_segment' else 0},{x},{y},0,0,0,0,0"
+                        for x, y in vertices
+                    ]
+                    tables["polygons"] = [
+                        dict(
+                            name="P1",
+                            net="Signal" if defect == "net" else "GND",
+                            layer_id="32" if defect == "layer" else "1",
+                            definition=(
+                                "0,0,1,true,0,200000,10000,30000,false,true,250000000000,true,50000,5000"
+                                if defect == "settings"
+                                else "0,5,1,true,0,200000,10000,30000,false,true,250000000000,true,50000,5000"
+                            )
+                            + ";"
+                            + ";".join(segments),
+                        )
+                    ]
+                    if defect == "track":
+                        tables["tracks"].append(dict(tables["tracks"][0], net="GND"))
+                    if defect == "arc":
+                        tables["arcs"] = [
+                            dict(
+                                net="GND",
+                                x_raw="1000",
+                                y_raw="2000",
+                                radius_raw="500",
+                                start_angle="0",
+                                end_angle="90",
+                                width_raw="100",
+                                layer_id="1",
+                                selected="false",
+                            )
+                        ]
+                    write_snapshot(
+                        params["operation_directory"],
+                        tables,
+                        params["snapshot_id"],
+                        seal=False,
+                    )
+                    return dict(success=True, result=dict(applied=True))
+
+                result = await workflow.RoutingService(native).polygon(
+                    self.root / "before", "P1", "GND", 1, vertices, True
+                )
+                self.assertEqual(defect == "none", result["verified"])
 
     async def test_dry_run_never_sends_a_native_command(self):
         native = AsyncMock()
@@ -480,6 +629,31 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(second["success"])
         self.assertEqual(1, launcher.await_count)
         self.assertTrue(transport.status()["pending"])
+
+    async def test_native_mutation_has_a_separate_response_deadline(self):
+        jobs = []
+
+        async def launch():
+            request = json.loads(
+                (self.root / "request.json").read_text(encoding="utf-8-sig")
+            )
+
+            async def complete():
+                await asyncio.sleep(0.04)
+                atomic_json(
+                    self.root / f"response-{request['request_id']}.json",
+                    dict(success=True, request_id=request["request_id"]),
+                )
+
+            jobs.append(asyncio.create_task(complete()))
+            return True
+
+        transport = FileCommandTransport(
+            self.root, launch, timeout=0.01, poll=0.002, mutation_timeout=0.25
+        )
+        result = await transport.execute("pcb_routing", {"operation": "batch"})
+        await asyncio.gather(*jobs)
+        self.assertTrue(result["success"])
 
     async def test_terminal_response_allows_progress_after_timeout_without_replay(self):
         launch = AsyncMock(return_value=True)

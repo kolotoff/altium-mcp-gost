@@ -10,6 +10,7 @@ from copy import deepcopy
 import math
 
 from .routing_audit import compare_snapshots, records
+from .routing_geometry import via_overlaps_pad_bounds
 
 
 GEOMETRY_FIELDS = {
@@ -179,7 +180,7 @@ def plan_batch(before, operations, *, allow_via_in_pad=False):
                     ):
                         raise ValueError("Via center is already occupied")
                 for pad in before["tables"]["pads"]:
-                    if (int(pad["x_raw"]), int(pad["y_raw"])) == center:
+                    if via_overlaps_pad_bounds(new, pad):
                         if not allow_via_in_pad or pad["net"] != net:
                             raise ValueError(
                                 "Via in pad requires explicit allowance and the same assigned net"
@@ -248,6 +249,8 @@ def reconcile_batch(before, after, plan):
         before, after, allowed_nets=plan["nets"] or None, allow_removals=True
     )
     mismatches = {}
+    if records(before["tables"]["arcs"]) != records(after["tables"]["arcs"]):
+        audit["regressions"].append("Unrequested arc changes during track/via batch")
     for table in ("tracks", "vias"):
         # Native legacy layer display strings are presentation, not geometry.
         fields = ("net",) + GEOMETRY_FIELDS["track" if table == "tracks" else "via"]

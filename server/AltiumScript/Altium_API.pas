@@ -1137,7 +1137,7 @@ begin
     Result := '';
     if CommandName = 'pcb_routing' then
     begin
-        Result := ExecutePCBRouting;
+        Result := 'ERROR: Routing requires the direct procedure dispatcher.';
         Exit;
     end;
     EnsureDocumentFocused(CommandName);
@@ -1311,7 +1311,7 @@ end;
 procedure Run;
 var
     CommandType: String;
-    Result: String;
+    CommandResult: String;
     i: Integer;
     Line: String;
     ValueStart: Integer;
@@ -1322,7 +1322,6 @@ begin
     // Check if request file exists
     if not FileExists(REQUEST_FILE) then
     begin
-        ShowMessage('Error: No request file found at ' + REQUEST_FILE);
         Exit;
     end;
 
@@ -1366,22 +1365,23 @@ begin
             // Execute the command if valid
             if CommandType <> '' then
             begin
-                Result := ExecuteCommand(CommandType);
+                if CommandType = 'pcb_routing' then
+                    ExecutePCBRouting(CommandResult)
+                else
+                    CommandResult := VarToStr(ExecuteCommand(CommandType));
 
-                if Result <> '' then
+                if CommandResult <> '' then
                 begin
-                    WriteResponse(True, Result, '');
+                    WriteResponse(True, CommandResult, '');
                 end
                 else
                 begin
                     WriteResponse(False, '', 'Command execution failed');
-                    ShowMessage('Error: Command execution failed');
                 end;
             end
             else
             begin
                 WriteResponse(False, '', 'No command specified');
-                ShowMessage('Error: No command specified');
             end;
         finally
             RequestData.Free;
@@ -1390,7 +1390,6 @@ begin
     except
         // Simple exception handling without the specific exception type
         WriteResponse(False, '', 'Exception occurred during script execution');
-        ShowMessage('Error: Exception occurred during script execution');
     end;
 end;
 

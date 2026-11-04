@@ -340,7 +340,9 @@ class AltiumBridge:
         # Load configuration
         self.config = AltiumConfig()
         self.config.verify_paths()
-        self._transport = FileCommandTransport(EXCHANGE_DIR, self.run_altium_script)
+        self._transport = FileCommandTransport(
+            EXCHANGE_DIR, self.run_altium_script, mutation_timeout=600
+        )
     
     async def execute_command(self, command: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """Serialize native commands and accept only their correlated response."""

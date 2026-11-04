@@ -318,18 +318,40 @@ class RoutingService:
         verified = len(actual) == 1
         if verified:
             segments = [s.split(",") for s in actual[0]["definition"].split(";")[1:]]
-            verified = [(int(s[1]), int(s[2])) for s in segments] == points
+            verified = (
+                actual[0]["net"] == net
+                and int(actual[0]["layer_id"]) == layer
+                and all(
+                    len(s) == 8 and s[0] == "0" and all(float(v) == 0 for v in s[3:])
+                    for s in segments
+                )
+                and [(int(s[1]), int(s[2])) for s in segments] == points
+            )
             if old:
                 verified = (
                     verified
                     and old["definition"].split(";")[0]
                     == actual[0]["definition"].split(";")[0]
                 )
+            else:
+                settings = actual[0]["definition"].split(";")[0].split(",")
+                # Native eSignalLayerPolygon, ePolySolid,
+                # ePolygonPourOver_SameNet, RemoveDead=True.
+                verified = (
+                    verified
+                    and len(settings) == 14
+                    and settings[:4] == ["0", "5", "1", "true"]
+                )
         before_other = [r for r in before["tables"]["polygons"] if r["name"] != name]
         after_other = [r for r in after["tables"]["polygons"] if r["name"] != name]
         verified = (
             verified
             and audit.records(before_other) == audit.records(after_other)
+            and all(
+                audit.records(before["tables"][table], track=table == "tracks")
+                == audit.records(after["tables"][table], track=table == "tracks")
+                for table in ("tracks", "vias", "arcs")
+            )
             and not comparison["regressions"]
         )
         write_json(
@@ -371,10 +393,52 @@ class RoutingService:
         return {
             "success": True,
             "repour_requested": True,
+            "copper_observations": result.get("copper_observations"),
             "snapshot_directory": str(directory),
             "regressions_requiring_review": comparison["regressions"],
             "native_drc_required": True,
             "saved": False,
+        }
+
+    async def undo(self, snapshot_directory, steps=1, apply=False, output=""):
+        before = audit.read_snapshot(Path(snapshot_directory))
+        steps = integer(steps, "steps")
+        if not 1 <= steps <= 256:
+            raise ValueError("Undo requires 1-256 steps")
+        directory = output_directory(output, "routing-undo")
+        _baseline(before, directory)
+        if not apply:
+            return {
+                "success": True,
+                "applied": False,
+                "steps": steps,
+                "operation_directory": str(directory),
+            }
+        snapshot_id = uuid.uuid4().hex
+        result = await self._native(
+            "undo",
+            before["board"]["board_file"],
+            directory,
+            snapshot_id,
+            steps=str(steps),
+        )
+        write_json(directory / "native-result.json", result)
+        if not result["success"]:
+            return result
+        audit.seal_inventory(directory, snapshot_id)
+        comparison = audit.compare_snapshots(
+            before,
+            audit.read_snapshot(directory),
+            allow_removals=True,
+            allow_polygon_changes=True,
+        )
+        write_json(directory / "comparison.json", comparison)
+        return {
+            "success": True,
+            "undo_requested": steps,
+            "snapshot_directory": str(directory),
+            "saved": False,
+            "verification": "Compare this snapshot with the intended pre-edit snapshot; an Undo request alone does not prove restoration.",
         }
 
 
@@ -489,14 +553,24 @@ def snapshot_observations(kind, snapshot_directory, output="", **options):
         "layer-usage.json" if kind == "layers" else "clearance-preview.json"
     )
     write_json(path, result)
+    compact = {
+        k: v
+        for k, v in result.items()
+        if k not in {"violations", "observations", "candidate_conflicts"}
+    }
+    if kind == "layers":
+        compact["layers"] = {
+            key: {
+                **{k: v for k, v in value.items() if k != "nets"},
+                "net_count": len(value["nets"]),
+                "sample_nets": value["nets"][:8],
+            }
+            for key, value in result["layers"].items()
+        }
     return {
         "success": True,
         "report_path": str(path),
-        **{
-            k: v
-            for k, v in result.items()
-            if k not in {"violations", "observations", "candidate_conflicts"}
-        },
+        **compact,
         "exception_count": len(result.get("violations", []))
         if kind == "layers"
         else result["modeled_conflict_count"],
@@ -515,6 +589,10 @@ def operation_status(operation_directory):
                 value = {
                     k: v for k, v in value.items() if k not in {"audit", "comparison"}
                 }
+            if name == "native-result.json" and "polygon_definition" in value:
+                definition = value.pop("polygon_definition")
+                value["polygon_vertex_count"] = len(definition.split(";")) - 1
+                value["full_result_path"] = str(path / name)
             result[name] = value
     result["snapshot_complete"] = (path / "manifest.json").exists()
     return result

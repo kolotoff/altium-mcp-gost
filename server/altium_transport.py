@@ -28,12 +28,18 @@ class FileCommandTransport:
     """
 
     def __init__(
-        self, directory: Path, launch, timeout: float = 120, poll: float = 0.1
+        self,
+        directory: Path,
+        launch,
+        timeout: float = 120,
+        poll: float = 0.1,
+        mutation_timeout: float | None = None,
     ):
         self.directory = Path(directory)
         self.launch = launch
         self.timeout = timeout
         self.poll = poll
+        self.mutation_timeout = mutation_timeout
         self._lock = asyncio.Lock()
         self._tasks = set()
 
@@ -162,7 +168,14 @@ class FileCommandTransport:
                 "error": "Failed to launch Altium script",
                 "request_id": request_id,
             }
-        deadline = time.monotonic() + self.timeout
+        timeout = self.timeout
+        if (
+            command == "pcb_routing"
+            and params.get("operation") in {"batch", "polygon", "repour", "undo"}
+            and self.mutation_timeout is not None
+        ):
+            timeout = max(timeout, self.mutation_timeout)
+        deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             response = self._response(request_id)
             if response is not None:

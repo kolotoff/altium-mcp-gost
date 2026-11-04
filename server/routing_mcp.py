@@ -175,7 +175,8 @@ def register_routing_tools(mcp, bridge):
 
         vertices_raw is [[x,y],...] in absolute native units. Existing polygons
         retain net, layer and pour settings; new polygons use solid same-net pour.
-        Default dry run. Does not repour or save; native DRC remains required.
+        Default dry run. Does not issue an explicit repour or save; native DRC
+        remains required. Altium's automatic pour settings can update copper.
         """
         return encode(
             await service.polygon(
@@ -254,6 +255,24 @@ def register_routing_tools(mcp, bridge):
         DRC. This tool never saves and is separate from read-only inventory.
         """
         return encode(await service.repour(snapshot_directory, apply, output_directory))
+
+    @tool
+    async def undo_pcb_routing(
+        ctx: Context,
+        snapshot_directory: str,
+        steps: int = 1,
+        apply: bool = False,
+        output_directory: str = "",
+    ) -> str:
+        """Request 1-256 native Undo steps on the exact active snapshot-bound PCB.
+
+        Default dry run. Checks the current baseline before touching the Undo
+        stack. Exports actual geometry afterwards; compare with the intended
+        pre-edit snapshot to prove restoration. Never saves or changes boards.
+        """
+        return encode(
+            await service.undo(snapshot_directory, steps, apply, output_directory)
+        )
 
     @tool
     async def preview_pcb_route_clearance(

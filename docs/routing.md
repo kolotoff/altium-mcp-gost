@@ -41,7 +41,9 @@ ledgers stay in artifacts; MCP responses contain counts and small samples.
 
 `expected_board` is a full Windows `.PcbDoc` path. The board must already be
 open. Routing operations never choose the first PCB in a project. Mutations,
-selection and repour also require that exact PCB to be active.
+selection and repour also require that exact PCB to be active in the focused
+document view. Batches recheck this before every row. Successful routing selection
+replaces the previous selection, including selected components and other objects.
 
 Coordinates and dimensions with `_raw` suffix are **absolute Altium integer
 coordinates**, independent of the user origin. Read `internal_units_per_mil`
@@ -91,9 +93,11 @@ First export a snapshot. Read exact rows from its tables, then pass operations:
 The numbers are illustrative; use the actual board's records and rules. `add`
 omits `old`; `remove` omits `new`. An edit preserves its net. Reversed track
 endpoints are equivalent. Repeated targets, duplicate destinations, stale targets,
-unknown nets and absent copper layers are rejected. Native proposed-track width
-checks use the dominant width getter, but detached-object scope resolution needs
-installed-runtime qualification and does not establish clearance acceptance.
+unknown nets and absent copper layers are rejected. Dominant width rules are
+queried on attached tracks after each native Undo transaction; detached candidates
+did not resolve a rule in AD 26.11.1. A failed width check can therefore leave an
+attempted row applied: inspect its audit and use guarded Undo before retrying.
+Width readback does not establish clearance or full DRC acceptance.
 
 Via records contain `net`, `x_raw`, `y_raw`, `size_raw`, `hole_size_raw`,
 `low_layer_id`, and `high_layer_id`. New vias currently support the standard
@@ -115,6 +119,10 @@ settings. New polygons use a solid same-net pour definition. Boundaries must be
 simple polygons with 3–256 distinct integer vertices; arc boundaries remain
 preserved in snapshots but cannot be authored by this outline tool. Repour is
 explicit and may change poured copper; inspect its fresh comparison and DRC.
+Outline editing does not issue a repour command; Altium's automatic pour settings
+can still update copper during native editing. Explicit repour records native
+polygon child/region counts before and after in `polygon-copper-before.tsv` and
+`polygon-copper-after.tsv`. Counts alone do not establish copper-shape correctness.
 
 ## Rule, layer and clearance observations
 
@@ -181,6 +189,31 @@ the selected policy passing, 1 for findings/regressions, and 2 for invalid input
 Specify a fresh absolute `--output-directory` under `generated/`, or omit it.
 
 ## Interrupted commands
+
+Expected validation failures return through the command channel without raising
+DelphiScript exceptions or opening message dialogs. The runner reports errors
+without `ShowMessage`. Unexpected native API/interpreter faults can still pause
+Altium's debugger: dismiss the error, open the script editor and choose
+**Run → Stop (Ctrl+F3)** before recovery. Closing the dialog alone does not stop
+the script. Do not launch another request while the debugger is paused.
+
+Routing commands enter the native procedure dispatcher directly from `Run` and
+pass response text through explicit output parameters. This avoids the nested
+function return corruption observed during selection in AD 26.11.1. A valid
+local JSON value did not guarantee the value received by its function caller;
+qualify the complete MCP response as well as the saved native artifacts.
+
+`undo_pcb_routing(snapshot_directory, steps=1, apply=false)` provides guarded
+native Undo. Live Undo checks the exact active PCB and baseline, requests a bounded
+number of steps, and exports fresh geometry. Compare that output with the intended
+pre-edit snapshot to verify restoration; requesting Undo alone is not proof.
+No document is saved. Batch, polygon, repour and Undo calls allow up to ten minutes
+for native work; their progress remains available through the status tools.
+
+Via-in-pad preflight uses conservative rotated top-pad rectangles and the via
+radius, including off-center overlap. Full custom pad stacks remain outside this
+approximation; explicit allowance requires the same net, and native DRC is still
+required.
 
 The bridge serializes callers within and across server processes. Every command
 gets a UUID, a correlated response path, and a persistent pending receipt. A

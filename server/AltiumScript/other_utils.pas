@@ -264,17 +264,21 @@ var
     Net      : IPCB_Net;
 begin
     Result := nil;
+    if (Board = nil) or (Name = '') then Exit;
     Iterator := Board.BoardIterator_Create;
-    Iterator.AddFilter_ObjectSet(MkSet(eNetObject));
-    Iterator.AddFilter_LayerSet(AllLayers);
-    Iterator.AddFilter_Method(eProcessAll);
-    Net := Iterator.FirstPCBObject;
-    while (Net <> nil) and (Result = nil) do
-    begin
-        if UpperCase(Net.Name) = UpperCase(Name) then Result := Net;
-        Net := Iterator.NextPCBObject;
+    try
+        Iterator.AddFilter_ObjectSet(MkSet(eNetObject));
+        Iterator.AddFilter_LayerSet(AllLayers);
+        Iterator.AddFilter_Method(eProcessAll);
+        Net := Iterator.FirstPCBObject;
+        while (Net <> nil) and (Result = nil) do
+        begin
+            if UpperCase(Net.Name) = UpperCase(Name) then Result := Net;
+            Net := Iterator.NextPCBObject;
+        end;
+    finally
+        Board.BoardIterator_Destroy(Iterator);
     end;
-    Board.BoardIterator_Destroy(Iterator);
 end;
 
 // The copper layer of Board called Name: its name in the layer stack
@@ -308,12 +312,14 @@ function FocusBoardForCommand(CommandName: String): Boolean;
 var
     P, I    : Integer;
     Project : IProject;
+    FocusedProject : IProject;
     Doc     : IDocument;
     Only    : IDocument;
     Last    : String;
     Names   : String;
     Count   : Integer;
     Shown   : IServerDocument;
+    Board   : IPCB_Board;
 begin
     Result := False;
     Last := RememberedBoard(0);
@@ -326,7 +332,8 @@ begin
         if Shown <> nil then
         begin
             Client.ShowDocument(Shown);
-            if FocusedBoard(0) <> nil then
+            Board := FocusedBoard(0);
+            if (Board <> nil) and (NormalizePath(Board.FileName) = NormalizePath(Last)) then
             begin
                 Result := True;
                 Exit;
@@ -337,17 +344,18 @@ begin
     Count := 0;
     Names := '';
     Only := nil;
+    FocusedProject := GetWorkspace.DM_FocusedProject;
     for P := -1 to GetWorkspace.DM_ProjectCount - 1 do
     begin
         if P < 0 then
-            Project := GetWorkspace.DM_FocusedProject
+            Project := FocusedProject
         else
         begin
-            // The focused project's boards come first; only without any
-            // are the other open projects searched
-            if Count > 0 then Break;
+            // Decide precedence after the focused project only. When it has
+            // no PCB, count candidates across every remaining project.
+            if (P = 0) and (Count > 0) then Break;
             Project := GetWorkspace.DM_Projects(P);
-            if Project = GetWorkspace.DM_FocusedProject then Continue;
+            if Project = FocusedProject then Continue;
         end;
         if Project = nil then Continue;
         for I := 0 to Project.DM_LogicalDocumentCount - 1 do
@@ -367,9 +375,10 @@ begin
     begin
         Only.DM_OpenAndFocusDocument;
         Sleep(500);
-        if FocusedBoard(0) <> nil then
+        Board := FocusedBoard(0);
+        if (Board <> nil) and (NormalizePath(Board.FileName) = NormalizePath(Only.DM_FullPath)) then
         begin
-            RememberBoard(FocusedBoard(0).FileName);
+            RememberBoard(Board.FileName);
             Result := True;
             Exit;
         end;

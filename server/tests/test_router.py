@@ -2,10 +2,12 @@
 
 Run from server/:  python -m unittest tests.test_router -v
 """
+import json
 import math
 import os
 import sys
 import unittest
+from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
@@ -83,6 +85,17 @@ class RouteTest(unittest.TestCase):
         legs, vias = router.route_one(b, "A", (20, 50), (180, 50), [TOP], [TOP])
         self.assertEqual(len(vias), 2)
         self.assertEqual([l for l, _ in legs], [TOP, BOT, TOP])
+        self.assertIsNone(router.route_one(
+            b, "A", (20, 50), (180, 50), [TOP], [TOP], routing_layers=[TOP],
+        ))
+
+    def test_through_via_checks_laid_out_copper_on_an_excluded_layer(self):
+        inner = "Mid Layer 1"
+        b = board(layers=(TOP, inner, BOT), nets=("A", "B"))
+        b.add(router.Shape("poly", "B", [inner], pts=[(0, 0), (200, 0), (200, 100), (0, 100)]))
+        self.assertIsNone(router.route_one(
+            b, "A", (20, 50), (180, 50), [TOP], [BOT], routing_layers=[TOP, BOT],
+        ))
 
     def test_walled_in_fails(self):
         b = board(nets=("A", "B"))
@@ -114,6 +127,30 @@ class FanoutTest(unittest.TestCase):
         b.add(router.Shape("circle", "X", [TOP, BOT], cx=150, cy=150, r=200))
         pad = {"x": 150, "y": 150, "size": [10, 10], "net": "GND"}
         self.assertIsNone(router.fanout_site(b, pad, "GND", 8, 24, 80, (100, 150), [TOP]))
+
+
+class RouteConnectionsToolTest(unittest.IsolatedAsyncioTestCase):
+    async def test_tool_does_not_route_on_a_layer_seen_only_in_the_layout(self):
+        import main
+
+        start, end = [0, 0], [25, 0]
+        connections = [{
+            "net": "SIGNAL", "from": start, "to": end, "from_layer": TOP, "to_layer": TOP,
+            "from_pad": "U1-1", "to_pad": "U2-1", "length": 25, "inside": True,
+        }]
+        layout = {"success": True, "pads": [], "arcs": [], "vias": [], "tracks": [
+            {"layer": TOP, "net": "WALL", "width": 4, "start": [10, -200], "end": [10, 200]},
+            {"layer": BOT, "net": "WALL", "width": 4, "start": [50, 50], "end": [55, 50]},
+        ]}
+        with (patch.object(main, "get_unrouted_connections", new=AsyncMock(return_value=json.dumps(
+                  {"success": True, "connections": connections}))),
+              patch.object(main, "get_layout", new=AsyncMock(return_value=json.dumps(layout))),
+              patch.object(main, "_net_rules", new=AsyncMock(return_value={}))):
+            reply = json.loads(await main.route_connections(
+                None, nets=["SIGNAL"], layers=[TOP], grid_mils=10, dry_run=True,
+            ))
+        self.assertTrue(reply["success"])
+        self.assertEqual((reply["routed"], reply["track_list"], reply["via_list"]), (0, [], []))
 
 
 if __name__ == "__main__":

@@ -25,75 +25,54 @@ Usage:
     python dev/unwedge.py            # stop debugger, close dialogs, verify
     python dev/unwedge.py --no-verify
 """
-import ctypes
-import json
 import subprocess
 import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from capture_window import find_windows, _title, _class
-
 REPO = Path(__file__).resolve().parent.parent
+if not __package__:
+    sys.path.insert(0, str(REPO))
+from dev.capture_window import _title, find_altium_windows  # noqa: E402
+from altium_install import configured_altium_exe  # noqa: E402
+from sandbox import altium_dialogs, answer_dialog  # noqa: E402
+from win_processes import window_belongs_to, window_process_id  # noqa: E402
+
 EXCHANGE = Path("C:/Users/Public/altium_mcp")
 PROBE_PRJ = REPO / "dev" / "sandbox" / "Sandbox.PrjScr"
 PROBE_RESULT = EXCHANGE / "sandbox_result.json"
-CONFIG = EXCHANGE / "altium_config.json"
 
 
-def altium_exe():
-    """Resolve X2.EXE the same way the MCP server and sandbox runner do."""
-    if CONFIG.is_file():
-        try:
-            p = json.loads(CONFIG.read_text()).get("altium_exe_path", "")
-            if p and Path(p).is_file():
-                return p
-        except (ValueError, OSError):
-            pass
-    for base in (r"C:\Program Files\Altium", r"C:\Program Files (x86)\Altium"):
-        if Path(base).is_dir():
-            for d in sorted(Path(base).iterdir(), reverse=True):
-                exe = d / "X2.EXE"
-                if exe.is_file():
-                    return str(exe)
-    return ""
-
-
-def close_dialogs():
+def close_dialogs(executable):
     """Close modal error dialogs. They block input and can mask the wedge."""
-    def is_dialog(h):
-        cls = _class(h)
-        return cls == "#32770" or (
-            cls == "TMessageForm" and _title(h) in
-            ("Error", "Warning", "Information", "Confirm"))
-    hits = find_windows(is_dialog)
-    for h in hits:
-        ctypes.windll.user32.PostMessageW(h, 0x0010, 0, 0)  # WM_CLOSE
-    return len(hits)
+    count = 0
+    for dialog in altium_dialogs(executable):
+        if dialog.is_error_box and window_belongs_to(dialog.hwnd, executable):
+            answer_dialog(dialog)
+            count += 1
+    return count
 
 
-def stop_via_process():
+def stop_via_process(executable):
     """Dispatch EditScript:Stop into the running instance. No focus needed."""
-    exe = altium_exe()
-    if not exe:
-        return False, "X2.EXE not found"
     try:
-        subprocess.Popen(f'"{exe}" -REditScript:Stop', shell=True)
+        subprocess.Popen([executable, "-REditScript:Stop"])
         time.sleep(1.5)
         return True, "EditScript:Stop dispatched"
     except OSError as e:
         return False, str(e)
 
 
-def stop_via_keys():
+def stop_via_keys(executable):
     """Fallback: Ctrl+F3, after forcing a script document to the front."""
-    hits = find_windows(lambda h: "Altium Designer" in _title(h))
+    hits = find_altium_windows(executable)
     if not hits:
         return False, "no Altium window"
     hits.sort(key=lambda h: (0 if ".pas" in _title(h)
                              else 1 if ".PrjScr" in _title(h) else 2))
     hwnd = hits[0]
+    if not window_belongs_to(hwnd, executable):
+        return False, "Altium window closed before debugger stop"
     ps = f"""
 Add-Type -AssemblyName System.Windows.Forms
 $sig = @'
@@ -102,12 +81,20 @@ using System.Runtime.InteropServices;
 public class FG {{
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
 }}
 '@
 Add-Type -TypeDefinition $sig
 [FG]::ShowWindow([IntPtr]{hwnd}, 9) | Out-Null
 [FG]::SetForegroundWindow([IntPtr]{hwnd}) | Out-Null
 Start-Sleep -Milliseconds 400
+$ownerPid = [uint32]0
+[FG]::GetWindowThreadProcessId([IntPtr]{hwnd}, [ref]$ownerPid) | Out-Null
+if ([FG]::GetForegroundWindow() -ne [IntPtr]{hwnd} -or $ownerPid -ne {window_process_id(hwnd)}) {{
+    Write-Output 'Altium did not retain foreground'
+    exit 1
+}}
 [System.Windows.Forms.SendKeys]::SendWait('^{{F3}}')
 Start-Sleep -Milliseconds 400
 Write-Output 'sent'
@@ -117,54 +104,58 @@ Write-Output 'sent'
     return "sent" in r.stdout, (r.stdout or r.stderr).strip()[:160]
 
 
-def executor_alive(timeout=45):
+def executor_alive(executable, timeout=45):
     """Prove the executor runs again by having it write a result file."""
-    from sandbox_runner import inject, SANDBOX_PAS
+    from dev.sandbox_runner import inject, SANDBOX_PAS
     saved = SANDBOX_PAS.read_text(encoding="utf-8")
     try:
         inject("ResultText := '{\"probe\": \"alive\"}';")
         if PROBE_RESULT.exists():
             PROBE_RESULT.unlink()
-        exe = altium_exe()
         subprocess.Popen(
-            f'"{exe}" -RScriptingSystem:RunScript('
+            f'"{executable}" -RScriptingSystem:RunScript('
             f'ProjectName="{PROBE_PRJ}"^|ProcName="Sandbox>Run")', shell=True)
         start = time.time()
         while time.time() - start < timeout:
             if PROBE_RESULT.exists():
                 return True
             time.sleep(0.5)
-            close_dialogs()
+            close_dialogs(executable)
         return False
     finally:
         SANDBOX_PAS.write_text(saved, encoding="utf-8")
 
 
-def unwedge(verbose=True, verify=True):
-    n = close_dialogs()
+def unwedge(verbose=True, verify=True, *, executable=None):
+    executable = configured_altium_exe() if executable is None else executable
+    if not executable:
+        if verbose:
+            print("Altium X2.EXE not found")
+        return False
+    n = close_dialogs(executable)
     if verbose and n:
         print(f"closed {n} dialog(s)")
 
-    ok, info = stop_via_process()
+    ok, info = stop_via_process(executable)
     if verbose:
         print(f"EditScript:Stop -> {info}")
-    close_dialogs()
+    close_dialogs(executable)
 
     if not verify:
         return ok
 
-    if executor_alive():
+    if executor_alive(executable):
         if verbose:
             print("executor VERIFIED alive")
         return True
 
     if verbose:
         print("still wedged after process dispatch; trying Ctrl+F3")
-    ok, info = stop_via_keys()
+    ok, info = stop_via_keys(executable)
     if verbose:
         print(f"Ctrl+F3 -> {info}")
-    close_dialogs()
-    alive = executor_alive()
+    close_dialogs(executable)
+    alive = executor_alive(executable)
     if verbose:
         print("executor VERIFIED alive" if alive
               else "STILL WEDGED - restart Altium (sandbox_runner --auto-restart)")

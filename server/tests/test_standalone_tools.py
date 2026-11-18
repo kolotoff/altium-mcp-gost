@@ -3,6 +3,7 @@ import struct
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from docx import Document
 
@@ -12,6 +13,8 @@ from tools.altium_cfb_inspect import (
     iter_schematic_text,
 )
 from tools.generate_board_description_docx import generate
+from tools.generate_step_silhouette import model_for_body
+from tools.optional import checkpoints
 
 
 class FakeCFB:
@@ -45,6 +48,12 @@ class AltiumCFBInspectTest(unittest.TestCase):
         values = list(iter_schematic_text(FakeCFB({"FileHeader": stream})))
 
         self.assertEqual(values, ["Строка\nдве"])
+
+    def test_iter_schematic_text_skips_binary_records_and_preserves_ansi(self):
+        record = b"|Record=4|Text=Caf\xe9\x00"
+        stream = struct.pack("<I", 0x01000002) + b"\x00\xff" + struct.pack("<I", len(record)) + record
+
+        self.assertEqual(list(iter_schematic_text(FakeCFB({"FileHeader": stream}))), ["Café"])
 
 
 class BoardDescriptionGeneratorTest(unittest.TestCase):
@@ -98,6 +107,55 @@ class BoardDescriptionGeneratorTest(unittest.TestCase):
             footer_xml = result.sections[0].footer._element.xml
             self.assertIn("TestBoard", footer_xml)
             self.assertIn("PAGE", footer_xml)
+
+
+class StepBodyModelTest(unittest.TestCase):
+    def test_each_body_uses_its_own_model_and_rotation(self):
+        files = [Path("Receiver-v1.step"), Path("Shield-v1.step")]
+        states = [
+            {"footprint": "Assembly", "identifier": "Receiver", "model_name": files[0].name,
+             "model_name_key": files[0].name.upper(), "rotz": 25},
+            {"footprint": "Assembly", "identifier": "Shield", "model_name": files[1].name,
+             "model_name_key": files[1].name.upper(), "rotz": 70},
+            {"footprint": "Unrelated", "identifier": "Receiver", "model_name": files[0].name,
+             "model_name_key": files[0].name.upper(), "rotz": 90},
+        ]
+        for identifier, file, rotation in zip(("Receiver", "Shield"), files, (25, 70)):
+            model, state, error = model_for_body(
+                {"footprint": "Assembly", "identifier": identifier}, states, files, single_body=False,
+            )
+            self.assertIsNone(error)
+            self.assertEqual((file, rotation), (model, state["rotz"]))
+
+    def test_unidentified_multi_body_does_not_guess_a_footprint_step(self):
+        model, _, error = model_for_body(
+            {"footprint": "Assembly"}, [], [Path("Assembly.step")], single_body=False,
+        )
+        self.assertIsNone(model)
+        self.assertIn("not found", error)
+
+
+class CheckpointSourceChangesTest(unittest.TestCase):
+    def test_rejects_files_added_or_earlier_files_changed_while_copying(self):
+        for added in (False, True):
+            with self.subTest(added=added), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source, destination = root / "source", root / "generated" / "checkpoint"
+                source.mkdir()
+                (source / "a.txt").write_text("saved content")
+                (source / "b.txt").write_text("second file")
+                real_copy = checkpoints.shutil.copy2
+
+                def update_during_copy(original, target):
+                    real_copy(original, target)
+                    if original.name == "b.txt":
+                        (source / ("c.txt" if added else "a.txt")).write_text("new content")
+
+                with (patch.object(checkpoints, "GENERATED", destination.parent),
+                      patch.object(checkpoints.shutil, "copy2", side_effect=update_during_copy),
+                      self.assertRaisesRegex(ValueError, "Source changed")):
+                    checkpoints.copy_checkpoint(source, destination)
+                self.assertFalse((destination / "checkpoint-manifest.json").exists())
 
 
 if __name__ == "__main__":

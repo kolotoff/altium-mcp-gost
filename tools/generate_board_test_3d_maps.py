@@ -143,7 +143,7 @@ def build_page(
 
     label_elements = [element for element in root if element.get("data-label-for")]
     labels = {element.get("data-callout") for element in label_elements}
-    if not anchors or set(anchors) != leaders or set(anchors) != labels or len(label_elements) != len(anchors):
+    if set(anchors) != leaders or set(anchors) != labels or len(label_elements) != len(anchors):
         raise ValueError("the 3D map must retain one label and leader for every SVG-map anchor")
     if any(element.tag == qname("circle") for element in root.iter()):
         raise ValueError("the annotated 3D map must contain no vector circles")

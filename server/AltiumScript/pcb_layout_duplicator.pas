@@ -4,51 +4,50 @@ var
     Iterator       : IPCB_BoardIterator;
     OrigObj, NewObj : IPCB_Primitive;
     DuplicatedObjects : TObjectList;
-    temp: String;
+    Complete       : Boolean;
 begin
     // Create object list to store duplicated objects
     DuplicatedObjects := CreateObject(TObjectList);
     DuplicatedObjects.OwnsObjects := False; // Don't destroy objects when list is freed
+    Complete := False;
     
-    // Create iterator for the specified object type
-    Iterator := Board.BoardIterator_Create;
-    Iterator.AddFilter_ObjectSet(ObjectSet);
-    Iterator.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
-    Iterator.AddFilter_Method(eProcessAll);
+    try
+        Iterator := Board.BoardIterator_Create;
+        try
+            Iterator.AddFilter_ObjectSet(ObjectSet);
+            Iterator.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
+            Iterator.AddFilter_Method(eProcessAll);
 
-    PCBServer.PreProcess;
-    
-    OrigObj := Iterator.FirstPCBObject;
-    while (OrigObj <> Nil) do
-    begin
-        if OrigObj.Selected then
-        begin
-            // Replicate the object
-            NewObj := PCBServer.PCBObjectFactory(OrigObj.ObjectId, eNoDimension, eCreate_Default);
-            NewObj := OrigObj.Replicate;
-
-            // Add to board
-            PCBServer.SendMessageToRobots(NewObj.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
-            Board.AddPCBObject(NewObj);
-            PCBServer.SendMessageToRobots(NewObj.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
-
-            // Send board registration message
-            //PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, NewObj.I_ObjectAddress);
-            
-            // Add to our list of duplicated objects
-            DuplicatedObjects.Add(NewObj);
+            PCBServer.PreProcess;
+            try
+                OrigObj := Iterator.FirstPCBObject;
+                while OrigObj <> Nil do
+                begin
+                    if OrigObj.Selected then
+                    begin
+                        NewObj := OrigObj.Replicate;
+                        PCBServer.SendMessageToRobots(NewObj.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+                        try
+                            Board.AddPCBObject(NewObj);
+                        finally
+                            PCBServer.SendMessageToRobots(NewObj.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+                        end;
+                        DuplicatedObjects.Add(NewObj);
+                    end;
+                    OrigObj := Iterator.NextPCBObject;
+                end;
+            finally
+                PCBServer.PostProcess;
+            end;
+        finally
+            Board.BoardIterator_Destroy(Iterator);
         end;
-        
-        OrigObj := Iterator.NextPCBObject;
+        Board.ViewManager_FullUpdate();
+        Result := DuplicatedObjects;
+        Complete := True;
+    finally
+        if not Complete then DuplicatedObjects.Free;
     end;
-    
-    Board.BoardIterator_Destroy(Iterator);
-
-    PCBServer.PostProcess;
-
-    Board.ViewManager_FullUpdate();  
-    
-    Result := DuplicatedObjects;
 end;
 
 // Function to get source and destination component lists with pin data
@@ -92,6 +91,7 @@ begin
     ResultProps := TStringList.Create;
     SourceCmps := TStringList.Create;
     SourceArray := TStringList.Create;
+    DuplicatedObjects := nil;
     
     try
         // Get selected components as source
@@ -132,22 +132,25 @@ begin
         
         // Deselect all original objects to avoid duplicating them again
         Iterator := Board.BoardIterator_Create;
-        Iterator.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject, eViaObject, ePolyObject, eRegionObject, eFillObject));
-        Iterator.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
-        Iterator.AddFilter_Method(eProcessAll);
-
-        PCBServer.PreProcess;
-        Obj := Iterator.FirstPCBObject;
-        while (Obj <> Nil) do
-        begin
-            // Only deselect objects that are not in our duplicated list
-            if Obj.Selected and (DuplicatedObjects.IndexOf(Obj) < 0) then
-                Obj.Selected := False;
-            
-            Obj := Iterator.NextPCBObject;
+        try
+            Iterator.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject, eViaObject, ePolyObject, eRegionObject, eFillObject));
+            Iterator.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
+            Iterator.AddFilter_Method(eProcessAll);
+            PCBServer.PreProcess;
+            try
+                Obj := Iterator.FirstPCBObject;
+                while Obj <> Nil do
+                begin
+                    if Obj.Selected and (DuplicatedObjects.IndexOf(Obj) < 0) then
+                        Obj.Selected := False;
+                    Obj := Iterator.NextPCBObject;
+                end;
+            finally
+                PCBServer.PostProcess;
+            end;
+        finally
+            Board.BoardIterator_Destroy(Iterator);
         end;
-        PCBServer.PostProcess;
-        Board.BoardIterator_Destroy(Iterator);
 
         // Select only the duplicated objects
         for i := 0 to DuplicatedObjects.Count - 1 do
@@ -264,6 +267,7 @@ begin
             DestArray.Free;
         end;
     finally
+        if DuplicatedObjects <> nil then DuplicatedObjects.Free;
         ResultProps.Free;
         SourceCmps.Free;
         SourceArray.Free;
@@ -571,6 +575,7 @@ var
     SourceName     : String;
     DestName       : String;
     DestNet        : IPCB_Net;
+    EditStarted    : Boolean;
 begin
     Board := PCBServer.GetCurrentPCBBoard;
     if (Board = nil) then
@@ -583,6 +588,7 @@ begin
     NetNameMap := TStringList.Create;
     NetNameMap.NameValueSeparator := '=';
     RepairedCount := 0;
+    EditStarted := False;
     SourceGroupSize := DetermineLayoutDuplicatorSourceGroupSize(SourceList);
     Margin := MilsToCoord(250);
 
@@ -604,6 +610,7 @@ begin
         end;
 
         PCBServer.PreProcess;
+        EditStarted := True;
 
         GroupStart := SourceList.Count - SourceGroupSize;
         while GroupStart >= 0 do
@@ -635,8 +642,11 @@ begin
                                 if (DestNet <> nil) then
                                 begin
                                     Prim.BeginModify;
-                                    Prim.Net := DestNet;
-                                    Prim.EndModify;
+                                    try
+                                        Prim.Net := DestNet;
+                                    finally
+                                        Prim.EndModify;
+                                    end;
 
                                     Board.DispatchMessage(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Prim.I_ObjectAddress);
                                     RepairedCount := RepairedCount + 1;
@@ -654,6 +664,7 @@ begin
             GroupStart := GroupStart - SourceGroupSize;
         end;
 
+        EditStarted := False;
         PCBServer.PostProcess;
 
         ResetParameters;
@@ -674,8 +685,12 @@ begin
             OutputLines.Free;
         end;
     finally
-        NetNameMap.Free;
-        ResultProps.Free;
+        try
+            if EditStarted then PCBServer.PostProcess;
+        finally
+            NetNameMap.Free;
+            ResultProps.Free;
+        end;
     end;
 end;
 
@@ -733,6 +748,7 @@ var
     GroupStart      : Integer;
     GroupEnd        : Integer;
     NetNameMap      : TStringList;
+    EditStarted     : Boolean;
 begin
     // Retrieve the current board
     Board := GetBoardSafe(0);
@@ -744,6 +760,7 @@ begin
 
     // Create result properties
     ResultProps := TStringList.Create;
+    EditStarted := False;
     MovedCount := 0;
     PolygonCount := 0;
     AnchorSrc := nil;
@@ -806,6 +823,7 @@ begin
     try
         // Begin board modification
         PCBServer.PreProcess;
+        EditStarted := True;
 
         // Collect all selected objects first - OPTIMIZATION #1
         // This is our biggest optimization - collecting all selected objects once
@@ -858,8 +876,6 @@ begin
 
             if ((AnchorSrc = nil) or (AnchorDst = nil)) then
             begin
-                PCBServer.PostProcess;
-
                 AddJSONBoolean(ResultProps, 'success', False);
                 AddJSONProperty(ResultProps, 'error', 'No valid source/destination component pair found for layout duplication.');
 
@@ -1177,6 +1193,7 @@ begin
         end;
 
         // End board modification
+        EditStarted := False;
         PCBServer.PostProcess;
 
         // Force redraw of the view - once at the end
@@ -1209,12 +1226,16 @@ begin
             OutputLines.Free;
         end;
     finally
-        NetNameMap.Free;
-        TemplateObjects.Free;
-        NetsToInvalidate.Free;
-        ProcessedObjects.Free;
-        ProcessedPoints.Free;
-        TraceStack.Free;
-        ResultProps.Free;
+        try
+            if EditStarted then PCBServer.PostProcess;
+        finally
+            NetNameMap.Free;
+            TemplateObjects.Free;
+            NetsToInvalidate.Free;
+            ProcessedObjects.Free;
+            ProcessedPoints.Free;
+            TraceStack.Free;
+            ResultProps.Free;
+        end;
     end;
 end;

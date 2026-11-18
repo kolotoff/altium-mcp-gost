@@ -20,6 +20,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from server.compound_file import CFBError, CompoundBinaryFile
+from server.schdoc_reader import parse_records
 
 
 ALTIUM_COORD_TO_MM = 0.0254 / 10_000.0
@@ -72,24 +73,12 @@ def extract_board_bounds(cfb: CompoundBinaryFile) -> BoardBounds:
 
 
 def iter_schematic_text(cfb: CompoundBinaryFile) -> Iterable[str]:
-    data = cfb.read_stream("FileHeader")
-    offset = 0
-    while offset + 4 <= len(data):
-        record_size = struct.unpack_from("<I", data, offset)[0]
-        offset += 4
-        if record_size > len(data) - offset:
-            raise CFBError("FileHeader contains a truncated record")
-        record = data[offset : offset + record_size]
-        offset += record_size
-        decoded = record.decode("utf-8", "ignore")
-        if "Text=" not in decoded and "%UTF8%Text=" not in decoded:
-            continue
-        fields: dict[str, str] = {}
-        for part in decoded.split("|"):
-            if "=" in part:
-                key, value = part.split("=", 1)
-                fields[key] = value
-        value = fields.get("%UTF8%Text", fields.get("Text", ""))
+    try:
+        records = parse_records(cfb.read_stream("FileHeader"), strict=True)
+    except ValueError as error:
+        raise CFBError(str(error)) from error
+    for record in records:
+        value = record.get("TEXT") if record is not None else None
         if value:
             yield value.replace("~1", "\n")
 

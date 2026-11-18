@@ -65,7 +65,9 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from altium_files import read_altium_text
 from typing import List, Optional
+import win_processes
 
 BODY_BEGIN = "// === BEGIN EXPERIMENT"
 BODY_END = "// === END EXPERIMENT"
@@ -102,7 +104,7 @@ TEMPLATE_NAMES = (
 # sync with SandboxScript/Sandbox.pas by test_template_globals_listed.
 TEMPLATE_GLOBALS = [
     "REPLACEALL", "SbxGuardUntil", "SbxGuardTripped", "SbxUndoDocs", "SbxUndoNames", "SbxUndoPath",
-    "SandboxLog", "SandboxTick", "SbxSaveUndo", "SbxPreProcess", "SbxPostProcess", "SbxPcbPreProcess",
+    "SandboxLog", "SandboxTick", "SbxSaveUndo", "SbxForgetUndo", "SbxPreProcess", "SbxPostProcess", "SbxPcbPreProcess",
     "SbxPcbPostProcess", "SbxCloseUndo", "MM", "OpenSchDoc", "SaveDoc", "FmtNum", "FmtMM", "ParseNum",
     "ParseMM", "SbxSnapDocs", "SbxDocState", "SbxNoteDoc", "SbxNoteDocsAfter", "SbxCloseDoc",
     "SbxProjectUnsaved", "SbxNormPath", "SbxFindDoc", "SbxBody", "Run",
@@ -770,8 +772,10 @@ def record_run_end(directory: Path, log_lines: List[str]) -> List[dict]:
         e["state_after"] = after.get(e["path"].lower())
         try:
             e["sha256_after"] = file_sha256(e["path"])
+        except FileNotFoundError:
+            e["sha256_after"] = None
         except OSError:
-            e["sha256_after"] = None      # the run deleted or locked it
+            e.pop("sha256_after", None)   # permission or sharing errors leave the state unknown
     write_manifest(directory, entries)
     return entries
 
@@ -786,8 +790,11 @@ def changed_since_run(entries: List[dict]) -> List[str]:
             continue
         try:
             now = file_sha256(e["path"])
-        except OSError:
+        except FileNotFoundError:
             now = None
+        except OSError:
+            changed.append(e["path"])
+            continue
         if now != e["sha256_after"]:
             changed.append(e["path"])
     return changed
@@ -850,7 +857,7 @@ def parse_states(text: str):
     return states, children
 
 
-def close_script(paths: List[str]) -> str:
+def close_script(paths: List[str], *, discard_unsaved: bool = False) -> str:
     """A sandbox script that closes `paths` in Altium without saving and
     reports, one line each, 'closed|path' (was not open), 'open|path|name'
     (was open, now closed; name is the path as Altium had it, which may be
@@ -862,8 +869,20 @@ def close_script(paths: List[str]) -> str:
         q = _pascal_string(p)
         lines += ["Obj1 := SbxFindDoc(" + q + ");",
                   "S2 := '';",
-                  "if Obj1 <> nil then S2 := Obj1.FileName;",
-                  f"S1 := S1 + SbxCloseDoc({q}) + '|' + {q} + '|' + S2 + #13#10;"]
+                  "if Obj1 <> nil then S2 := Obj1.FileName;"]
+        checks = []
+        if not discard_unsaved:
+            checks.append(f"(SbxDocState({q}) = 'unsaved')")
+        if _is_project(p):
+            # The selected documents were handled first. Any dirty child
+            # still open must prevent the project itself from closing.
+            checks.append(f"(SbxProjectUnsaved({q}, '') <> '')")
+        if checks:
+            lines += [f"if {' or '.join(checks)} then",
+                      "    S3 := 'stillopen'",
+                      "else"]
+        lines += [f"S3 := SbxCloseDoc({q});",
+                  f"S1 := S1 + S3 + '|' + {q} + '|' + S2 + #13#10;"]
     lines.append("ResultText := S1;")
     return "\n".join(lines)
 
@@ -875,11 +894,12 @@ def reopen_script(paths: List[str]) -> str:
         q = _pascal_string(p)
         kind = DOC_KINDS.get(os.path.splitext(p)[1].lower(), "")
         if kind == "PROJECT":
-            lines.append(f"GetWorkspace.DM_OpenProject({q}, True);")
+            lines.append(f"Obj1 := GetWorkspace.DM_OpenProject({q}, True);")
         else:
             lines += [f"Obj1 := Client.OpenDocument('{kind}', {q});",
                       "if Obj1 <> nil then Client.ShowDocument(Obj1);"]
-    lines.append("ResultText := 'reopened';")
+        lines.append(f"if Obj1 <> nil then S1 := S1 + 'open|' + {q} + #13#10;")
+    lines.append("ResultText := S1;")
     return "\n".join(lines)
 
 
@@ -891,21 +911,7 @@ IDCANCEL = 2
 
 
 def _process_name(hwnd) -> str:
-    from ctypes import wintypes
-    user32, kernel32 = ctypes.windll.user32, ctypes.windll.kernel32
-    pid = wintypes.DWORD()
-    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-    handle = kernel32.OpenProcess(0x1000, False, pid.value)  # PROCESS_QUERY_LIMITED_INFORMATION
-    if not handle:
-        return ""
-    try:
-        buf = ctypes.create_unicode_buffer(1024)
-        size = wintypes.DWORD(len(buf))
-        if kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
-            return os.path.basename(buf.value)
-        return ""
-    finally:
-        kernel32.CloseHandle(handle)
+    return os.path.basename(win_processes.window_image_path(hwnd))
 
 
 def _window_text(hwnd) -> str:
@@ -934,8 +940,8 @@ class Dialog:
         return self.is_script_error or (self.cls == "TMessageForm" and self.title in ("Error", "Information"))
 
 
-def altium_dialogs() -> List[Dialog]:
-    """Visible dialog windows owned by X2.EXE that can block a script run."""
+def altium_dialogs(executable: Optional[str] = None) -> List[Dialog]:
+    """Return visible script-blocking dialogs for the selected Altium install."""
     from ctypes import wintypes
     user32 = ctypes.windll.user32
     found: List[Dialog] = []
@@ -951,7 +957,11 @@ def altium_dialogs() -> List[Dialog]:
         title = _window_text(hwnd)
         if cls.value == "TMessageForm" and title not in ("Error", "Warning", "Information", "Confirm"):
             return True
-        if _process_name(hwnd).lower() != "x2.exe":
+        if executable is not None:
+            owned = win_processes.window_belongs_to(hwnd, executable)
+        else:
+            owned = _process_name(hwnd).lower() == "x2.exe"
+        if not owned:
             return True
         parts = []
 
@@ -1164,7 +1174,7 @@ class Sandbox:
         files = self.new_run_files("Helper")
         if not self._run_until_done(files, script, timeout, closed_dialogs):
             return None
-        return read_when_ready(files.result, lambda p: p.read_text(encoding="utf-8", errors="replace"))
+        return read_when_ready(files.result, read_altium_text)
 
     def launch(self, files: RunFiles) -> None:
         cmd = (f'"{self.altium_exe}" -RScriptingSystem:RunScriptFile('
@@ -1177,7 +1187,7 @@ class Sandbox:
     def _run_until_done(self, files: RunFiles, script: str, timeout: float,
                         closed_dialogs: Optional[list] = None) -> bool:
         # Dialogs open before the launch are the user's; leave them alone
-        before = {d.hwnd for d in altium_dialogs()} if closed_dialogs is not None else set()
+        before = {d.hwnd for d in altium_dialogs(self.altium_exe)}
         seen = set()
         self.write(files, script)
         self.launch(files)
@@ -1185,10 +1195,12 @@ class Sandbox:
         while time.time() < end:
             if files.result.exists():
                 return True
-            for d in altium_dialogs():
+            for d in altium_dialogs(self.altium_exe):
+                if d.hwnd in before:
+                    continue
                 if d.is_error_box:
                     answer_dialog(d)
-                elif closed_dialogs is not None and d.hwnd not in before:
+                elif closed_dialogs is not None:
                     if d.hwnd not in seen:
                         seen.add(d.hwnd)
                         picture = None
@@ -1241,7 +1253,7 @@ class Sandbox:
         """
         for n in range(1, attempts + 1):
             for _ in range(3):
-                found = [d for d in altium_dialogs() if d.is_error_box]
+                found = [d for d in altium_dialogs(self.altium_exe) if d.is_error_box]
                 for d in found:
                     answer_dialog(d)
                 if not found:

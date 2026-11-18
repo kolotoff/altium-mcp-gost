@@ -7,7 +7,7 @@ obscured. PrintWindow asks the window to render itself into a DC instead.
 Usage:
     python dev/capture_window.py <hwnd> <output.png>
     python dev/capture_window.py --find "<title substring>" <output.png>
-    python dev/capture_window.py --dialogs <output_prefix>   (all modal dialogs)
+    python dev/capture_window.py --dialogs <output_prefix>   (Altium modal dialogs)
 """
 import ctypes
 import subprocess
@@ -16,23 +16,13 @@ import sys
 from ctypes import wintypes
 from pathlib import Path
 
+REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO / "server"))
+from altium_install import configured_altium_exe  # noqa: E402
+from sandbox import altium_dialogs, _window_text as _title  # noqa: E402
+from win_processes import window_belongs_to  # noqa: E402
+
 PW_RENDERFULLCONTENT = 2
-
-
-def _title(hwnd):
-    user32 = ctypes.windll.user32
-    n = user32.GetWindowTextLengthW(hwnd)
-    buf = ctypes.create_unicode_buffer(n + 1)
-    user32.GetWindowTextW(hwnd, buf, n + 1)
-    return buf.value
-
-
-def _class(hwnd):
-    buf = ctypes.create_unicode_buffer(64)
-    ctypes.windll.user32.GetClassNameW(hwnd, buf, 64)
-    return buf.value
-
-
 
 def focus_and_refresh(hwnd, settle=1.2):
     """Bring a window truly to the front and force it to repaint.
@@ -131,15 +121,9 @@ def find_windows(pred):
     return hits
 
 
-def find_dialogs():
-    def is_dialog(hwnd):
-        cls = _class(hwnd)
-        if cls == "#32770":
-            return True
-        return cls == "TMessageForm" and _title(hwnd) in (
-            "Error", "Warning", "Information", "Confirm")
-
-    return find_windows(is_dialog)
+def find_altium_windows(executable):
+    return find_windows(lambda hwnd: window_belongs_to(hwnd, executable)
+                        and "Altium Designer" in _title(hwnd)) if executable else []
 
 
 if __name__ == "__main__":
@@ -157,14 +141,17 @@ if __name__ == "__main__":
         path, info = capture(hits[0], args[2])
         print(f"{_title(hits[0])!r} -> {path} ({info})")
     elif args[0] == "--dialogs":
-        prefix = args[1] if len(args) > 1 else "dialog"
-        hits = find_dialogs()
-        if not hits:
+        prefix = args[1] if len(args) > 1 else str(REPO / "generated" / "dialog")
+        Path(prefix).parent.mkdir(parents=True, exist_ok=True)
+        executable = configured_altium_exe()
+        dialogs = altium_dialogs(executable) if executable else []
+        if not dialogs:
             print("no dialogs visible")
             sys.exit(1)
-        for i, h in enumerate(hits):
-            path, info = capture(h, f"{prefix}_{i}.png")
-            print(f"[{_class(h)}] {_title(h)!r} -> {path} ({info})")
+        for i, dialog in enumerate(dialogs):
+            if window_belongs_to(dialog.hwnd, executable):
+                path, info = capture(dialog.hwnd, f"{prefix}_{i}.png")
+                print(f"[{dialog.cls}] {dialog.title!r} -> {path} ({info})")
     else:
         path, info = capture(int(args[0]), args[1])
         print(f"{path} ({info})")
@@ -181,7 +168,7 @@ def altium_window(doc_name=None):
     otherwise the largest visible one.
     """
     u = ctypes.windll.user32
-    cands = find_windows(lambda h: "Altium Designer" in _title(h) and u.IsWindowVisible(h))
+    cands = find_altium_windows(configured_altium_exe())
     if not cands:
         return None
 
@@ -215,9 +202,12 @@ def capture_document(doc_name, out_path, zoom_script_runner=None):
     before whatever else is in flight, because it is the only check that sees
     text overlap - the defect class every geometric audit misses.
     """
-    hits = find_windows(lambda h: doc_name.lower() in _title(h).lower()
-                        and "Altium Designer" in _title(h))
+    executable = configured_altium_exe()
+    hits = [hwnd for hwnd in find_altium_windows(executable)
+            if doc_name.lower() in _title(hwnd).lower()]
     if not hits:
         return None, f"no Altium frame titled with {doc_name!r} - was it shown?"
+    if not window_belongs_to(hits[0], executable):
+        return None, "Altium frame closed before capture"
     path, info = capture(hits[0], out_path)
     return path, _title(hits[0])

@@ -6,11 +6,11 @@ import csv
 import hashlib
 import io
 import json
-import re
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
 
+from .drc_classic import classic_fields
 from .drc_compact import COMPACT_HEADER, read_compact_drc
 
 
@@ -296,27 +296,29 @@ def read_drc(path, encoding="utf-8-sig"):
     findings = Counter()
     sections, metadata = [], {}
     rule, rule_count, total, waived = None, 0, None, None
-    for line in text.splitlines():
-        if line.startswith("Processing Rule : "):
+    for field, value in classic_fields(text, strict_counts=True):
+        if field == "ERROR":
+            raise ValueError(f"Altium reported a DRC error: {path}: {value}")
+        if field == "Processing Rule":
             if rule is not None:
                 raise ValueError(f"Missing rule subtotal: {path}: {rule}")
-            rule, rule_count = line.removeprefix("Processing Rule : "), 0
-        elif line.startswith("   Violation between "):
+            rule, rule_count = value, 0
+        elif field == "finding":
             if rule is None:
                 raise ValueError(f"Finding outside a rule: {path}")
-            findings[(("rule", rule), ("finding", line.strip()))] += 1
+            findings[(("rule", rule), ("finding", value))] += 1
             rule_count += 1
-        elif match := re.match(r"Rule Violations\s*:\s*(\d+)$", line):
-            if rule is None or rule_count != int(match[1]):
+        elif field == "Rule Violations":
+            if rule is None or rule_count != value:
                 raise ValueError(f"Invalid rule subtotal: {path}: {rule}")
             sections.append({"rule": rule, "count": rule_count})
             rule = None
-        elif match := re.match(r"Violations Detected\s*:\s*(\d+)$", line):
-            total = int(match[1])
-        elif match := re.match(r"Waived Violations\s*:\s*(\d+)$", line):
-            waived = int(match[1])
-        elif match := re.match(r"(PCB File|Date|Time|Time Elapsed)\s*:\s*(.*)$", line):
-            metadata[match[1]] = match[2]
+        elif field == "Violations Detected":
+            total = value
+        elif field == "Waived Violations":
+            waived = value
+        else:
+            metadata[field] = value
     if rule is not None or total is None or waived is None or findings.total() != total:
         raise ValueError(f"Incomplete DRC or footer count mismatch: {path}")
     if "PCB File" not in metadata or not sections:

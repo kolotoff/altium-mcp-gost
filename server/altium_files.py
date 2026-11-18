@@ -15,6 +15,31 @@ import os
 from pathlib import Path
 
 
+def read_project(prjpcb):
+    """Read a saved .PrjPcb's schematic paths, harness paths and connectivity settings."""
+    project = Path(prjpcb)
+    sheets, harness_files, settings = [], [], {}
+    raw = project.read_bytes()
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = raw.decode("cp1252", "replace")
+    for line in text.splitlines():
+        key, separator, value = line.partition("=")
+        if not separator:
+            continue
+        if key == "DocumentPath":
+            # Keep the project spelling even when a path goes through a junction.
+            path = Path(os.path.normpath(project.parent / value))
+            if value.lower().endswith(".schdoc"):
+                sheets.append(path)
+            elif value.lower().endswith(".harness"):
+                harness_files.append(path)
+        elif key in ("HierarchyMode", "AllowPortNetNames", "AllowSheetEntryNetNames"):
+            settings.setdefault(key, value)
+    return sheets, harness_files, settings
+
+
 def read_altium_text(path) -> str:
     """Text of a file written by the Altium scripts."""
     data = Path(path).read_bytes()

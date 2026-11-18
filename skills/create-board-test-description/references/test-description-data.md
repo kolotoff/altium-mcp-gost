@@ -15,7 +15,7 @@ python skills\create-board-test-description\scripts\prepare_test_inventory.py `
 
 The optional override JSON maps `DESIGNATOR:PAD` (preferred), `DESIGNATOR.*`, or a local PCB net to a verified source name. Example: `{"SB2:2":"FAN_ON"}`. The helper stops if any selected pin's source net remains a generated `Net*` name.
 
-`inventory.json` contains `counts` and a `components` array. Each component has `designator`, `categories`, `footprint`, `side`, placement data, and `pins`. Each pin has `pad`, `pcb_net`, `source_net`, and `hole_mm`. Preserve those fields and their meanings. Never use a through-hole pad's copper width or height as the hole diameter.
+`inventory.json` contains `counts` and a `components` array. Each component has `designator`, `categories`, `footprint`, `side`, placement data, and `pins`. Each pin has `pad`, `pcb_net`, `source_net`, and `hole_mm`. The component also carries `qualifying_pad_ids`, the pad names that meet the drilled-hole rule using the original hole diameter and net assignment. Keep those IDs when preparing the map data. The displayed `hole_mm` values are rounded.
 
 ## Maps and crops
 

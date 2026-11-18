@@ -179,17 +179,18 @@ class ProjectValidationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report["stages"][0]["evidence"]["request_id"], "timed-out")
 
     async def test_stale_schematic_and_drc_coverage_change_are_reported(self):
+        from server.main import _lift_failed_result
+
         snapshot = write_snapshot(self.root / "snapshot")
-        bridge = AsyncMock(
-            return_value={
-                "success": True,
-                "result": {
-                    "success": False,
-                    "code": "schematic_not_validated",
-                    "error": "Validate in Altium.",
-                },
-            }
-        )
+        native_response = {
+            "success": True,
+            "result": {
+                "success": False,
+                "code": "schematic_not_validated",
+                "error": "Validate in Altium.",
+            },
+        }
+        bridge = AsyncMock(return_value=_lift_failed_result(native_response))
         result = await validate_project(
             bridge,
             BOARD,

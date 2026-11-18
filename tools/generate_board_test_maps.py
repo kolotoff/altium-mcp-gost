@@ -7,16 +7,17 @@ import copy
 import json
 import math
 import random
-import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
 if __package__:
     from .board_test_localization import LANGUAGE_MODES, ui_text
-    from .generate_board_interface_maps import remove_outside_mounting_holes
+    from .generate_board_interface_maps import remove_outside_mounting_holes, remove_pads, text
+    from .pcb_svg_geometry import component_transform, exported_designator_aliases, parse_numbers
 else:
     from board_test_localization import LANGUAGE_MODES, ui_text
-    from generate_board_interface_maps import remove_outside_mounting_holes
+    from generate_board_interface_maps import remove_outside_mounting_holes, remove_pads, text
+    from pcb_svg_geometry import component_transform, exported_designator_aliases, parse_numbers
 
 
 SVG = "http://www.w3.org/2000/svg"
@@ -32,49 +33,6 @@ def qname(name: str) -> str:
     return f"{{{SVG}}}{name}"
 
 
-def parse_numbers(text: str) -> list[float]:
-    return [float(value) for value in re.findall(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?", text)]
-
-
-def text(parent: ET.Element, x: float, y: float, value: str, **attrs: str) -> ET.Element:
-    settings = {
-        "x": f"{x:.3f}",
-        "y": f"{y:.3f}",
-        "font-family": "Aptos, Arial, sans-serif",
-        "fill": "#263746",
-    }
-    settings.update(attrs)
-    node = ET.SubElement(parent, qname("text"), settings)
-    node.text = value
-    return node
-
-
-def remove_pads(element: ET.Element) -> None:
-    for child in list(element):
-        if child.get("id") == "Pads" or child.get("data-layer") == "pads":
-            element.remove(child)
-        else:
-            remove_pads(child)
-
-
-def exported_designator_aliases(element: ET.Element) -> list[str]:
-    """Return logical designator aliases for panelized Altium SVG instances."""
-    component = str(element.get("data-component") or "").strip()
-    if not component:
-        return []
-    aliases = [component]
-    instance = str(element.get("data-instance") or "").strip()
-    if instance == component:
-        aliases.append(f"{component}_1")
-    else:
-        match = re.fullmatch(re.escape(component) + r"-(\d+)", instance)
-        if match:
-            aliases.append(f"{component}_{match.group(1)}")
-        elif instance:
-            aliases.append(instance)
-    return list(dict.fromkeys(aliases))
-
-
 def component_positions(root: ET.Element, *, bottom: bool, view_x: float, view_y: float, view_width: float) -> dict[str, tuple[float, float]]:
     positions: dict[str, tuple[float, float]] = {}
     for suffix in ("-assembly", "-pads"):
@@ -83,10 +41,10 @@ def component_positions(root: ET.Element, *, bottom: bool, view_x: float, view_y
             aliases = exported_designator_aliases(element)
             if not aliases or not identifier.endswith(suffix) or all(alias in positions for alias in aliases):
                 continue
-            match = re.search(r"translate\(\s*([-+0-9.eE]+)[ ,]+([-+0-9.eE]+)\s*\)", element.get("transform", ""))
-            if not match:
+            transform = component_transform(element)
+            if transform is None:
                 continue
-            x, y = float(match.group(1)), float(match.group(2))
+            x, y = transform.x, transform.y
             if bottom:
                 x = 2.0 * view_x + view_width - x
             for alias in aliases:
@@ -101,6 +59,23 @@ def category(item: dict) -> str:
     raise ValueError(f"item has no supported category: {item.get('designator')}")
 
 
+def qualifying_pins(item: dict, minimum_hole_mm: float) -> list[dict]:
+    pins = item.get("pins", [])
+    if "qualifying_pad_ids" in item:
+        ids = set(item["qualifying_pad_ids"])
+        if not ids.issubset(str(pin.get("pad", "")) for pin in pins):
+            raise ValueError(f"{item['designator']} inventory is missing a qualifying pad")
+        return [pin for pin in pins if str(pin.get("pad", "")) in ids]
+    # Legacy inventories only retained rounded diameters and represented
+    # unassigned copper with the NC placeholder.
+    return [
+        pin for pin in pins
+        if float(pin.get("hole_mm") or 0) >= minimum_hole_mm
+        and str(pin.get("pcb_net") or "").strip().upper() not in ("", "NC")
+        and not str(pin.get("pad") or "").strip().upper().startswith("MP")
+    ]
+
+
 def pad_positions(root: ET.Element, *, bottom: bool, view_x: float, view_y: float, view_width: float) -> dict[tuple[str, str], tuple[float, float]]:
     """Locate pad copper centers in the original export before hiding its Pads layer."""
     positions = {}
@@ -108,11 +83,9 @@ def pad_positions(root: ET.Element, *, bottom: bool, view_x: float, view_y: floa
         aliases = exported_designator_aliases(group)
         if not group.get("id", "").endswith("-pads") or not aliases:
             continue
-        match = re.search(r"translate\(\s*([-+0-9.eE]+)[ ,]+([-+0-9.eE]+)\s*\)\s*rotate\(\s*([-+0-9.eE]+)", group.get("transform", ""))
-        if not match:
+        transform = component_transform(group)
+        if transform is None:
             continue
-        gx, gy, angle = map(float, match.groups())
-        radians = math.radians(angle)
         for pad in group:
             number = pad.get("data-pad-number")
             if number is None or not pad.get("d"):
@@ -122,8 +95,7 @@ def pad_positions(root: ET.Element, *, bottom: bool, view_x: float, view_y: floa
                 continue
             local_x = (min(numbers[::2]) + max(numbers[::2])) / 2
             local_y = (min(numbers[1::2]) + max(numbers[1::2])) / 2
-            x = gx + local_x * math.cos(radians) - local_y * math.sin(radians)
-            y = gy + local_x * math.sin(radians) + local_y * math.cos(radians)
+            x, y = transform.to_board(local_x, local_y)
             if bottom:
                 x = 2 * view_x + view_width - x
             for alias in aliases:
@@ -329,8 +301,9 @@ def build_page(
         raise ValueError(f"components missing from {side} assembly SVG: {', '.join(missing)}")
 
     callouts = []
+    minimum_hole_mm = float(inventory.get("minimum_hole_mm", 1.0))
     for item in items:
-        qualifying = [pin for pin in item.get("pins", []) if float(pin.get("hole_mm") or 0) >= 1.0 and pin.get("pcb_net") and not str(pin.get("pad", "")).upper().startswith("MP")]
+        qualifying = qualifying_pins(item, minimum_hole_mm)
         if "through-hole-signal" in item.get("categories", []) and qualifying:
             for pin in qualifying:
                 key = (item["designator"], str(pin["pad"]))

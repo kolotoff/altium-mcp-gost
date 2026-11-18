@@ -349,6 +349,15 @@ class ProjectTest(unittest.TestCase):
             got = sc.project_sheets(prj)
         self.assertEqual([p.name for p in got], ["A.SchDoc"])
 
+    def test_project_sheets_uses_utf8_and_legacy_windows_encoding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            prj = os.path.join(tmp, "a.PrjPcb")
+            for encoding, name in (("utf-8-sig", "Схема.SchDoc"), ("cp1252", "Café.SchDoc")):
+                with self.subTest(encoding=encoding):
+                    with open(prj, "w", encoding=encoding) as project:
+                        project.write(f"[Document1]\nDocumentPath={name}\n")
+                    self.assertEqual([p.name for p in sc.project_sheets(prj)], [name])
+
 
 if __name__ == "__main__":
     unittest.main()

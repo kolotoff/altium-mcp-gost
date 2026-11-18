@@ -103,15 +103,24 @@ begin
     SbxSaveUndo;
 end;
 
+procedure SbxForgetUndo(Name : String);
+var
+    K : Integer;
+begin
+    for K := SbxUndoNames.Count - 1 downto 0 do
+        if SbxUndoNames[K] = Name then
+        begin
+            SbxUndoDocs.Delete(K);
+            SbxUndoNames.Delete(K);
+            SbxSaveUndo;
+            Exit;
+        end;
+end;
+
 procedure SbxPostProcess(Doc : IDispatch; Param : String);
 begin
     SchServer.ProcessControl.PostProcess(Doc, Param);
-    if SbxUndoNames.Count > 0 then
-    begin
-        SbxUndoDocs.Delete(SbxUndoDocs.Count - 1);
-        SbxUndoNames.Delete(SbxUndoNames.Count - 1);
-        SbxSaveUndo;
-    end;
+    SbxForgetUndo('SCH|' + Doc.DocumentName);
 end;
 
 procedure SbxPcbPreProcess;
@@ -125,12 +134,7 @@ end;
 procedure SbxPcbPostProcess;
 begin
     PCBServer.PostProcess;
-    if SbxUndoNames.Count > 0 then
-    begin
-        SbxUndoDocs.Delete(SbxUndoDocs.Count - 1);
-        SbxUndoNames.Delete(SbxUndoNames.Count - 1);
-        SbxSaveUndo;
-    end;
+    SbxForgetUndo('PCB|');
 end;
 
 // Close, newest first, every undo group the script left open

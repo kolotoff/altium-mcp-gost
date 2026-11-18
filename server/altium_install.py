@@ -7,8 +7,10 @@ C:\\Program Files\\Altium is the last resort, for an install the registry
 does not list. Nothing here asks the user anything.
 """
 import glob
+import json
 import os
 import re
+from pathlib import Path
 
 import win_processes
 
@@ -104,3 +106,19 @@ def find_altium_exe() -> str:
             if os.path.isfile(exe):
                 return exe
     return ""
+
+
+def configured_altium_exe() -> str:
+    """Resolve a saved Altium path without migrating or writing configuration."""
+    config_dir = Path(os.environ.get("ALTIUM_MCP_HOME") or Path.home() / ".altium-mcp")
+    config = config_dir / "config.json"
+    if not config.exists():
+        config = Path(__file__).with_name("config.json")
+    try:
+        data = json.loads(config.read_text(encoding="utf-8-sig"))
+        exe = data.get("altium_exe_path") if isinstance(data, dict) else None
+        if isinstance(exe, str) and os.path.isfile(exe):
+            return exe
+    except (OSError, ValueError):
+        pass
+    return find_altium_exe()

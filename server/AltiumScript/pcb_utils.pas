@@ -1,6 +1,9 @@
 const
     // Mechanical 1 to 1024: Altium numbers mechanical layers past 32
     MAX_MECH_LAYERS = 1024;
+    // DelphiScript marshals zero as nil in TList. Keep coordinates biased.
+    KEEPOUT_COORD_BIAS = 100000000;
+    KEEPOUT_DEGREES_TO_RADIANS = 0.017453292519943295;
 
 // Nil-safe access to the current PCB board. When no PCB document has ever
 // been opened this session, PCBServer itself is nil and calling
@@ -12067,25 +12070,6 @@ begin
         Result := Primitive.Net.Name;
 end;
 
-function PCBPolygonIdentifierMatches(Polygon: IPCB_Primitive; PolygonName: String): Boolean;
-var
-    MatchName : String;
-begin
-    Result := False;
-    MatchName := UpperCase(Trim(PolygonName));
-    if (Polygon = Nil) or (MatchName = '') then
-        Exit;
-
-    if UpperCase(Trim(Polygon.Name)) = MatchName then
-    begin
-        Result := True;
-        Exit;
-    end;
-
-    if UpperCase(Trim(PCBPrimitiveNetName(Polygon))) = MatchName then
-        Result := True;
-end;
-
 function PCBLayerDisplayName(Board: IPCB_Board; Layer: TLayer): String;
 var
     LayerObj: IPCB_LayerObject;
@@ -12116,46 +12100,60 @@ begin
     AddJSONNumber(Props, Prefix + '_top_mils', CoordToMils(Rect.Top));
 end;
 
-function FindPCBPolygonByNameOrNet(Board: IPCB_Board; PolygonName: String; ExcludePolygon: IPCB_Primitive): IPCB_Primitive;
+function FindPCBPolygonByNameOrNet(Board: IPCB_Board; PolygonName: String; var LookupError: String): IPCB_Polygon;
 var
-    Iterator : IPCB_BoardIterator;
-    Polygon  : IPCB_Primitive;
+    Iterator              : IPCB_BoardIterator;
+    Polygon, ByName, ByNet : IPCB_Polygon;
+    MatchName             : String;
+    NameCount, NetCount   : Integer;
 begin
     Result := Nil;
-    if Board = Nil then
-        Exit;
+    LookupError := 'polygon not found: ' + PolygonName;
+    MatchName := UpperCase(Trim(PolygonName));
+    if (Board = Nil) or (MatchName = '') then Exit;
 
+    NameCount := 0;
+    NetCount := 0;
+    ByName := Nil;
+    ByNet := Nil;
     Iterator := Board.BoardIterator_Create;
-    Iterator.AddFilter_ObjectSet(MkSet(ePolyObject));
-    Iterator.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
-    Iterator.AddFilter_Method(eProcessAll);
-
     try
+        Iterator.AddFilter_ObjectSet(MkSet(ePolyObject));
+        Iterator.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
+        Iterator.AddFilter_Method(eProcessAll);
         Polygon := Iterator.FirstPCBObject;
         while Polygon <> Nil do
         begin
-            if (Polygon <> ExcludePolygon) and PCBPolygonIdentifierMatches(Polygon, PolygonName) then
+            if UpperCase(Trim(Polygon.Name)) = MatchName then
             begin
-                Result := Polygon;
-                Exit;
+                ByName := Polygon;
+                Inc(NameCount);
             end;
-
+            if UpperCase(Trim(PCBPrimitiveNetName(Polygon))) = MatchName then
+            begin
+                ByNet := Polygon;
+                Inc(NetCount);
+            end;
             Polygon := Iterator.NextPCBObject;
         end;
     finally
         Board.BoardIterator_Destroy(Iterator);
     end;
+
+    if NameCount = 1 then Result := ByName
+    else if (NameCount = 0) and (NetCount = 1) then Result := ByNet
+    else if (NameCount > 1) or (NetCount > 1) then
+        LookupError := 'polygon identifier is ambiguous: ' + PolygonName;
 end;
 
 function CopyPCBPolygonGeometry(SourcePolygonName, TargetPolygonName: String): String;
 var
     Board         : IPCB_Board;
-    SourcePoly    : IPCB_Primitive;
-    TargetPoly    : IPCB_Primitive;
-    NewPoly       : IPCB_Primitive;
-    TargetNet     : IPCB_Net;
-    TargetLayer   : TLayer;
-    TargetName    : String;
+    SourcePoly    : IPCB_Polygon;
+    TargetPoly    : IPCB_Polygon;
+    LookupError   : String;
+    Segment       : TPolySegment;
+    i, PointCount : Integer;
     ResultProps   : TStringList;
     OutputLines   : TStringList;
 begin
@@ -12168,43 +12166,47 @@ begin
 
     ResultProps := TStringList.Create;
     try
-        SourcePoly := FindPCBPolygonByNameOrNet(Board, SourcePolygonName, Nil);
+        SourcePoly := FindPCBPolygonByNameOrNet(Board, SourcePolygonName, LookupError);
         if SourcePoly = Nil then
         begin
             AddJSONBoolean(ResultProps, 'success', False);
-            AddJSONProperty(ResultProps, 'error', 'Source polygon not found: ' + SourcePolygonName);
+            AddJSONProperty(ResultProps, 'error', 'Source ' + LookupError);
         end
         else
         begin
-            TargetPoly := FindPCBPolygonByNameOrNet(Board, TargetPolygonName, SourcePoly);
+            TargetPoly := FindPCBPolygonByNameOrNet(Board, TargetPolygonName, LookupError);
             if TargetPoly = Nil then
             begin
                 AddJSONBoolean(ResultProps, 'success', False);
-                AddJSONProperty(ResultProps, 'error', 'Target polygon not found: ' + TargetPolygonName);
+                AddJSONProperty(ResultProps, 'error', 'Target ' + LookupError);
+            end
+            else if SourcePoly = TargetPoly then
+            begin
+                AddJSONBoolean(ResultProps, 'success', False);
+                AddJSONProperty(ResultProps, 'error', 'Source and target must be different polygons.');
             end
             else
             begin
-                TargetNet := TargetPoly.Net;
-                TargetLayer := TargetPoly.Layer;
-                TargetName := TargetPoly.Name;
-                if TargetName = '' then
-                    TargetName := TargetPolygonName;
-
                 AddPCBPolygonSummary(ResultProps, 'source_before', Board, SourcePoly);
                 AddPCBPolygonSummary(ResultProps, 'target_before', Board, TargetPoly);
 
                 PCBServer.PreProcess;
                 try
-                    NewPoly := SourcePoly.Replicate;
-                    PCBServer.SendMessageToRobots(NewPoly.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
-                    NewPoly.Layer := TargetLayer;
-                    NewPoly.Net := TargetNet;
-                    NewPoly.Name := TargetName;
-                    Board.AddPCBObject(NewPoly);
-                    PCBServer.SendMessageToRobots(NewPoly.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
-
-                    Board.RemovePCBObject(TargetPoly);
-                    Board.DispatchMessage(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, NewPoly.I_ObjectAddress);
+                    PCBServer.SendMessageToRobots(TargetPoly.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+                    try
+                        // Copy the outline records, including arc geometry, in
+                        // place so the target's pour settings and identity survive.
+                        PointCount := SourcePoly.PointCount;
+                        TargetPoly.SetState_PointCount(PointCount);
+                        for i := 0 to PointCount - 1 do
+                        begin
+                            Segment := SourcePoly.Segments[i];
+                            TargetPoly.SetState_Segments(i, Segment);
+                        end;
+                        TargetPoly.Rebuild;
+                    finally
+                        PCBServer.SendMessageToRobots(TargetPoly.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+                    end;
                 finally
                     PCBServer.PostProcess;
                 end;
@@ -12216,7 +12218,7 @@ begin
                 AddJSONBoolean(ResultProps, 'success', True);
                 AddJSONProperty(ResultProps, 'source_polygon', SourcePolygonName);
                 AddJSONProperty(ResultProps, 'target_polygon', TargetPolygonName);
-                AddPCBPolygonSummary(ResultProps, 'target_after', Board, NewPoly);
+                AddPCBPolygonSummary(ResultProps, 'target_after', Board, TargetPoly);
                 AddJSONBoolean(ResultProps, 'document_dirty', True);
             end;
         end;
@@ -12368,63 +12370,26 @@ begin
               (UpperCase(Layer2String(Primitive.Layer)) = 'KEEP OUT LAYER');
 end;
 
-procedure UpdateKeepoutContourBounds(Primitive: IPCB_Primitive; var MinX, MinY, MaxX, MaxY: TCoord; var HasBounds: Boolean);
+// Distance from PX,PY to the segment X1,Y1-X2,Y2
+function GeoSegmentDistance(X1, Y1, X2, Y2, PX, PY: Integer): Double;
 var
-    Rect : TCoordRect;
+    DX, DY, L2, T : Double;
 begin
-    if Primitive = Nil then
-        Exit;
-
-    Rect := Primitive.BoundingRectangle;
-    if not HasBounds then
-    begin
-        MinX := Rect.Left;
-        MinY := Rect.Bottom;
-        MaxX := Rect.Right;
-        MaxY := Rect.Top;
-        HasBounds := True;
-    end
-    else
-    begin
-        if Rect.Left < MinX then MinX := Rect.Left;
-        if Rect.Bottom < MinY then MinY := Rect.Bottom;
-        if Rect.Right > MaxX then MaxX := Rect.Right;
-        if Rect.Top > MaxY then MaxY := Rect.Top;
-    end;
+    // + 0.0: DelphiScript keeps integer arithmetic otherwise (the declared
+    // types are not enforced), and the squares of board coordinates
+    // overflow 32 bits: every track longer than about 4.6 mil came out as
+    // a point
+    DX := X2 - X1 + 0.0;
+    DY := Y2 - Y1 + 0.0;
+    L2 := DX * DX + DY * DY;
+    T := 0;
+    if L2 > 0 then T := ((PX - X1) * DX + (PY - Y1) * DY) / L2;
+    if T < 0 then T := 0;
+    if T > 1 then T := 1;
+    Result := Sqrt(Sqr(X1 + T * DX - PX) + Sqr(Y1 + T * DY - PY));
 end;
 
-function FindPCBBoardNetByName(Board: IPCB_Board; NetName: String): IPCB_Net;
-var
-    Iterator : IPCB_BoardIterator;
-    Net      : IPCB_Net;
-begin
-    Result := Nil;
-    if (Board = Nil) or (NetName = '') then
-        Exit;
-
-    Iterator := Board.BoardIterator_Create;
-    Iterator.AddFilter_ObjectSet(MkSet(eNetObject));
-    Iterator.AddFilter_LayerSet(AllLayers);
-    Iterator.AddFilter_Method(eProcessAll);
-
-    try
-        Net := Iterator.FirstPCBObject;
-        while Net <> Nil do
-        begin
-            if UpperCase(Net.Name) = UpperCase(NetName) then
-            begin
-                Result := Net;
-                Exit;
-            end;
-
-            Net := Iterator.NextPCBObject;
-        end;
-    finally
-        Board.BoardIterator_Destroy(Iterator);
-    end;
-end;
-
-function AddTentedPCBVia(Board: IPCB_Board; X, Y, ViaDiameter, ViaHole: TCoord; Net: IPCB_Net; CreatedVias: TObjectList): Boolean;
+function AddTentedPCBVia(Board: IPCB_Board; X, Y, ViaDiameter, ViaHole: TCoord; Net: IPCB_Net): Boolean;
 var
     Via : IPCB_Primitive;
 begin
@@ -12451,190 +12416,181 @@ begin
     Via.Selected := True;
 
     PCBServer.SendMessageToRobots(Via.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
-    Board.AddPCBObject(Via);
-    PCBServer.SendMessageToRobots(Via.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
-    if CreatedVias <> Nil then
-        CreatedVias.Add(Via);
+    try
+        Board.AddPCBObject(Via);
+    finally
+        PCBServer.SendMessageToRobots(Via.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+    end;
     Result := True;
 end;
 
-function AddUniqueTentedViaAt(Board: IPCB_Board; X, Y, ViaDiameter, ViaHole: TCoord; Net: IPCB_Net; CreatedVias: TObjectList; CreatedKeys: TStringList): Boolean;
+procedure CountKeepoutEndpoint(Endpoints: TStringList; X, Y: TCoord);
 var
-    Key : String;
+    Key: String;
+    Index: Integer;
+begin
+    Key := IntToStr(X) + '|' + IntToStr(Y);
+    Index := Endpoints.IndexOfName(Key);
+    if Index < 0 then
+        Endpoints.Add(Key + '=1')
+    else
+        Endpoints[Index] := Key + '=' + IntToStr(StrToInt(Endpoints.ValueFromIndex[Index]) + 1);
+end;
+
+procedure AddKeepoutChord(Chords: TList; X1, Y1, X2, Y2: TCoord);
+begin
+    if (X1 = X2) and (Y1 = Y2) then Exit;
+    Chords.Add(X1 + KEEPOUT_COORD_BIAS);
+    Chords.Add(Y1 + KEEPOUT_COORD_BIAS);
+    Chords.Add(X2 + KEEPOUT_COORD_BIAS);
+    Chords.Add(Y2 + KEEPOUT_COORD_BIAS);
+end;
+
+function KeepoutArcSweep(Arc: IPCB_Arc): Double;
+begin
+    Result := Arc.EndAngle - Arc.StartAngle;
+    if Result < 0 then Result := Result + 360.0;
+    if Result <= 0.000001 then Result := 360.0;
+end;
+
+procedure AddKeepoutArcChords(Chords: TList; Arc: IPCB_Arc; Sagitta: Double);
+var
+    Radius, StartAngle, Sweep, Angle, MaxStep: Double;
+    i, ChordCount: Integer;
+    X1, Y1, X2, Y2: TCoord;
+begin
+    Radius := Arc.Radius + 0.0;
+    StartAngle := Arc.StartAngle * KEEPOUT_DEGREES_TO_RADIANS;
+    Sweep := KeepoutArcSweep(Arc) * KEEPOUT_DEGREES_TO_RADIANS;
+    // R * angle^2 / 8 bounds the difference between an arc and its chord.
+    MaxStep := Sqrt(8.0 * Sagitta / Radius);
+    if MaxStep > 0.25 then MaxStep := 0.25;
+    ChordCount := Trunc(Sweep / MaxStep) + 1;
+    X1 := Arc.StartX;
+    Y1 := Arc.StartY;
+    for i := 1 to ChordCount do
+    begin
+        if i = ChordCount then
+        begin
+            X2 := Arc.EndX;
+            Y2 := Arc.EndY;
+        end
+        else
+        begin
+            Angle := StartAngle + Sweep * i / ChordCount;
+            X2 := Arc.XCenter + Round(Radius * Cos(Angle));
+            Y2 := Arc.YCenter + Round(Radius * Sin(Angle));
+        end;
+        AddKeepoutChord(Chords, X1, Y1, X2, Y2);
+        X1 := X2;
+        Y1 := Y2;
+    end;
+end;
+
+function KeepoutCenterIsClear(Chords: TList; X, Y: TCoord; MinDistance: Double): Boolean;
+var
+    i: Integer;
+    X1, Y1, X2, Y2: TCoord;
+    Crosses: Boolean;
 begin
     Result := False;
-    Key := IntToStr(Round(CoordToMMs(X) * 1000)) + ',' + IntToStr(Round(CoordToMMs(Y) * 1000));
-
-    if CreatedKeys.IndexOf(Key) >= 0 then
-        Exit;
-
-    if AddTentedPCBVia(Board, X, Y, ViaDiameter, ViaHole, Net, CreatedVias) then
+    Crosses := False;
+    i := 0;
+    while i < Chords.Count do
     begin
-        CreatedKeys.Add(Key);
-        Result := True;
+        X1 := Chords.Items[i] - KEEPOUT_COORD_BIAS;
+        Y1 := Chords.Items[i + 1] - KEEPOUT_COORD_BIAS;
+        X2 := Chords.Items[i + 2] - KEEPOUT_COORD_BIAS;
+        Y2 := Chords.Items[i + 3] - KEEPOUT_COORD_BIAS;
+        if GeoSegmentDistance(X1, Y1, X2, Y2, X, Y) < MinDistance then Exit;
+        if (Y1 > Y) <> (Y2 > Y) then
+            if X < X1 + ((X2 - X1 + 0.0) * (Y - Y1)) / (Y2 - Y1) then
+                Crosses := not Crosses;
+        i := i + 4;
     end;
+    Result := Crosses;
 end;
 
-function AddContourViasOnKeepoutTrack(Board: IPCB_Board; Track: IPCB_Track; CenterX, CenterY, Offset, Pitch, ViaDiameter, ViaHole: TCoord; Net: IPCB_Net; CreatedVias: TObjectList; CreatedKeys: TStringList): Integer;
+procedure PlanKeepoutViaCenters(Primitive: IPCB_Primitive; Chords: TList; Centers: TStringList;
+    Pitch: TCoord; MinDistance, Offset: Double);
 var
-    DXMM      : Double;
-    DYMM      : Double;
-    LenMM     : Double;
-    PitchMM   : Double;
-    NXMM      : Double;
-    NYMM      : Double;
-    MidXMM    : Double;
-    MidYMM    : Double;
-    CXMM      : Double;
-    CYMM      : Double;
-    D1        : Double;
-    D2        : Double;
-    Distance  : Double;
-    StepCount : Integer;
-    i         : Integer;
-    PX        : TCoord;
-    PY        : TCoord;
+    Track: IPCB_Track;
+    Arc: IPCB_Arc;
+    Radius, StartAngle, Angle, EdgeLength, Distance, Slack: Double;
+    DX, DY, X, Y, NX, NY: Double;
+    i, Side, StepCount: Integer;
+    PX, PY: TCoord;
 begin
-    Result := 0;
-    if (Board = Nil) or (Track = Nil) then
-        Exit;
-
-    DXMM := CoordToMMs(Track.X2 - Track.X1);
-    DYMM := CoordToMMs(Track.Y2 - Track.Y1);
-    LenMM := Sqrt((DXMM * DXMM) + (DYMM * DYMM));
-    PitchMM := CoordToMMs(Pitch);
-    if (LenMM <= 0.000001) or (PitchMM <= 0.000001) then
-        Exit;
-
-    NXMM := -DYMM / LenMM;
-    NYMM := DXMM / LenMM;
-    MidXMM := CoordToMMs((Track.X1 + Track.X2) div 2);
-    MidYMM := CoordToMMs((Track.Y1 + Track.Y2) div 2);
-    CXMM := CoordToMMs(CenterX);
-    CYMM := CoordToMMs(CenterY);
-
-    D1 := Sqrt(((MidXMM + (NXMM * CoordToMMs(Offset))) - CXMM) * ((MidXMM + (NXMM * CoordToMMs(Offset))) - CXMM) +
-               ((MidYMM + (NYMM * CoordToMMs(Offset))) - CYMM) * ((MidYMM + (NYMM * CoordToMMs(Offset))) - CYMM));
-    D2 := Sqrt(((MidXMM - (NXMM * CoordToMMs(Offset))) - CXMM) * ((MidXMM - (NXMM * CoordToMMs(Offset))) - CXMM) +
-               ((MidYMM - (NYMM * CoordToMMs(Offset))) - CYMM) * ((MidYMM - (NYMM * CoordToMMs(Offset))) - CYMM));
-    if D2 < D1 then
+    if Primitive.ObjectId = eTrackObject then
     begin
-        NXMM := -NXMM;
-        NYMM := -NYMM;
+        Track := Primitive;
+        DX := Track.X2 - Track.X1 + 0.0;
+        DY := Track.Y2 - Track.Y1 + 0.0;
+        EdgeLength := Sqrt(DX * DX + DY * DY);
+        if EdgeLength = 0 then Exit;
+        DX := DX / EdgeLength;
+        DY := DY / EdgeLength;
+        NX := -DY;
+        NY := DX;
+    end
+    else
+    begin
+        Arc := Primitive;
+        Radius := Arc.Radius + 0.0;
+        StartAngle := Arc.StartAngle * KEEPOUT_DEGREES_TO_RADIANS;
+        EdgeLength := Radius * KeepoutArcSweep(Arc) * KEEPOUT_DEGREES_TO_RADIANS;
     end;
 
-    StepCount := Trunc(LenMM / PitchMM);
-    for i := 0 to StepCount do
+    StepCount := Trunc(EdgeLength / Pitch);
+    if StepCount < 1 then StepCount := 1;
+    // Distribute the chain symmetrically and avoid placing candidates at joins.
+    Slack := (EdgeLength - (StepCount - 1) * (Pitch + 0.0)) / 2.0;
+    for i := 0 to StepCount - 1 do
     begin
-        Distance := i * PitchMM;
-        if Distance > LenMM then
-            Distance := LenMM;
-
-        PX := Track.X1 + MMsToCoord((DXMM / LenMM) * Distance) + MMsToCoord(NXMM * CoordToMMs(Offset));
-        PY := Track.Y1 + MMsToCoord((DYMM / LenMM) * Distance) + MMsToCoord(NYMM * CoordToMMs(Offset));
-        if AddUniqueTentedViaAt(Board, PX, PY, ViaDiameter, ViaHole, Net, CreatedVias, CreatedKeys) then
-            Result := Result + 1;
-    end;
-end;
-
-function AddContourViasOnKeepoutArc(Board: IPCB_Board; Arc: IPCB_Arc; CenterX, CenterY, Offset, Pitch, ViaDiameter, ViaHole: TCoord; Net: IPCB_Net; CreatedVias: TObjectList; CreatedKeys: TStringList): Integer;
-var
-    RadiusMM   : Double;
-    OffsetMM   : Double;
-    PitchMM    : Double;
-    StartDeg   : Double;
-    EndDeg     : Double;
-    SweepDeg   : Double;
-    ArcLenMM   : Double;
-    StepCount  : Integer;
-    i          : Integer;
-    AngleDeg   : Double;
-    AngleRad   : Double;
-    CandidateR : Double;
-    AltR       : Double;
-    CXMM       : Double;
-    CYMM       : Double;
-    BoardCXMM  : Double;
-    BoardCYMM  : Double;
-    D1         : Double;
-    D2         : Double;
-    PX         : TCoord;
-    PY         : TCoord;
-begin
-    Result := 0;
-    if (Board = Nil) or (Arc = Nil) then
-        Exit;
-
-    RadiusMM := CoordToMMs(Arc.Radius);
-    OffsetMM := CoordToMMs(Offset);
-    PitchMM := CoordToMMs(Pitch);
-    if (RadiusMM <= 0.000001) or (PitchMM <= 0.000001) then
-        Exit;
-
-    StartDeg := Arc.StartAngle;
-    EndDeg := Arc.EndAngle;
-    SweepDeg := EndDeg - StartDeg;
-    if SweepDeg < 0 then
-        SweepDeg := SweepDeg + 360.0;
-    if SweepDeg <= 0.000001 then
-        SweepDeg := 360.0;
-
-    ArcLenMM := RadiusMM * SweepDeg * 3.141592653589793 / 180.0;
-    StepCount := Trunc(ArcLenMM / PitchMM);
-    CXMM := CoordToMMs(Arc.XCenter);
-    CYMM := CoordToMMs(Arc.YCenter);
-    BoardCXMM := CoordToMMs(CenterX);
-    BoardCYMM := CoordToMMs(CenterY);
-
-    for i := 0 to StepCount do
-    begin
-        AngleDeg := StartDeg + ((i * PitchMM) / ArcLenMM) * SweepDeg;
-        if AngleDeg > StartDeg + SweepDeg then
-            AngleDeg := StartDeg + SweepDeg;
-        AngleRad := AngleDeg * 3.141592653589793 / 180.0;
-
-        CandidateR := RadiusMM + OffsetMM;
-        AltR := RadiusMM - OffsetMM;
-        D1 := Sqrt(((CXMM + (Cos(AngleRad) * CandidateR)) - BoardCXMM) * ((CXMM + (Cos(AngleRad) * CandidateR)) - BoardCXMM) +
-                   ((CYMM + (Sin(AngleRad) * CandidateR)) - BoardCYMM) * ((CYMM + (Sin(AngleRad) * CandidateR)) - BoardCYMM));
-        D2 := Sqrt(((CXMM + (Cos(AngleRad) * AltR)) - BoardCXMM) * ((CXMM + (Cos(AngleRad) * AltR)) - BoardCXMM) +
-                   ((CYMM + (Sin(AngleRad) * AltR)) - BoardCYMM) * ((CYMM + (Sin(AngleRad) * AltR)) - BoardCYMM));
-        if D2 < D1 then
-            CandidateR := AltR;
-
-        PX := Arc.XCenter + MMsToCoord(Cos(AngleRad) * CandidateR);
-        PY := Arc.YCenter + MMsToCoord(Sin(AngleRad) * CandidateR);
-        if AddUniqueTentedViaAt(Board, PX, PY, ViaDiameter, ViaHole, Net, CreatedVias, CreatedKeys) then
-            Result := Result + 1;
+        Distance := Slack + i * (Pitch + 0.0);
+        if Primitive.ObjectId = eTrackObject then
+        begin
+            X := Track.X1 + DX * Distance;
+            Y := Track.Y1 + DY * Distance;
+        end
+        else
+        begin
+            Angle := StartAngle + Distance / Radius;
+            NX := Cos(Angle);
+            NY := Sin(Angle);
+            X := Arc.XCenter + Radius * NX;
+            Y := Arc.YCenter + Radius * NY;
+        end;
+        // Test both normals against the actual contour so concavities and
+        // nested contours do not depend on an arbitrary bounding-box center.
+        for Side := -1 to 1 do
+            if Side <> 0 then
+            begin
+                PX := Round(X + Side * NX * Offset);
+                PY := Round(Y + Side * NY * Offset);
+                if KeepoutCenterIsClear(Chords, PX, PY, MinDistance) then
+                begin
+                    Centers.Add(IntToStr(PX) + '|' + IntToStr(PY));
+                    Break;
+                end;
+            end;
     end;
 end;
 
 function AddTentedViasAroundKeepoutContour(ViaDiameterMM, ViaHoleMM, EdgeClearanceMM, PitchMM: Double; NetName: String): String;
 var
-    Board              : IPCB_Board;
-    Iterator           : IPCB_BoardIterator;
-    Primitive          : IPCB_Primitive;
-    Track              : IPCB_Track;
-    Arc                : IPCB_Arc;
-    ResultProps        : TStringList;
-    OutputLines        : TStringList;
-    CreatedKeys        : TStringList;
-    CreatedVias        : TObjectList;
-    TargetNet          : IPCB_Net;
-    ViaDiameter        : TCoord;
-    ViaHole            : TCoord;
-    Pitch              : TCoord;
-    CenterOffset       : TCoord;
-    MinX               : TCoord;
-    MinY               : TCoord;
-    MaxX               : TCoord;
-    MaxY               : TCoord;
-    CenterX            : TCoord;
-    CenterY            : TCoord;
-    HasBounds          : Boolean;
-    TracksSeen         : Integer;
-    ArcsSeen           : Integer;
-    ViasCreated        : Integer;
+    Board: IPCB_Board;
+    Iterator: IPCB_BoardIterator;
+    Primitive: IPCB_Primitive;
+    Track: IPCB_Track;
+    Arc: IPCB_Arc;
+    ResultProps, Endpoints, Centers: TStringList;
+    Edges: TObjectList;
+    Chords: TList;
+    TargetNet: IPCB_Net;
+    ViaDiameter, ViaHole, Pitch, X, Y: TCoord;
+    Sagitta, MinDistance, Offset: Double;
+    i, TracksSeen, ArcsSeen, ViasCreated: Integer;
 begin
     Board := GetBoardSafe(0);
     if Board = Nil then
@@ -12642,40 +12598,73 @@ begin
         Result := 'ERROR: No PCB document is currently active';
         Exit;
     end;
+    if (ViaDiameterMM <= 0) or (ViaHoleMM <= 0) or (ViaHoleMM >= ViaDiameterMM) or
+       (EdgeClearanceMM < 0) or (PitchMM <= 0) then
+    begin
+        Result := 'ERROR: Via diameter, hole and pitch must be positive, the hole must be smaller than the via, and clearance must be nonnegative.';
+        Exit;
+    end;
+    ViaDiameter := MMsToCoord(ViaDiameterMM);
+    ViaHole := MMsToCoord(ViaHoleMM);
+    Pitch := MMsToCoord(PitchMM);
+    if (ViaHole <= 0) or (ViaHole >= ViaDiameter) or (Pitch <= 0) then
+    begin
+        Result := 'ERROR: Via dimensions and pitch must be representable in PCB coordinates.';
+        Exit;
+    end;
+    TargetNet := FindBoardNet(Board, NetName);
+    if (NetName <> '') and (TargetNet = Nil) then
+    begin
+        Result := 'ERROR: Net not found: ' + NetName;
+        Exit;
+    end;
 
     ResultProps := TStringList.Create;
-    OutputLines := TStringList.Create;
-    CreatedKeys := TStringList.Create;
-    CreatedVias := TObjectList.Create;
-    CreatedVias.OwnsObjects := False;
-    CreatedKeys.Sorted := True;
-    CreatedKeys.Duplicates := dupIgnore;
+    Endpoints := TStringList.Create;
+    Centers := TStringList.Create;
+    Edges := TObjectList.Create;
+    Edges.OwnsObjects := False;
+    Chords := TList.Create;
+    Centers.Sorted := True;
+    Centers.Duplicates := dupIgnore;
     try
-        ViaDiameter := MMsToCoord(ViaDiameterMM);
-        ViaHole := MMsToCoord(ViaHoleMM);
-        Pitch := MMsToCoord(PitchMM);
-        CenterOffset := MMsToCoord(EdgeClearanceMM + (ViaDiameterMM / 2.0));
-        TargetNet := FindPCBBoardNetByName(Board, NetName);
-        HasBounds := False;
+        Sagitta := MMsToCoord(0.002);
         TracksSeen := 0;
         ArcsSeen := 0;
-        ViasCreated := 0;
-
         Iterator := Board.BoardIterator_Create;
-        Iterator.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject));
-        Iterator.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
-        Iterator.AddFilter_Method(eProcessAll);
         try
+            Iterator.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject));
+            Iterator.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
+            Iterator.AddFilter_Method(eProcessAll);
             Primitive := Iterator.FirstPCBObject;
             while Primitive <> Nil do
             begin
                 if PCBPrimitiveIsKeepout(Primitive) then
                 begin
-                    UpdateKeepoutContourBounds(Primitive, MinX, MinY, MaxX, MaxY, HasBounds);
                     if Primitive.ObjectId = eTrackObject then
-                        TracksSeen := TracksSeen + 1
-                    else if Primitive.ObjectId = eArcObject then
-                        ArcsSeen := ArcsSeen + 1;
+                    begin
+                        Track := Primitive;
+                        Inc(TracksSeen);
+                        if (Track.X1 <> Track.X2) or (Track.Y1 <> Track.Y2) then
+                        begin
+                            CountKeepoutEndpoint(Endpoints, Track.X1, Track.Y1);
+                            CountKeepoutEndpoint(Endpoints, Track.X2, Track.Y2);
+                            AddKeepoutChord(Chords, Track.X1, Track.Y1, Track.X2, Track.Y2);
+                            Edges.Add(Primitive);
+                        end;
+                    end
+                    else
+                    begin
+                        Arc := Primitive;
+                        Inc(ArcsSeen);
+                        if Arc.Radius > 0 then
+                        begin
+                            CountKeepoutEndpoint(Endpoints, Arc.StartX, Arc.StartY);
+                            CountKeepoutEndpoint(Endpoints, Arc.EndX, Arc.EndY);
+                            AddKeepoutArcChords(Chords, Arc, Sagitta);
+                            Edges.Add(Primitive);
+                        end;
+                    end;
                 end;
                 Primitive := Iterator.NextPCBObject;
             end;
@@ -12683,82 +12672,77 @@ begin
             Board.BoardIterator_Destroy(Iterator);
         end;
 
-        if (NetName <> '') and (TargetNet = Nil) then
+        if Chords.Count = 0 then
         begin
-            AddJSONBoolean(ResultProps, 'success', False);
-            AddJSONProperty(ResultProps, 'error', 'Net not found: ' + NetName);
-        end
-        else if not HasBounds then
-        begin
-            AddJSONBoolean(ResultProps, 'success', False);
-            AddJSONProperty(ResultProps, 'error', 'No Keep-Out Layer tracks or arcs found for PCB contour.');
-        end
-        else
-        begin
-            CenterX := (MinX + MaxX) div 2;
-            CenterY := (MinY + MaxY) div 2;
-
-            PCBServer.PreProcess;
-            try
-                Client.SendMessage('PCB:DeSelect', 'Scope=All', 255, Client.CurrentView);
-                Iterator := Board.BoardIterator_Create;
-                Iterator.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject));
-                Iterator.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
-                Iterator.AddFilter_Method(eProcessAll);
-                try
-                    Primitive := Iterator.FirstPCBObject;
-                    while Primitive <> Nil do
-                    begin
-                        if PCBPrimitiveIsKeepout(Primitive) then
-                        begin
-                            if Primitive.ObjectId = eTrackObject then
-                            begin
-                                Track := Primitive;
-                                ViasCreated := ViasCreated + AddContourViasOnKeepoutTrack(Board, Track, CenterX, CenterY, CenterOffset, Pitch, ViaDiameter, ViaHole, TargetNet, CreatedVias, CreatedKeys);
-                            end
-                            else if Primitive.ObjectId = eArcObject then
-                            begin
-                                Arc := Primitive;
-                                ViasCreated := ViasCreated + AddContourViasOnKeepoutArc(Board, Arc, CenterX, CenterY, CenterOffset, Pitch, ViaDiameter, ViaHole, TargetNet, CreatedVias, CreatedKeys);
-                            end;
-                        end;
-                        Primitive := Iterator.NextPCBObject;
-                    end;
-                finally
-                    Board.BoardIterator_Destroy(Iterator);
-                end;
-            finally
-                PCBServer.PostProcess;
+            Result := 'ERROR: No Keep-Out Layer tracks or arcs found for PCB contour.';
+            Exit;
+        end;
+        for i := 0 to Endpoints.Count - 1 do
+            if Endpoints.ValueFromIndex[i] <> '2' then
+            begin
+                Result := 'ERROR: Keep-Out Layer tracks and arcs must form closed, unbranched contours.';
+                Exit;
             end;
 
-            Board.ConnectivelyValidateNets;
-            Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
-            Board.ViewManager_FullUpdate;
-
-            AddJSONBoolean(ResultProps, 'success', True);
-            AddJSONInteger(ResultProps, 'keepout_tracks_seen', TracksSeen);
-            AddJSONInteger(ResultProps, 'keepout_arcs_seen', ArcsSeen);
-            AddJSONInteger(ResultProps, 'vias_created', ViasCreated);
-            AddJSONNumber(ResultProps, 'via_diameter_mm', ViaDiameterMM);
-            AddJSONNumber(ResultProps, 'via_hole_mm', ViaHoleMM);
-            AddJSONNumber(ResultProps, 'edge_clearance_from_outer_diameter_mm', EdgeClearanceMM);
-            AddJSONNumber(ResultProps, 'via_center_offset_from_keepout_mm', EdgeClearanceMM + (ViaDiameterMM / 2.0));
-            AddJSONNumber(ResultProps, 'pitch_mm', PitchMM);
-            AddJSONProperty(ResultProps, 'net_name', NetName);
-            AddJSONNumber(ResultProps, 'manual_solder_mask_expansion_mm', -(ViaDiameterMM / 2.0));
-            AddJSONBoolean(ResultProps, 'tented_top', True);
-            AddJSONBoolean(ResultProps, 'tented_bottom', True);
-            AddJSONBoolean(ResultProps, 'created_vias_selected', True);
-            AddJSONBoolean(ResultProps, 'document_dirty', True);
-            AddJSONBoolean(ResultProps, 'document_saved', False);
+        MinDistance := MMsToCoord(EdgeClearanceMM) + ViaDiameter / 2.0 + 1.0;
+        // An arc may extend beyond a chord by its sagitta plus endpoint rounding.
+        if ArcsSeen > 0 then MinDistance := MinDistance + Sagitta + 2.0;
+        Offset := MinDistance + 2.0;
+        if ArcsSeen > 0 then Offset := Offset + Sagitta + 2.0;
+        for i := 0 to Edges.Count - 1 do
+        begin
+            Primitive := Edges[i];
+            PlanKeepoutViaCenters(Primitive, Chords, Centers, Pitch, MinDistance, Offset);
+            ReportProgress;
+        end;
+        if Centers.Count = 0 then
+        begin
+            Result := 'ERROR: No via center meets the requested clearance inside the keepout contour.';
+            Exit;
         end;
 
-        OutputLines.Text := BuildJSONObject(ResultProps);
-        Result := OutputLines.Text;
+        ViasCreated := 0;
+        PCBServer.PreProcess;
+        try
+            Client.SendMessage('PCB:DeSelect', 'Scope=All', 255, Client.CurrentView);
+            for i := 0 to Centers.Count - 1 do
+            begin
+                X := StrToInt(GetFieldFromPipeString(Centers[i], 0));
+                Y := StrToInt(GetFieldFromPipeString(Centers[i], 1));
+                if AddTentedPCBVia(Board, X, Y, ViaDiameter, ViaHole, TargetNet) then
+                    Inc(ViasCreated);
+            end;
+        finally
+            PCBServer.PostProcess;
+        end;
+        Board.ConnectivelyValidateNets;
+        Client.SendMessage('PCB:Zoom', 'Action=Redraw', 255, Client.CurrentView);
+        Board.ViewManager_FullUpdate;
+
+        AddJSONBoolean(ResultProps, 'success', ViasCreated = Centers.Count);
+        if ViasCreated <> Centers.Count then
+            AddJSONProperty(ResultProps, 'message', 'Some planned vias could not be created.');
+        AddJSONInteger(ResultProps, 'keepout_tracks_seen', TracksSeen);
+        AddJSONInteger(ResultProps, 'keepout_arcs_seen', ArcsSeen);
+        AddJSONInteger(ResultProps, 'vias_created', ViasCreated);
+        AddJSONNumber(ResultProps, 'via_diameter_mm', ViaDiameterMM);
+        AddJSONNumber(ResultProps, 'via_hole_mm', ViaHoleMM);
+        AddJSONNumber(ResultProps, 'edge_clearance_from_outer_diameter_mm', EdgeClearanceMM);
+        AddJSONNumber(ResultProps, 'via_center_offset_from_keepout_mm', CoordToMMs(Round(Offset)));
+        AddJSONNumber(ResultProps, 'pitch_mm', PitchMM);
+        AddJSONProperty(ResultProps, 'net_name', NetName);
+        AddJSONNumber(ResultProps, 'manual_solder_mask_expansion_mm', -(ViaDiameterMM / 2.0));
+        AddJSONBoolean(ResultProps, 'tented_top', True);
+        AddJSONBoolean(ResultProps, 'tented_bottom', True);
+        AddJSONBoolean(ResultProps, 'created_vias_selected', ViasCreated > 0);
+        AddJSONBoolean(ResultProps, 'document_dirty', ViasCreated > 0);
+        AddJSONBoolean(ResultProps, 'document_saved', False);
+        Result := BuildJSONObject(ResultProps);
     finally
-        CreatedVias.Free;
-        CreatedKeys.Free;
-        OutputLines.Free;
+        Chords.Free;
+        Edges.Free;
+        Centers.Free;
+        Endpoints.Free;
         ResultProps.Free;
     end;
 end;
@@ -17405,25 +17389,6 @@ begin
         Other := List[I];
         if Other.I_ObjectAddress = Prim.I_ObjectAddress then Result := True;
     end;
-end;
-
-// Distance from PX,PY to the segment X1,Y1-X2,Y2
-function GeoSegmentDistance(X1, Y1, X2, Y2, PX, PY: Integer): Double;
-var
-    DX, DY, L2, T : Double;
-begin
-    // + 0.0: DelphiScript keeps integer arithmetic otherwise (the declared
-    // types are not enforced), and the squares of board coordinates
-    // overflow 32 bits: every track longer than about 4.6 mil came out as
-    // a point
-    DX := X2 - X1 + 0.0;
-    DY := Y2 - Y1 + 0.0;
-    L2 := DX * DX + DY * DY;
-    T := 0;
-    if L2 > 0 then T := ((PX - X1) * DX + (PY - Y1) * DY) / L2;
-    if T < 0 then T := 0;
-    if T > 1 then T := 1;
-    Result := Sqrt(Sqr(X1 + T * DX - PX) + Sqr(Y1 + T * DY - PY));
 end;
 
 // True when PX,PY lies on the copper of the track X1,Y1-X2,Y2 of Width but

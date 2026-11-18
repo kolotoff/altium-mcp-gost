@@ -345,7 +345,8 @@ begin
     begin
       if APS_InScope(Slk.Component) then
       begin
-        APS_TextProps.Add(Slk.Text + '.Rotation=' + IntToStr(Slk.Rotation));
+        APS_TextProps.Add(Slk.Text + '.Rotation=' + FloatToStr(Slk.Rotation));
+        APS_TextProps.Add(Slk.Text + '.NameAutoPosition=' + IntToStr(Slk.Component.NameAutoPosition));
         APS_TextProps.Add(Slk.Text + '.Width=' + IntToStr(Slk.Width));
         APS_TextProps.Add(Slk.Text + '.Size=' + IntToStr(Slk.Size));
         APS_TextProps.Add(Slk.Text + '.XLocation=' + IntToStr(Slk.XLocation));
@@ -499,7 +500,7 @@ begin
       Continue;
 
     Slk.BeginModify;
-    Slk.Rotation := APS_TextProps.ValueFromIndex[Idx];
+    Slk.Rotation := StrToFloat(APS_TextProps.ValueFromIndex[Idx]);
     Idx := APS_TextProps.IndexOfName(Slk.Text + '.Width');
     Slk.Width := APS_TextProps.ValueFromIndex[Idx];
     Idx := APS_TextProps.IndexOfName(Slk.Text + '.Size');
@@ -513,6 +514,17 @@ begin
     Y := APS_TextProps.ValueFromIndex[Idx];
     Slk.MoveToXY(X, Y);
     Slk.EndModify;
+
+    Idx := APS_TextProps.IndexOfName(Slk.Text + '.NameAutoPosition');
+    if Idx >= 0 then
+    begin
+      Slk.Component.BeginModify;
+      try
+        Slk.Component.NameAutoPosition := StrToInt(APS_TextProps.ValueFromIndex[Idx]);
+      finally
+        Slk.Component.EndModify;
+      end;
+    end;
   end;
 end;
 
@@ -1320,7 +1332,7 @@ var
   Rule: IPCB_Rule;
   vx, vy: TCoord;
   PCBSystemOptions: IPCB_SystemOptions;
-  DRCSetting: Boolean;
+  DRCSetting, RestoreDRC: Boolean;
   StartTime: TDateTime;
   Props: TStringList;
 begin
@@ -1349,16 +1361,6 @@ begin
   APS_PositionDelta := MilsToCoord(PositionDeltaMils);
   APS_CmpOutlineLayerID := APS_FindOutlineLayer(OutlineLayerName);
 
-  PCBServer.PreProcess;
-
-  // Online DRC off while designators move (speed)
-  PCBSystemOptions := PCBServer.SystemOptions;
-  if PCBSystemOptions <> nil then
-  begin
-    DRCSetting := PCBSystemOptions.DoOnlineDRC;
-    PCBSystemOptions.DoOnlineDRC := False;
-  end;
-
   APS_TextProps := TStringList.Create;
   APS_TextProps.NameValueSeparator := '=';
   APS_DictionaryCache := TStringList.Create;
@@ -1371,168 +1373,191 @@ begin
   APS_BaseIdx := TStringList.Create;
   FailedNames := TStringList.Create;
   Props := TStringList.Create;
-
-  // Board outline: polygon tests only on non-rectangular boards
-  APS_BoardRect := APS_GetObjRect(APS_Board);
-  APS_BoardIsRectangular := True;
-  Outline := APS_Board.BoardOutline;
-  if Outline.PointCount <> 4 then
-    APS_BoardIsRectangular := False
-  else
-    for i := 0 to Outline.PointCount - 1 do
-    begin
-      if Outline.Segments[i].Kind <> ePolySegmentLine then
-        APS_BoardIsRectangular := False
-      else
-      begin
-        vx := Outline.Segments[i].vx;
-        vy := Outline.Segments[i].vy;
-        if ((vx <> APS_BoardRect.Left) and (vx <> APS_BoardRect.Right)) or
-          ((vy <> APS_BoardRect.Bottom) and (vy <> APS_BoardRect.Top)) then
-          APS_BoardIsRectangular := False;
-      end;
-    end;
   APS_OutlineX := TList.Create;
   APS_OutlineY := TList.Create;
-  for i := 0 to Outline.PointCount - 1 do
-  begin
-    APS_OutlineX.Add(Outline.Segments[i].vx + APS_COORD_BIAS);
-    APS_OutlineY.Add(Outline.Segments[i].vy + APS_COORD_BIAS);
-  end;
-
-  // The original script ignores the Board Outline Clearance rule; honour the
-  // largest text-to-outline clearance
-  APS_EdgeGap := 0;
-  Iterator := APS_Board.BoardIterator_Create;
-  Iterator.AddFilter_ObjectSet(MkSet(eRuleObject));
-  Iterator.AddFilter_LayerSet(AllLayers);
-  Iterator.AddFilter_Method(eProcessAll);
-  Rule := Iterator.FirstPCBObject;
-  while Rule <> nil do
-  begin
-    if Rule.Enabled and (Rule.RuleKind = eRule_BoardOutlineClearance) then
-      if Rule.GetClearance(eObjectClearanceID_Text, eObjectClearanceID_OutlineEdge) > APS_EdgeGap then
-        APS_EdgeGap := Rule.GetClearance(eObjectClearanceID_Text, eObjectClearanceID_OutlineEdge);
-    Rule := Iterator.NextPCBObject;
-  end;
-  APS_Board.BoardIterator_Destroy(Iterator);
-
-  if APS_UnhideAll then
-    APS_UnhideAllDesignators(0);
-  APS_AutoHideDesignators(0);
-  APS_MoveSilkOffBoard(0);
-
-  // Smallest components first: dense clusters get first pick of free space
-  Iterator := APS_Board.BoardIterator_Create;
-  Iterator.AddFilter_ObjectSet(MkSet(eComponentObject));
-  Iterator.AddFilter_LayerSet(MkSet(eTopLayer, eBottomLayer));
-  Iterator.AddFilter_Method(eProcessAll);
   SortedComps := TStringList.Create;
-  Cmp := Iterator.FirstPCBObject;
-  while (Cmp <> nil) do
-  begin
-    if APS_InScope(Cmp) then
-    begin
-      CmpRect := APS_GetObjRect(Cmp);
-      SizeKey := Round(CoordToMils(CmpRect.Right - CmpRect.Left) + CoordToMils(CmpRect.Top - CmpRect.Bottom));
-      SortedComps.AddObject(IntToStr(100000000 + SizeKey), Cmp);
-    end;
-    Cmp := Iterator.NextPCBObject;
-  end;
-  APS_Board.BoardIterator_Destroy(Iterator);
-  SortedComps.Sort;
-
   NotPlaced := TObjectList.Create;
+  NotPlaced.OwnsObjects := False;
   StillFailed := TObjectList.Create;
+  StillFailed.OwnsObjects := False;
+  Remaining := TObjectList.Create;
+  Remaining.OwnsObjects := False;
 
-  Count := 0;
-  PlaceCnt := 0;
-  for i := 0 to SortedComps.Count - 1 do
-  begin
-    Cmp := SortedComps.Objects[i];
-    Silkscreen := Cmp.Name;
-    if APS_PlaceSilkscreen(Silkscreen, OFFSET_CNT) then
-      Inc(PlaceCnt)
-    else
-      NotPlaced.Add(Silkscreen);
-    Inc(Count);
-  end;
-  Pass1Cnt := PlaceCnt;
-
-  RetryCnt := APS_RetryFailed(NotPlaced, StillFailed, OFFSET_CNT);
-  PlaceCnt := PlaceCnt + RetryCnt;
-
-  Pass2Cnt := 0;
-  if APS_WiggleEnabled and (StillFailed.Count > 0) then
-  begin
-    Remaining := TObjectList.Create;
-    for i := 0 to StillFailed.Count - 1 do
-    begin
-      Silkscreen := StillFailed[i];
-      if APS_WigglePlace(Silkscreen) then
+  try
+    RestoreDRC := False;
+    PCBServer.PreProcess;
+    try
+      // Online DRC off while designators move (speed)
+      PCBSystemOptions := PCBServer.SystemOptions;
+      if PCBSystemOptions <> nil then
       begin
-        Inc(PlaceCnt);
-        Inc(Pass2Cnt);
-      end
+        DRCSetting := PCBSystemOptions.DoOnlineDRC;
+        RestoreDRC := True;
+        PCBSystemOptions.DoOnlineDRC := False;
+      end;
+
+      // Board outline: polygon tests only on non-rectangular boards
+      APS_BoardRect := APS_GetObjRect(APS_Board);
+      APS_BoardIsRectangular := True;
+      Outline := APS_Board.BoardOutline;
+      if Outline.PointCount <> 4 then
+        APS_BoardIsRectangular := False
       else
-        Remaining.Add(Silkscreen);
+        for i := 0 to Outline.PointCount - 1 do
+        begin
+          if Outline.Segments[i].Kind <> ePolySegmentLine then
+            APS_BoardIsRectangular := False
+          else
+          begin
+            vx := Outline.Segments[i].vx;
+            vy := Outline.Segments[i].vy;
+            if ((vx <> APS_BoardRect.Left) and (vx <> APS_BoardRect.Right)) or
+              ((vy <> APS_BoardRect.Bottom) and (vy <> APS_BoardRect.Top)) then
+              APS_BoardIsRectangular := False;
+          end;
+        end;
+      for i := 0 to Outline.PointCount - 1 do
+      begin
+        APS_OutlineX.Add(Outline.Segments[i].vx + APS_COORD_BIAS);
+        APS_OutlineY.Add(Outline.Segments[i].vy + APS_COORD_BIAS);
+      end;
+
+      // The original script ignores the Board Outline Clearance rule; honour the
+      // largest text-to-outline clearance
+      APS_EdgeGap := 0;
+      Iterator := APS_Board.BoardIterator_Create;
+      Iterator.AddFilter_ObjectSet(MkSet(eRuleObject));
+      Iterator.AddFilter_LayerSet(AllLayers);
+      Iterator.AddFilter_Method(eProcessAll);
+      Rule := Iterator.FirstPCBObject;
+      while Rule <> nil do
+      begin
+        if Rule.Enabled and (Rule.RuleKind = eRule_BoardOutlineClearance) then
+          if Rule.GetClearance(eObjectClearanceID_Text, eObjectClearanceID_OutlineEdge) > APS_EdgeGap then
+            APS_EdgeGap := Rule.GetClearance(eObjectClearanceID_Text, eObjectClearanceID_OutlineEdge);
+        Rule := Iterator.NextPCBObject;
+      end;
+      APS_Board.BoardIterator_Destroy(Iterator);
+
+      if APS_UnhideAll then
+        APS_UnhideAllDesignators(0);
+      APS_AutoHideDesignators(0);
+      APS_MoveSilkOffBoard(0);
+
+      // Smallest components first: dense clusters get first pick of free space
+      Iterator := APS_Board.BoardIterator_Create;
+      Iterator.AddFilter_ObjectSet(MkSet(eComponentObject));
+      Iterator.AddFilter_LayerSet(MkSet(eTopLayer, eBottomLayer));
+      Iterator.AddFilter_Method(eProcessAll);
+      Cmp := Iterator.FirstPCBObject;
+      while (Cmp <> nil) do
+      begin
+        if APS_InScope(Cmp) then
+        begin
+          CmpRect := APS_GetObjRect(Cmp);
+          SizeKey := Round(CoordToMils(CmpRect.Right - CmpRect.Left) + CoordToMils(CmpRect.Top - CmpRect.Bottom));
+          SortedComps.AddObject(IntToStr(100000000 + SizeKey), Cmp);
+        end;
+        Cmp := Iterator.NextPCBObject;
+      end;
+      APS_Board.BoardIterator_Destroy(Iterator);
+      SortedComps.Sort;
+
+      Count := 0;
+      PlaceCnt := 0;
+      for i := 0 to SortedComps.Count - 1 do
+      begin
+        Cmp := SortedComps.Objects[i];
+        Silkscreen := Cmp.Name;
+        if APS_PlaceSilkscreen(Silkscreen, OFFSET_CNT) then
+          Inc(PlaceCnt)
+        else
+          NotPlaced.Add(Silkscreen);
+        Inc(Count);
+      end;
+      Pass1Cnt := PlaceCnt;
+
+      RetryCnt := APS_RetryFailed(NotPlaced, StillFailed, OFFSET_CNT);
+      PlaceCnt := PlaceCnt + RetryCnt;
+
+      Pass2Cnt := 0;
+      if APS_WiggleEnabled and (StillFailed.Count > 0) then
+      begin
+        for i := 0 to StillFailed.Count - 1 do
+        begin
+          Silkscreen := StillFailed[i];
+          if APS_WigglePlace(Silkscreen) then
+          begin
+            Inc(PlaceCnt);
+            Inc(Pass2Cnt);
+          end
+          else
+            Remaining.Add(Silkscreen);
+        end;
+        StillFailed.Clear;
+        for i := 0 to Remaining.Count - 1 do
+          StillFailed.Add(Remaining[i]);
+      end;
+
+      for i := 0 to StillFailed.Count - 1 do
+      begin
+        Silkscreen := StillFailed[i];
+        FailedNames.Add(Silkscreen.Text);
+      end;
+
+      if FailMode = 'hide' then
+        APS_HideDesignators(StillFailed)
+      else if FailMode = 'restore' then
+        APS_RestoreComp(StillFailed)
+      else
+        APS_MoveSilkOverComp(StillFailed);
+
+      // Rebuild every touched designator's stroke geometry: batch DRC checks a
+      // cached copy that scripted moves and resizes leave stale
+      for i := 0 to SortedComps.Count - 1 do
+      begin
+        Cmp := SortedComps.Objects[i];
+        Silkscreen := Cmp.Name;
+        Silkscreen.BeginModify;
+        Silkscreen.SetState_XSizeYSize;
+        Silkscreen.EndModify;
+        Silkscreen.GraphicallyInvalidate;
+      end;
+
+    finally
+      try
+        if RestoreDRC then PCBSystemOptions.DoOnlineDRC := DRCSetting;
+      finally
+        PCBServer.PostProcess;
+      end;
     end;
-    StillFailed := Remaining;
+    APS_Board.ViewManager_FullUpdate;
+
+    AddJSONInteger(Props, 'component_count', Count);
+    AddJSONInteger(Props, 'placed_count', PlaceCnt);
+    AddJSONInteger(Props, 'placed_first_pass', Pass1Cnt);
+    AddJSONInteger(Props, 'placed_retry', RetryCnt);
+    AddJSONInteger(Props, 'placed_second_pass', Pass2Cnt);
+    AddJSONInteger(Props, 'failed_count', FailedNames.Count);
+    Props.Add('"failed": ' + APS_Quoted(FailedNames));
+    AddJSONProperty(Props, 'failed_action', FailMode);
+    Props.Add('"auto_hidden": ' + APS_Quoted(APS_AutoHidden));
+    AddJSONInteger(Props, 'outline_layer_found', APS_CmpOutlineLayerID);
+    AddJSONNumber(Props, 'seconds', Round((Now() - StartTime) * 86400 * 10) / 10);
+    AddJSONProperty(Props, 'board', APS_Board.FileName);
+    result := BuildJSONObject(Props);
+  finally
+    APS_DictionaryCache.Free;
+    APS_TextProps.Free;
+    APS_AutoHidden.Free;
+    SortedComps.Free;
+    FailedNames.Free;
+    Props.Free;
+    APS_ObsAL.Free; APS_ObsAB.Free; APS_ObsAR.Free; APS_ObsAT.Free;
+    APS_ObsBL.Free; APS_ObsBB.Free; APS_ObsBR.Free; APS_ObsBT.Free;
+    APS_BaseL.Free; APS_BaseB.Free; APS_BaseR.Free; APS_BaseT.Free;
+    APS_BaseX.Free; APS_BaseY.Free; APS_BaseIdx.Free;
+    APS_OutlineX.Free; APS_OutlineY.Free;
+    NotPlaced.Free; StillFailed.Free; Remaining.Free;
   end;
-
-  for i := 0 to StillFailed.Count - 1 do
-  begin
-    Silkscreen := StillFailed[i];
-    FailedNames.Add(Silkscreen.Text);
-  end;
-
-  if FailMode = 'hide' then
-    APS_HideDesignators(StillFailed)
-  else if FailMode = 'restore' then
-    APS_RestoreComp(StillFailed)
-  else
-    APS_MoveSilkOverComp(StillFailed);
-
-  // Rebuild every touched designator's stroke geometry: batch DRC checks a
-  // cached copy that scripted moves and resizes leave stale
-  for i := 0 to SortedComps.Count - 1 do
-  begin
-    Cmp := SortedComps.Objects[i];
-    Silkscreen := Cmp.Name;
-    Silkscreen.BeginModify;
-    Silkscreen.SetState_XSizeYSize;
-    Silkscreen.EndModify;
-    Silkscreen.GraphicallyInvalidate;
-  end;
-
-  if PCBSystemOptions <> nil then
-    PCBSystemOptions.DoOnlineDRC := DRCSetting;
-  PCBServer.PostProcess;
-  APS_Board.ViewManager_FullUpdate;
-
-  AddJSONInteger(Props, 'component_count', Count);
-  AddJSONInteger(Props, 'placed_count', PlaceCnt);
-  AddJSONInteger(Props, 'placed_first_pass', Pass1Cnt);
-  AddJSONInteger(Props, 'placed_retry', RetryCnt);
-  AddJSONInteger(Props, 'placed_second_pass', Pass2Cnt);
-  AddJSONInteger(Props, 'failed_count', FailedNames.Count);
-  Props.Add('"failed": ' + APS_Quoted(FailedNames));
-  AddJSONProperty(Props, 'failed_action', FailMode);
-  Props.Add('"auto_hidden": ' + APS_Quoted(APS_AutoHidden));
-  AddJSONInteger(Props, 'outline_layer_found', APS_CmpOutlineLayerID);
-  AddJSONNumber(Props, 'seconds', Round((Now() - StartTime) * 86400 * 10) / 10);
-  AddJSONProperty(Props, 'board', APS_Board.FileName);
-  result := BuildJSONObject(Props);
-
-  APS_DictionaryCache.Free;
-  APS_TextProps.Free;
-  APS_AutoHidden.Free;
-  SortedComps.Free;
-  FailedNames.Free;
-  Props.Free;
-  APS_ObsAL.Free; APS_ObsAB.Free; APS_ObsAR.Free; APS_ObsAT.Free;
-  APS_ObsBL.Free; APS_ObsBB.Free; APS_ObsBR.Free; APS_ObsBT.Free;
-  APS_BaseL.Free; APS_BaseB.Free; APS_BaseR.Free; APS_BaseT.Free;
-  APS_BaseX.Free; APS_BaseY.Free; APS_BaseIdx.Free;
-  APS_OutlineX.Free; APS_OutlineY.Free;
 end;

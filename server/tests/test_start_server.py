@@ -65,7 +65,7 @@ class PruneTest(unittest.TestCase):
         start_server._prune_old_venvs()
         for d in (old, half, trash):
             self.assertFalse(d.exists(), d.name)
-        self.assertEqual(sorted(p.name for p in self.venvs.iterdir()), [])
+        self.assertEqual(sorted(p.name for p in self.venvs.iterdir() if p.is_dir()), [])
 
     def test_nothing_pruned_when_processes_cannot_be_read(self):
         old = self.venv("old", last_used_days=100)
@@ -139,8 +139,32 @@ class InUseTest(unittest.TestCase):
                     setattr(start_server, name, value)
 
 
-@unittest.skipUnless(os.name == "nt", "Windows process creation flags")
-class BuilderLaunchTest(unittest.TestCase):
+class BuilderTest(unittest.TestCase):
+    def test_build_lock_is_held_until_the_owner_exits(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(start_server, "VENVS_DIR", Path(tmp)):
+            with start_server._build_guard("current") as acquired:
+                self.assertTrue(acquired)
+                self.assertTrue(start_server._builder_alive("current"))
+                with start_server._build_guard("current") as second:
+                    self.assertFalse(second)
+            self.assertFalse(start_server._builder_alive("current"))
+
+    def test_builder_rechecks_readiness_after_acquiring_the_lock(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(start_server, "VENVS_DIR", Path(tmp)):
+            with (
+                patch.object(start_server, "venv_is_ready",
+                             side_effect=lambda: start_server._builder_alive(start_server.VENV_DIR.name)),
+                patch.object(start_server, "_build_venv") as build,
+            ):
+                self.assertEqual(start_server.build_main(), 0)
+                build.assert_not_called()
+
+    def test_manual_recovery_invokes_the_marking_builder(self):
+        message = start_server._manual_build_message("Test build failure")
+        self.assertIn("start_server.py", message)
+        self.assertIn("--build", message)
+
+    @unittest.skipUnless(os.name == "nt", "Windows process creation flags")
     def test_builder_keeps_its_console_windowless_even_if_breakaway_is_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)

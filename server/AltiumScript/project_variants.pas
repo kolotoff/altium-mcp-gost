@@ -1,12 +1,41 @@
 // Project operations use the live workspace, never project files on disk.
+function MaterialVariationReadback(Change: IComponentVariation): String;
+var
+    Props, Parameters: TStringList;
+    Parameter: IParameterVariation;
+    i: Integer;
+begin
+    Props := TStringList.Create;
+    Parameters := TStringList.Create;
+    try
+        for i := 0 to Change.DM_VariationCount - 1 do
+        begin
+            Parameter := Change.DM_Variations(i);
+            Props.Clear;
+            AddJSONProperty(Props, 'name', Parameter.DM_ParameterName);
+            AddJSONProperty(Props, 'value', Parameter.DM_VariedValue);
+            Parameters.Add(BuildJSONObject(Props, 0));
+        end;
+        Props.Clear;
+        AddJSONProperty(Props, 'designator', Change.DM_PhysicalDesignator);
+        AddJSONProperty(Props, 'unique_id', Change.DM_UniqueId);
+        AddJSONInteger(Props, 'kind', Ord(Change.DM_VariationKind));
+        AddJSONProperty(Props, 'alternate_part', Change.DM_AlternatePart);
+        Props.Add(BuildJSONArray(Parameters, 'parameters'));
+        Result := BuildJSONObject(Props, 0);
+    finally
+        Parameters.Free;
+        Props.Free;
+    end;
+end;
+
 function InspectProjectVariants(ProjectFilter: String): String;
 var
     Project: IProject;
     ProjectVariant: IProjectVariant;
     Variation: IComponentVariation;
-    Parameter: IParameterVariation;
-    Projects, Variants, Changes, Parameters, Props: TStringList;
-    i, j, k, p: Integer;
+    Projects, Variants, Changes, Props: TStringList;
+    i, j, k: Integer;
     ProjectPath, VariantName: String;
 begin
     if Trim(ProjectFilter) = '' then
@@ -17,7 +46,6 @@ begin
     Projects := TStringList.Create;
     Variants := TStringList.Create;
     Changes := TStringList.Create;
-    Parameters := TStringList.Create;
     Props := TStringList.Create;
     try
         for i := 0 to GetWorkspace.DM_ProjectCount - 1 do
@@ -37,22 +65,7 @@ begin
                     for k := 0 to ProjectVariant.DM_VariationCount - 1 do
                     begin
                         Variation := ProjectVariant.DM_Variations(k);
-                        Parameters.Clear;
-                        for p := 0 to Variation.DM_VariationCount - 1 do
-                        begin
-                            Parameter := Variation.DM_Variations(p);
-                            Props.Clear;
-                            AddJSONProperty(Props, 'name', Parameter.DM_ParameterName);
-                            AddJSONProperty(Props, 'value', Parameter.DM_VariedValue);
-                            Parameters.Add(BuildJSONObject(Props, 0));
-                        end;
-                        Props.Clear;
-                        AddJSONProperty(Props, 'designator', Variation.DM_PhysicalDesignator);
-                        AddJSONProperty(Props, 'unique_id', Variation.DM_UniqueId);
-                        AddJSONInteger(Props, 'kind', Ord(Variation.DM_VariationKind));
-                        AddJSONProperty(Props, 'alternate_part', Variation.DM_AlternatePart);
-                        Props.Add(BuildJSONArray(Parameters, 'parameters'));
-                        Changes.Add(BuildJSONObject(Props, 0));
+                        Changes.Add(MaterialVariationReadback(Variation));
                     end;
                     Props.Clear;
                     AddJSONProperty(Props, 'name', ProjectVariant.DM_Name);
@@ -74,7 +87,6 @@ begin
         Result := BuildJSONObject(Props, 0);
     finally
         Props.Free;
-        Parameters.Free;
         Changes.Free;
         Variants.Free;
         Projects.Free;
@@ -251,33 +263,28 @@ begin
             Result := Result + 1;
 end;
 
-function MaterialVariationReadback(Change: IComponentVariation): String;
+function SameBaseMaterial(Source, Target: IComponent): Boolean;
+begin
+    Result := (Source.DM_LibraryReference = Target.DM_LibraryReference) and
+              (Source.DM_Comment = Target.DM_Comment) and
+              (Source.DM_Footprint = Target.DM_Footprint);
+end;
+
+procedure PopulateMaterialOverride(Source, Target: IComponentVariation);
 var
-    Props, Parameters: TStringList;
-    Parameter: IParameterVariation;
+    SourceParameter, TargetParameter: IParameterVariation;
     i: Integer;
 begin
-    Props := TStringList.Create;
-    Parameters := TStringList.Create;
-    try
-        for i := 0 to Change.DM_VariationCount - 1 do
-        begin
-            Parameter := Change.DM_Variations(i);
-            Props.Clear;
-            AddJSONProperty(Props, 'name', Parameter.DM_ParameterName);
-            AddJSONProperty(Props, 'value', Parameter.DM_VariedValue);
-            Parameters.Add(BuildJSONObject(Props, 0));
-        end;
-        Props.Clear;
-        AddJSONProperty(Props, 'designator', Change.DM_PhysicalDesignator);
-        AddJSONProperty(Props, 'unique_id', Change.DM_UniqueId);
-        AddJSONInteger(Props, 'kind', Ord(Change.DM_VariationKind));
-        AddJSONProperty(Props, 'alternate_part', Change.DM_AlternatePart);
-        Props.Add(BuildJSONArray(Parameters, 'parameters'));
-        Result := BuildJSONObject(Props, 0);
-    finally
-        Parameters.Free;
-        Props.Free;
+    Target.DM_SetVariationKind(Source.DM_VariationKind);
+    Target.DM_SetAlternatePart(Source.DM_AlternatePart);
+    for i := 0 to Source.DM_VariationCount - 1 do
+    begin
+        SourceParameter := Source.DM_Variations(i);
+        // AD26 may create a Comment override when setting the alternate part.
+        TargetParameter := Target.DM_FindParameterVariation(SourceParameter.DM_ParameterName);
+        if TargetParameter = nil then TargetParameter := Target.DM_AddParameterVariation;
+        TargetParameter.DM_SetParameterName(SourceParameter.DM_ParameterName);
+        TargetParameter.DM_SetVariedValue(SourceParameter.DM_VariedValue);
     end;
 end;
 
@@ -291,10 +298,9 @@ var
     SourceFlat, TargetFlat: IDocument;
     SourceComponent, TargetComponent: IComponent;
     SourceChange, TargetChange: IComponentVariation;
-    SourceParameter, TargetParameter: IParameterVariation;
     ServerDocument: IServerDocument;
     Missing, Mapped, TargetIds, Props: TStringList;
-    i, j, NewIndex, MappedCount: Integer;
+    i, NewIndex, MappedCount: Integer;
     Existing, Created, Verified, TargetModified: Boolean;
     ErrorText, ReadbackDetails: String;
 begin
@@ -353,9 +359,7 @@ begin
                 Missing.Add('"' + JSONEscapeString(SourceChange.DM_PhysicalDesignator) + '"')
             else if SourceComponent <> nil then
             begin
-                if (SourceComponent.DM_LibraryReference <> TargetComponent.DM_LibraryReference) or
-                   (SourceComponent.DM_Comment <> TargetComponent.DM_Comment) or
-                   (SourceComponent.DM_Footprint <> TargetComponent.DM_Footprint) then
+                if not SameBaseMaterial(SourceComponent, TargetComponent) then
                     ErrorText := 'Base component mismatch: ' + SourceChange.DM_PhysicalDesignator;
                 if (Mapped.IndexOf(SourceChange.DM_PhysicalDesignator) >= 0) or
                    (TargetIds.IndexOf(TargetComponent.DM_UniqueId) >= 0) or
@@ -405,19 +409,7 @@ begin
                         TargetChange := TargetVariant.DM_AddComponentVariation;
                         TargetChange.DM_SetPhysicalDesignator(Mapped[i]);
                         TargetChange.DM_SetUniqueId(TargetIds[i]);
-                        TargetChange.DM_SetVariationKind(SourceChange.DM_VariationKind);
-                        TargetChange.DM_SetAlternatePart(SourceChange.DM_AlternatePart);
-                        for j := 0 to SourceChange.DM_VariationCount - 1 do
-                        begin
-                            SourceParameter := SourceChange.DM_Variations(j);
-                            // SetAlternatePart creates a Comment override in AD26.
-                            // Reuse it instead of adding a duplicate parameter.
-                            TargetParameter := TargetChange.DM_FindParameterVariation(SourceParameter.DM_ParameterName);
-                            if TargetParameter = nil then
-                                TargetParameter := TargetChange.DM_AddParameterVariation;
-                            TargetParameter.DM_SetParameterName(SourceParameter.DM_ParameterName);
-                            TargetParameter.DM_SetVariedValue(SourceParameter.DM_VariedValue);
-                        end;
+                        PopulateMaterialOverride(SourceChange, TargetChange);
                         if not MaterialVariationMatches(SourceChange, TargetChange, TargetIds[i]) then
                         begin
                             ErrorText := 'Material readback mismatch; new variant removed.';
@@ -538,30 +530,6 @@ begin
     finally
         Props.Free;
         Items.Free;
-    end;
-end;
-
-function SameBaseMaterial(Source, Target: IComponent): Boolean;
-begin
-    Result := (Source.DM_LibraryReference = Target.DM_LibraryReference) and
-              (Source.DM_Comment = Target.DM_Comment) and
-              (Source.DM_Footprint = Target.DM_Footprint);
-end;
-
-procedure PopulateMaterialOverride(Source, Target: IComponentVariation);
-var
-    SourceParameter, TargetParameter: IParameterVariation;
-    i: Integer;
-begin
-    Target.DM_SetVariationKind(Source.DM_VariationKind);
-    Target.DM_SetAlternatePart(Source.DM_AlternatePart);
-    for i := 0 to Source.DM_VariationCount - 1 do
-    begin
-        SourceParameter := Source.DM_Variations(i);
-        TargetParameter := Target.DM_FindParameterVariation(SourceParameter.DM_ParameterName);
-        if TargetParameter = nil then TargetParameter := Target.DM_AddParameterVariation;
-        TargetParameter.DM_SetParameterName(SourceParameter.DM_ParameterName);
-        TargetParameter.DM_SetVariedValue(SourceParameter.DM_VariedValue);
     end;
 end;
 

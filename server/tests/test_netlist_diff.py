@@ -73,6 +73,11 @@ class CompareTest(unittest.TestCase):
         # the same project written differently is the same snapshot
         self.assertEqual(a, nd.snapshot_path(folder, "c:/WORK/x/../Board.prjpcb", "last"))
 
+    def test_multipart_power_pin_keeps_the_assigned_net_in_either_order(self):
+        rows = ["U1|8|VCC", "u1|8|NetU1_8"]
+        for records in (rows, rows[::-1]):
+            self.assertEqual(nd.from_source({"pins": records}), {"U1-8": "VCC"})
+
     def test_snapshot_of_another_project_refused(self):
         with tempfile.TemporaryDirectory() as d:
             p = Path(d) / "s.json"

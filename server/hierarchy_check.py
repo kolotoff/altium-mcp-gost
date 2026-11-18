@@ -19,6 +19,7 @@ import re
 from collections import Counter, defaultdict
 from pathlib import Path
 
+from altium_files import read_project
 from schdoc_reader import read_schdoc_streams, coord
 
 IO_TYPES = {0: "Unspecified", 1: "Output", 2: "Input", 3: "Bidirectional"}
@@ -57,30 +58,6 @@ def _distance(rec):
 
 
 # ------------------------------------------------------------------ reading
-
-def read_project(prjpcb):
-    """Documents and connectivity settings of a .PrjPcb."""
-    prj = Path(prjpcb)
-    sheets, harness_files, settings = [], [], {}
-    raw = prj.read_bytes()
-    try:
-        text = raw.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        text = raw.decode("cp1252", "replace")
-    for line in text.splitlines():
-        if "=" not in line:
-            continue
-        k, v = line.split("=", 1)
-        if k == "DocumentPath":
-            p = Path(os.path.normpath(prj.parent / v))
-            if v.lower().endswith(".schdoc"):
-                sheets.append(p)
-            elif v.lower().endswith(".harness"):
-                harness_files.append(p)
-        elif k in ("HierarchyMode", "AllowPortNetNames", "AllowSheetEntryNetNames") and k not in settings:
-            settings[k] = v
-    return sheets, harness_files, settings
-
 
 def _points(r):
     n = _int(r, "LOCATIONCOUNT")

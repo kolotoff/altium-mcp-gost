@@ -185,14 +185,19 @@ class Board:
         return all(self.via[l][k] in (0, net) for l in self.layers)
 
 
-def route_one(board, net_name, start, end, start_layers, end_layers, via_cost=30.0, bend_cost=2.0, window=None):
+def route_one(board, net_name, start, end, start_layers, end_layers,
+              via_cost=30.0, bend_cost=2.0, window=None, *, routing_layers=None):
     """A* from start to end (mils). start_layers/end_layers: the layers the
     ends can be reached on (a pad's layer, or every layer for a through
     hole). Returns a list of (layer, [points]) legs and the via points, or
-    None when no path exists within window (i1, j1, i2, j2)."""
+    None when no path exists within window (i1, j1, i2, j2).
+    routing_layers limits where tracks can go. Through vias still need
+    clearance on all physical layers represented in the board."""
     net = board.id(net_name)
     s, e = board.cell(*start), board.cell(*end)
-    layers = board.layers
+    layers = board.layers if routing_layers is None else [
+        layer for layer in board.layers if layer in routing_layers
+    ]
     i1, j1, i2, j2 = window or (0, 0, board.nx - 1, board.ny - 1)
     P = board.pitch
 
@@ -202,7 +207,7 @@ def route_one(board, net_name, start, end, start_layers, end_layers, via_cost=30
 
     openq, came, cost = [], {}, {}
     for l in start_layers:
-        if l in board.track:
+        if l in layers:
             k = (s[0], s[1], l)
             cost[k] = 0.0
             came[k] = (None, None)

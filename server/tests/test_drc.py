@@ -57,6 +57,21 @@ class ReportTest(unittest.TestCase):
         self.assertEqual(len(r["rules"]), 3)
         self.assertFalse(drc.parse_report(REPORT)["stopped"])
 
+    def test_complete_looking_stopped_report_is_invalid_for_validation(self):
+        from server.routing_audit import read_drc
+
+        report = (
+            "PCB File : C:\\x\\board.PcbDoc\n"
+            "Processing Rule : Clearance Constraint\nRule Violations : 0\n"
+            "ERROR : DRC was stopped\nViolations Detected : 0\nWaived Violations : 0\n"
+        )
+        self.assertTrue(drc.parse_report(report)["stopped"])
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "board.drc"
+            path.write_text(report, encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "DRC was stopped"):
+                read_drc(path)
+
     def test_find_report_beside_board_or_in_output_folder(self):
         with tempfile.TemporaryDirectory() as d:
             board = Path(d) / "board.PcbDoc"

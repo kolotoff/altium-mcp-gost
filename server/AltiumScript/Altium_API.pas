@@ -68,26 +68,39 @@ begin
     end;
 end;
 
-// edit_schematic: sheet_path and save; the edits are in sch_edit_spec.txt
+// edit_schematic: the sheet path, save flag and operations share one request.
 function ExecuteEditSchematic(RequestData: TStringList): String;
 var
     i         : Integer;
     SheetPath : String;
     Save      : Boolean;
+    HasSpec   : Boolean;
+    Spec      : TStringList;
 begin
     SheetPath := '';
     Save := False;
-    for i := 0 to RequestData.Count - 1 do
-    begin
-        if Pos('"sheet_path"', RequestData[i]) > 0 then SheetPath := JSONLineValue(RequestData[i])
-        else if Pos('"save"', RequestData[i]) > 0 then Save := Pos('true', RequestData[i]) > 0;
+    HasSpec := False;
+    Spec := TStringList.Create;
+    try
+        for i := 0 to RequestData.Count - 1 do
+        begin
+            if Pos('"sheet_path":', RequestData[i]) > 0 then SheetPath := JSONLineValue(RequestData[i])
+            else if Pos('"save":', RequestData[i]) > 0 then Save := JSONLineValue(RequestData[i]) = 'true'
+            else if Pos('"edit_ops":', RequestData[i]) > 0 then
+            begin
+                HasSpec := True;
+                i := ReadJSONStringArray(RequestData, i, Spec);
+            end;
+        end;
+        if SheetPath = '' then
+            Result := 'ERROR: edit_schematic needs sheet_path'
+        else if not HasSpec then
+            Result := 'ERROR: edit_schematic needs edit_ops'
+        else
+            Result := EditSchematic(SheetPath, Spec, Save);
+    finally
+        Spec.Free;
     end;
-    if SheetPath = '' then
-    begin
-        Result := 'ERROR: edit_schematic needs sheet_path';
-        Exit;
-    end;
-    Result := EditSchematic(SheetPath, ROOT_DIR + 'sch_edit_spec.txt', Save);
 end;
 
 // Extract the create net class logic
@@ -1008,10 +1021,12 @@ end;
 function RequestText(RequestData: TStringList; Key: String; Default: String): String;
 var
     i : Integer;
+    Prefix : String;
 begin
     Result := Default;
+    Prefix := '"' + Key + '":';
     for i := 0 to RequestData.Count - 1 do
-        if Pos('"' + Key + '"', RequestData[i]) > 0 then
+        if Copy(Trim(RequestData[i]), 1, Length(Prefix)) = Prefix then
             Result := JSONLineValue(RequestData[i]);
 end;
 
@@ -1594,22 +1609,9 @@ end;
 
 function ExecuteGetPCBLibraryFootprintPrimitives(RequestData: TStringList): String;
 var
-    ParamValue: String;
-    i, ValueStart: Integer;
     FootprintName: String;
 begin
-    FootprintName := '';
-
-    for i := 0 to RequestData.Count - 1 do
-    begin
-        if (Pos('"footprint_name"', RequestData[i]) > 0) then
-        begin
-            ValueStart := Pos(':', RequestData[i]) + 1;
-            ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
-            FootprintName := TrimJSON(ParamValue);
-            Break;
-        end;
-    end;
+    FootprintName := RequestText(RequestData, 'footprint_name', '');
 
     if FootprintName <> '' then
         Result := DumpPCBLibraryFootprintPrimitives(FootprintName)
@@ -1621,7 +1623,7 @@ end;
 function ExecuteSetPCBLibraryPadShapes(RequestData: TStringList): String;
 var
     ParamValue: String;
-    i, ValueStart: Integer;
+    i: Integer;
     ExcludeFootprints: TStringList;
 begin
     ExcludeFootprints := TStringList.Create;
@@ -1635,8 +1637,7 @@ begin
             end
             else if (Pos('"exclude_footprint_name"', RequestData[i]) > 0) then
             begin
-                ValueStart := Pos(':', RequestData[i]) + 1;
-                ParamValue := TrimJSON(Copy(RequestData[i], ValueStart, Length(RequestData[i])));
+                ParamValue := JSONLineValue(RequestData[i]);
                 if ParamValue <> '' then
                     ExcludeFootprints.Add(ParamValue);
             end;
@@ -1683,29 +1684,11 @@ end;
 
 function ExecuteCopyPCBPolygonGeometry(RequestData: TStringList): String;
 var
-    ParamValue: String;
-    i, ValueStart: Integer;
     SourcePolygonName: String;
     TargetPolygonName: String;
 begin
-    SourcePolygonName := '';
-    TargetPolygonName := '';
-
-    for i := 0 to RequestData.Count - 1 do
-    begin
-        if (Pos('"source_polygon"', RequestData[i]) > 0) then
-        begin
-            ValueStart := Pos(':', RequestData[i]) + 1;
-            ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
-            SourcePolygonName := TrimJSON(ParamValue);
-        end
-        else if (Pos('"target_polygon"', RequestData[i]) > 0) then
-        begin
-            ValueStart := Pos(':', RequestData[i]) + 1;
-            ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
-            TargetPolygonName := TrimJSON(ParamValue);
-        end;
-    end;
+    SourcePolygonName := RequestText(RequestData, 'source_polygon', '');
+    TargetPolygonName := RequestText(RequestData, 'target_polygon', '');
 
     if SourcePolygonName = '' then
         Result := '{"success": false, "error": "No source polygon provided"}'
@@ -1722,53 +1705,17 @@ end;
 
 function ExecuteAddTentedViasAroundKeepoutContour(RequestData: TStringList): String;
 var
-    ParamValue: String;
-    i, ValueStart: Integer;
     ViaDiameterMM: Double;
     ViaHoleMM: Double;
     EdgeClearanceMM: Double;
     PitchMM: Double;
     NetName: String;
 begin
-    ViaDiameterMM := 0.4;
-    ViaHoleMM := 0.2;
-    EdgeClearanceMM := 0.3;
-    PitchMM := 2.0;
-    NetName := '';
-
-    for i := 0 to RequestData.Count - 1 do
-    begin
-        if (Pos('"via_diameter_mm"', RequestData[i]) > 0) then
-        begin
-            ValueStart := Pos(':', RequestData[i]) + 1;
-            ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
-            ViaDiameterMM := SafeStrToFloat(TrimJSON(ParamValue));
-        end
-        else if (Pos('"via_hole_mm"', RequestData[i]) > 0) then
-        begin
-            ValueStart := Pos(':', RequestData[i]) + 1;
-            ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
-            ViaHoleMM := SafeStrToFloat(TrimJSON(ParamValue));
-        end
-        else if (Pos('"edge_clearance_mm"', RequestData[i]) > 0) then
-        begin
-            ValueStart := Pos(':', RequestData[i]) + 1;
-            ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
-            EdgeClearanceMM := SafeStrToFloat(TrimJSON(ParamValue));
-        end
-        else if (Pos('"pitch_mm"', RequestData[i]) > 0) then
-        begin
-            ValueStart := Pos(':', RequestData[i]) + 1;
-            ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
-            PitchMM := SafeStrToFloat(TrimJSON(ParamValue));
-        end
-        else if (Pos('"net_name"', RequestData[i]) > 0) then
-        begin
-            ValueStart := Pos(':', RequestData[i]) + 1;
-            ParamValue := Copy(RequestData[i], ValueStart, Length(RequestData[i]) - ValueStart + 1);
-            NetName := TrimJSON(ParamValue);
-        end;
-    end;
+    ViaDiameterMM := SafeStrToFloat(RequestText(RequestData, 'via_diameter_mm', '0.4'));
+    ViaHoleMM := SafeStrToFloat(RequestText(RequestData, 'via_hole_mm', '0.2'));
+    EdgeClearanceMM := SafeStrToFloat(RequestText(RequestData, 'edge_clearance_mm', '0.3'));
+    PitchMM := SafeStrToFloat(RequestText(RequestData, 'pitch_mm', '2.0'));
+    NetName := RequestText(RequestData, 'net_name', '');
 
     Result := AddTentedViasAroundKeepoutContour(ViaDiameterMM, ViaHoleMM, EdgeClearanceMM, PitchMM, NetName);
 end;

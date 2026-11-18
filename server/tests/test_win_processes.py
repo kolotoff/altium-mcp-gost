@@ -2,6 +2,7 @@
 import os
 import sys
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
@@ -31,6 +32,12 @@ class ImagePathTest(unittest.TestCase):
     def test_unreadable_process_gives_empty_path(self):
         # PID 0 is the System Idle Process, which cannot be opened
         self.assertEqual(win_processes.image_path(0), "")
+
+    def test_altium_window_owner_requires_the_configured_install(self):
+        with patch.object(win_processes, "window_image_path", return_value=r"C:\Old\X2.EXE"):
+            self.assertFalse(win_processes.window_belongs_to(1, r"C:\Altium\X2.EXE"))
+            self.assertTrue(win_processes.window_belongs_to(1, r"c:\old\x2.exe"))
+            self.assertFalse(win_processes.window_belongs_to(1, ""))
 
 
 if __name__ == "__main__":

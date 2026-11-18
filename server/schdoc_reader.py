@@ -18,7 +18,7 @@ else:
     from compound_file import CompoundBinaryFile
 
 
-def parse_records(stream: bytes) -> list:
+def parse_records(stream: bytes, *, strict: bool = False) -> list:
     """Split a FileHeader stream into records. Binary records become None, so
     list indices still match the OWNERINDEX numbering."""
     records, off = [], 0
@@ -26,23 +26,29 @@ def parse_records(stream: bytes) -> list:
         header = struct.unpack_from("<I", stream, off)[0]
         length, kind = header & 0xFFFFFF, header >> 24
         body = stream[off + 4:off + 4 + length]
+        if strict and len(body) != length:
+            raise ValueError("FileHeader contains a truncated record")
         off += 4 + length
         if kind != 0:
             records.append(None)
             continue
-        text = body.rstrip(b"\x00").decode("cp1252", "replace")
         rec = {}
-        for field in text.split("|"):
-            if "=" in field:
-                k, v = field.split("=", 1)
-                rec[k.upper()] = v
+        utf8 = {}
+        for field in body.rstrip(b"\x00").split(b"|"):
+            key, separator, value = field.partition(b"=")
+            if not separator:
+                continue
+            key = key.decode("cp1252", "replace").upper()
+            if key.startswith("%UTF8%"):
+                utf8[key[6:]] = value
+            else:
+                rec[key] = value.decode("cp1252", "replace")
         # UTF-8 copies of text fields are stored as %UTF8%KEY
-        for k in [k for k in rec if k.startswith("%UTF8%")]:
+        for key, value in utf8.items():
             try:
-                rec[k[6:]] = rec[k].encode("cp1252", "replace").decode("utf-8")
+                rec[key] = value.decode("utf-8")
             except UnicodeDecodeError:
                 pass
-            del rec[k]
         records.append(rec)
     return records
 

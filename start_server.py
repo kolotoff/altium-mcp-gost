@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).parent
@@ -83,16 +84,13 @@ VENVS_DIR = DATA_DIR / "venvs"
 VENV_DIR = VENVS_DIR / _venv_key()
 PYTHON_EXE = VENV_DIR / "Scripts" / "python.exe"
 MARKER = VENV_DIR / ".requirements-installed"
-LOCK = VENVS_DIR / (VENV_DIR.name + ".lock")
 BUILD_LOG = DATA_DIR / "build.log"
 
 # How long the launcher waits for the venv before giving up on THIS start.
 # Just under Claude Desktop's ~60 s initialize timeout, so the launcher gets
 # to say why it is exiting instead of being killed mid-sentence.
 LAUNCH_WAIT_SECONDS = 50
-# A lock whose owner is still alive but older than this belongs to a build
-# that hung. Generous: the owner-alive check is the real staleness test.
-STALE_LOCK_SECONDS = 1800
+LEGACY_LOCK_MAX_AGE = 1800
 # A venv another launch has not used for this long, and that nothing runs
 # from, is deleted after a build (see _prune_old_venvs)
 KEEP_UNUSED_DAYS = 14
@@ -112,20 +110,14 @@ def venv_is_ready():
 
 
 def _manual_build_message(reason):
-    pip_exe = VENV_DIR / "Scripts" / "pip.exe"
-    if _locked_text():
-        requirements = '-r "%s"' % LOCKED_REQUIREMENTS
-    else:
-        requirements = " ".join('"%s"' % r for r in REQUIREMENTS)
+    command = subprocess.list2cmdline([sys.executable, str(Path(__file__).resolve()), "--build"])
     return (
         "%s\n\n"
         "Build log: %s\n"
-        "Build the environment by hand, which is not subject to the client's\n"
-        "startup timeout:\n"
-        '  rmdir /s /q "%s"\n'
-        '  "%s" -m venv "%s"\n'
-        '  "%s" install %s'
-        % (reason, BUILD_LOG, VENV_DIR, sys.executable, VENV_DIR, pip_exe, requirements)
+        "Run the builder directly in Command Prompt to build and mark the "
+        "environment ready outside the client's startup timeout.\n"
+        "  %s"
+        % (reason, BUILD_LOG, command)
     )
 
 
@@ -154,49 +146,43 @@ def _pid_alive(pid):
         kernel32.CloseHandle(handle)
 
 
-def _lock_owner():
-    """PID recorded in the lock, or 0 if it cannot be read."""
+def _legacy_builder_alive(venv_name):
+    """Keep environments from the previous PID-based builder while it runs."""
+    path = VENVS_DIR / (venv_name + ".lock")
     try:
-        return int(LOCK.read_text(encoding="ascii").strip() or 0)
+        age = time.time() - path.stat().st_mtime
+        pid = int(path.read_text(encoding="ascii").strip())
     except (OSError, ValueError):
-        return 0
-
-
-def _lock_is_live():
-    """True while a builder that wrote the lock is still running."""
-    try:
-        age = time.time() - LOCK.stat().st_mtime
-    except OSError:
         return False
-    return age < STALE_LOCK_SECONDS and _pid_alive(_lock_owner())
+    return age < LEGACY_LOCK_MAX_AGE and _pid_alive(pid)
 
 
-def _acquire_lock():
-    """True if this process now owns the build, False if a live builder does."""
-    LOCK.parent.mkdir(parents=True, exist_ok=True)
-    for _ in range(3):
-        try:
-            fd = os.open(str(LOCK), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
-            if _lock_is_live():
-                return False
-            # The owner is gone (killed mid-build) or hung. Take over.
-            try:
-                LOCK.unlink()
-            except OSError:
-                return False
-            continue
-        os.write(fd, str(os.getpid()).encode("ascii"))
-        os.close(fd)
-        return True
-    return False
-
-
-def _release_lock():
+@contextmanager
+def _build_guard(venv_name, *, create=True):
+    """Hold a stable OS lock until the file closes or the process exits."""
+    path = VENVS_DIR / (venv_name + ".build-lock")
+    if create:
+        VENVS_DIR.mkdir(parents=True, exist_ok=True)
     try:
-        LOCK.unlink()
-    except OSError:
-        pass
+        lock = path.open("a+b" if create else "r+b")
+    except FileNotFoundError:
+        if create:
+            raise
+        yield True
+        return
+    with lock:
+        try:
+            if os.name == "nt":
+                import msvcrt
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            yield False
+        else:
+            yield True
 
 
 # --- builder ----------------------------------------------------------------
@@ -293,53 +279,51 @@ def _prune_old_venvs():
         if child.name.endswith(".trash"):
             shutil.rmtree(child, ignore_errors=True)
             continue
-        if child.name in in_use or _builder_alive(child.name):
+        if child.name in in_use:
             continue
-        try:
-            last_used = (child / MARKER.name).stat().st_mtime
-        except OSError:
-            last_used = 0  # never finished building
-        if last_used > cutoff:
-            continue
-        # Renamed first, so a delete that stops half way never leaves a
-        # broken venv under a name a launcher would pick up
-        trash = child.with_name(child.name + ".trash")
-        try:
-            os.rename(child, trash)
-        except OSError:
-            continue
-        shutil.rmtree(trash, ignore_errors=True)
+        with _build_guard(child.name) as acquired:
+            if not acquired or _legacy_builder_alive(child.name):
+                continue
+            try:
+                last_used = (child / MARKER.name).stat().st_mtime
+            except OSError:
+                last_used = 0  # never finished building
+            if last_used > cutoff:
+                continue
+            # Renamed first, so a delete that stops half way never leaves a
+            # broken venv under a name a launcher would pick up
+            trash = child.with_name(child.name + ".trash")
+            try:
+                os.rename(child, trash)
+            except OSError:
+                continue
+            shutil.rmtree(trash, ignore_errors=True)
 
 
 def _builder_alive(venv_name):
     """True while a builder holds the lock for that venv."""
-    lock = VENVS_DIR / (venv_name + ".lock")
-    try:
-        age = time.time() - lock.stat().st_mtime
-        pid = int(lock.read_text(encoding="ascii").strip() or 0)
-    except (OSError, ValueError):
-        return False
-    return age < STALE_LOCK_SECONDS and _pid_alive(pid)
+    with _build_guard(venv_name, create=False) as acquired:
+        return not acquired or _legacy_builder_alive(venv_name)
 
 
 def build_main():
     """Entry point of the detached builder process."""
-    if venv_is_ready():
-        return 0
-    if not _acquire_lock():
-        print("another builder is running; nothing to do")
-        return 0
     try:
-        started = time.time()
-        print("building %s" % VENV_DIR)
-        _build_venv()
-        print("ready in %.0f s" % (time.time() - started))
+        with _build_guard(VENV_DIR.name) as acquired:
+            if not acquired or _legacy_builder_alive(VENV_DIR.name):
+                print("another builder is running; nothing to do")
+                return 0
+            if venv_is_ready():
+                return 0
+            started = time.time()
+            print("building %s" % VENV_DIR)
+            _build_venv()
+            print("ready in %.0f s" % (time.time() - started))
         return 0
     except Exception as exc:  # noqa: BLE001 - anything here must reach the log
         print("BUILD FAILED: %s" % exc)
         return 1
     finally:
-        _release_lock()
         sys.stdout.flush()
 
 
@@ -394,7 +378,7 @@ def ensure_venv():
         _mark_used()
         return str(PYTHON_EXE)
 
-    if not _lock_is_live():
+    if not _builder_alive(VENV_DIR.name):
         _spawn_builder()
 
     started = time.time()
@@ -404,7 +388,7 @@ def ensure_venv():
         if venv_is_ready():
             _mark_used()
             return str(PYTHON_EXE)
-        if _lock_is_live():
+        if _builder_alive(VENV_DIR.name):
             seen_builder = True
         elif seen_builder or time.time() - started > 5:
             # A builder ran (or never managed to start) and there is still no

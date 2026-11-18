@@ -19,14 +19,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
+from drc_classic import classic_fields
 from sandbox import _process_name, _window_text
+from win_processes import window_belongs_to
 
 DIALOG_CLASS = "TDesignRuleCheckForm"
 RUN_BUTTON = "run design rule check"
 WM_CLOSE, WM_LBUTTONDOWN, WM_LBUTTONUP, MK_LBUTTON = 0x0010, 0x0201, 0x0202, 0x0001
 
 
-def find_dialog() -> Optional[int]:
+def find_dialog(*, executable=None) -> Optional[int]:
     """The visible Design Rule Checker dialog of X2.EXE, if one is open."""
     from ctypes import wintypes
     user32 = ctypes.windll.user32
@@ -37,8 +39,10 @@ def find_dialog() -> Optional[int]:
         if user32.IsWindowVisible(hwnd):
             cls = ctypes.create_unicode_buffer(64)
             user32.GetClassNameW(hwnd, cls, 64)
-            if cls.value == DIALOG_CLASS and _process_name(hwnd).lower() == "x2.exe":
-                found.append(hwnd)
+            if cls.value == DIALOG_CLASS:
+                owned = window_belongs_to(hwnd, executable) if executable else _process_name(hwnd).lower() == "x2.exe"
+                if owned:
+                    found.append(hwnd)
         return True
 
     user32.EnumWindows(proto(top), 0)
@@ -74,13 +78,14 @@ class DialogOutcome:
 
 
 async def drive_dialog(outcome: DialogOutcome, progress_file: Path, keep_alive: float = 5.0,
-                       settle: float = 0.6, attempts: int = 3, press_wait: float = 5.0) -> None:
+                       settle: float = 0.6, attempts: int = 3, press_wait: float = 5.0,
+                       *, executable=None) -> None:
     """Press Run in the Design Rule Checker dialog when it opens, then keep the
     bridge's progress file fresh while the check runs, so a long check is not
     taken for a hung command. Runs until cancelled by the caller."""
     user32 = ctypes.windll.user32
     while not outcome.pressed and not outcome.cancelled:
-        dialog = find_dialog()
+        dialog = find_dialog(executable=executable)
         if dialog is None:
             await asyncio.sleep(0.2)
             continue
@@ -93,11 +98,16 @@ async def drive_dialog(outcome: DialogOutcome, progress_file: Path, keep_alive: 
                 break
             user32.PostMessageW(button, WM_LBUTTONDOWN, MK_LBUTTON, 0)
             user32.PostMessageW(button, WM_LBUTTONUP, 0, 0)
-            for _ in range(max(1, int(press_wait / 0.25))):
-                await asyncio.sleep(0.25)
+            try:
+                for _ in range(max(1, int(press_wait / 0.25))):
+                    await asyncio.sleep(0.25)
+                    if not _is_open(dialog):
+                        outcome.pressed = True
+                        break
+            finally:
+                # The bridge can return just before the next poll.
                 if not _is_open(dialog):
                     outcome.pressed = True
-                    break
             if outcome.pressed:
                 break
             outcome.notes.append(f"press {n + 1} did not close the dialog")
@@ -111,14 +121,6 @@ async def drive_dialog(outcome: DialogOutcome, progress_file: Path, keep_alive: 
         except OSError:
             pass
         await asyncio.sleep(keep_alive)
-
-
-_RULE_RE = re.compile(r"^Processing Rule : (.*)$")
-_COUNT_RE = re.compile(r"^Rule Violations :\s*(\d+)")
-_TOTAL_RE = re.compile(r"^Violations Detected :\s*(\d+)")
-_WAIVED_RE = re.compile(r"^Waived Violations :\s*(\d+)")
-# "ERROR : More than 500 violations detected, DRC was stopped"
-_ERROR_RE = re.compile(r"^ERROR\s*:\s*(.*)$")
 
 
 # What a violation's descriptor says about by how much, as Altium writes it:
@@ -200,27 +202,18 @@ def parse_report(text: str) -> dict:
     and whether Altium stopped the check at its violation limit."""
     rules, current, errors = [], None, []
     total = waived = None
-    for line in text.splitlines():
-        line = line.strip()
-        m = _ERROR_RE.match(line)
-        if m:
-            errors.append(m.group(1).strip())
-            continue
-        m = _RULE_RE.match(line)
-        if m:
-            current = m.group(1).strip()
-            continue
-        m = _COUNT_RE.match(line)
-        if m and current is not None:
-            rules.append({"rule": current, "violations": int(m.group(1))})
+    for field, value in classic_fields(text):
+        if field == "ERROR":
+            errors.append(value)
+        elif field == "Processing Rule":
+            current = value
+        elif field == "Rule Violations" and current is not None:
+            rules.append({"rule": current, "violations": value})
             current = None
-            continue
-        m = _TOTAL_RE.match(line)
-        if m:
-            total = int(m.group(1))
-        m = _WAIVED_RE.match(line)
-        if m:
-            waived = int(m.group(1))
+        elif field == "Violations Detected":
+            total = value
+        elif field == "Waived Violations":
+            waived = value
     return {"violations": total, "waived": waived, "rules": rules, "errors": errors,
             "stopped": any("stopped" in e.lower() for e in errors)}
 

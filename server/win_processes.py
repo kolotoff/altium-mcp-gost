@@ -9,6 +9,7 @@ argtypes on ctypes.windll.kernel32 would change them for every other caller
 in the process.
 """
 import ctypes
+import os
 from ctypes import wintypes
 
 TH32CS_SNAPPROCESS = 0x00000002
@@ -32,6 +33,7 @@ class PROCESSENTRY32W(ctypes.Structure):
 
 
 _kernel32 = None
+_get_window_thread_process_id = None
 
 
 def _k32():
@@ -94,3 +96,31 @@ def image_path(pid: int) -> str:
         return ""
     finally:
         k.CloseHandle(handle)
+
+
+def window_process_id(hwnd: int) -> int:
+    """Process owning the window, or zero if the window is gone."""
+    global _get_window_thread_process_id
+    if _get_window_thread_process_id is None:
+        get_pid = ctypes.WinDLL("user32").GetWindowThreadProcessId
+        get_pid.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+        get_pid.restype = wintypes.DWORD
+        _get_window_thread_process_id = get_pid
+    pid = wintypes.DWORD()
+    _get_window_thread_process_id(hwnd, ctypes.byref(pid))
+    return pid.value
+
+
+def window_image_path(hwnd: int) -> str:
+    pid = window_process_id(hwnd)
+    return image_path(pid) if pid else ""
+
+
+def window_belongs_to(hwnd: int, executable: str) -> bool:
+    """Check an HWND against the full executable path, including the install."""
+    if not executable:
+        return False
+    actual = window_image_path(hwnd)
+    if not actual:
+        return False
+    return os.path.normcase(os.path.realpath(actual)) == os.path.normcase(os.path.realpath(executable))

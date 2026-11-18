@@ -26,16 +26,20 @@ Experiment body rules:
 - Pascal has no inline declarations: reuse the scratch variables declared in
   Sandbox.pas (S1..S3, I1..I3, B1, Obj1..Obj3, List1), or add more there
 """
-import ctypes
-import json
-import os
 import subprocess
 import sys
 import time
-from ctypes import wintypes
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+if not __package__:
+    sys.path.insert(0, str(REPO))
+from dev.capture_window import _title, capture, find_altium_windows  # noqa: E402
+from dev.unwedge import unwedge  # noqa: E402
+from altium_install import configured_altium_exe  # noqa: E402
+from sandbox import altium_dialogs, answer_dialog  # noqa: E402
+from win_processes import image_path, pids_by_name, window_belongs_to  # noqa: E402
+
 SANDBOX_PAS = REPO / "dev" / "sandbox" / "Sandbox.pas"
 SANDBOX_PRJ = REPO / "dev" / "sandbox" / "Sandbox.PrjScr"
 EXCHANGE = Path("C:/Users/Public/altium_mcp")
@@ -43,27 +47,6 @@ SANDBOX_LOG = EXCHANGE / "sandbox_log.txt"
 SANDBOX_RESULT = EXCHANGE / "sandbox_result.json"
 BEGIN = "// === BEGIN EXPERIMENT"
 END = "// === END EXPERIMENT"
-
-def _config_path():
-    # Same resolution as server/main.py; falls back to the pre-relocation file.
-    home = Path(os.environ.get("ALTIUM_MCP_HOME") or Path.home() / ".altium-mcp")
-    new = home / "config.json"
-    return new if new.exists() else REPO / "server" / "config.json"
-
-
-config = json.load(open(_config_path()))
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from unwedge import unwedge  # noqa: E402
-
-
-def _title(hwnd):
-    user32 = ctypes.windll.user32
-    n = user32.GetWindowTextLengthW(hwnd)
-    buf = ctypes.create_unicode_buffer(n + 1)
-    user32.GetWindowTextW(hwnd, buf, n + 1)
-    return buf.value
-
 
 def screenshot_dialog(hwnd, tag):
     """Render the dialog to PNG via PrintWindow.
@@ -73,12 +56,8 @@ def screenshot_dialog(hwnd, tag):
     disconnected sessions) - unlike screen-scraping, which returns blanks.
     """
     try:
-        from capture_window import capture
-    except ImportError:
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from capture_window import capture
-    try:
-        out = Path.cwd() / f"dialog_{tag}.png"
+        out = REPO / "generated" / f"dialog_{tag}.png"
+        out.parent.mkdir(parents=True, exist_ok=True)
         path, _info = capture(hwnd, out)
         return path
     except Exception:
@@ -107,7 +86,7 @@ def read_dialog_text(hwnd):
         return f"(could not read: {e})"
 
 
-def capture_script_editor(tag="script_editor"):
+def capture_script_editor(tag="script_editor", *, executable=None):
     """Capture Altium's document windows, including the script editor.
 
     When a script dies, the editor highlights the exact line execution stopped
@@ -116,55 +95,36 @@ def capture_script_editor(tag="script_editor"):
     frame in its own top-level window, so all of them are captured; the one
     showing a .pas tab is the script editor.
     """
-    try:
-        from capture_window import capture, find_windows, _title
-    except ImportError:
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from capture_window import capture, find_windows, _title
-
-    hits = find_windows(lambda h: "Altium Designer" in _title(h))
+    executable = configured_altium_exe() if executable is None else executable
+    hits = find_altium_windows(executable)
     # Script-project frames first - most likely to host the editor
     hits.sort(key=lambda h: ".PrjScr" not in _title(h))
     out = []
+    directory = REPO / "generated"
+    directory.mkdir(parents=True, exist_ok=True)
     for i, h in enumerate(hits[:4]):
-        path, _info = capture(h, Path.cwd() / f"{tag}_{i}.png")
+        if not window_belongs_to(h, executable):
+            continue
+        path, _info = capture(h, directory / f"{tag}_{i}.png")
         if path:
             out.append(path)
     return out
 
 
-def find_dialogs():
-    user32 = ctypes.windll.user32
-    found = []
-
-    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-    def cb(hwnd, lparam):
-        if not user32.IsWindowVisible(hwnd):
-            return True
-        cls = ctypes.create_unicode_buffer(64)
-        user32.GetClassNameW(hwnd, cls, 64)
-        if cls.value == "#32770":
-            found.append((hwnd, cls.value, _title(hwnd)))
-        elif cls.value == "TMessageForm":
-            t = _title(hwnd)
-            if t in ("Error", "Warning", "Information", "Confirm"):
-                found.append((hwnd, cls.value, t))
-        return True
-
-    user32.EnumWindows(cb, 0)
-    return found
-
-
-def handle_dialogs():
-    """Read then close any modal dialogs; return [(cls, title, text)]."""
+def handle_dialogs(executable):
+    """Read and close script-blocking dialogs owned by this Altium install."""
     out = []
-    for idx, (hwnd, cls, title) in enumerate(find_dialogs()):
-        text = read_dialog_text(hwnd)
-        shot = screenshot_dialog(hwnd, f"{title}_{idx}")
+    for idx, dialog in enumerate(altium_dialogs(executable)):
+        if not window_belongs_to(dialog.hwnd, executable):
+            continue
+        text = read_dialog_text(dialog.hwnd)
+        shot = (screenshot_dialog(dialog.hwnd, idx)
+                if window_belongs_to(dialog.hwnd, executable) else None)
         if shot:
             text = (text + f"  [screenshot: {shot}]") if text else f"[screenshot: {shot}]"
-        out.append((cls, title, text))
-        ctypes.windll.user32.PostMessageW(hwnd, 0x0010, 0, 0)
+        out.append((dialog.cls, dialog.title, text))
+        if window_belongs_to(dialog.hwnd, executable):
+            answer_dialog(dialog)
     return out
 
 
@@ -191,11 +151,15 @@ def restore():
 
 
 def run(timeout=120, quiet=False):
+    executable = configured_altium_exe()
+    if not executable:
+        print("Altium X2.EXE not found")
+        return False
     for f in (SANDBOX_LOG, SANDBOX_RESULT):
         if f.exists():
             f.unlink()
 
-    cmd = (f'"{config["altium_exe_path"]}" -RScriptingSystem:RunScript('
+    cmd = (f'"{executable}" -RScriptingSystem:RunScript('
            f'ProjectName="{SANDBOX_PRJ}"^|ProcName="Sandbox>Run")')
     subprocess.Popen(cmd, shell=True)
 
@@ -204,7 +168,7 @@ def run(timeout=120, quiet=False):
     while not SANDBOX_RESULT.exists() and time.time() - start < timeout:
         time.sleep(0.5)
         if time.time() - start > 6:
-            d = handle_dialogs()
+            d = handle_dialogs(executable)
             for cls, title, text in d:
                 dialogs.append((cls, title, text))
                 print(f"  [DIALOG {cls} '{title}'] {text or '(no text)'}")
@@ -237,10 +201,10 @@ def run(timeout=120, quiet=False):
         # not a false negative. unwedge() dispatches EditScript:Stop into the
         # running instance (no window focus needed) and verifies by running a
         # probe script; Ctrl+F3 is only a fallback.
-        for shot in capture_script_editor():
+        for shot in capture_script_editor(executable=executable):
             print(f">> Altium window captured (look for the paused line): {shot}")
         print(">> Clearing the paused debugger...")
-        if unwedge(verbose=False):
+        if unwedge(verbose=False, executable=executable):
             print(">> Executor recovered and VERIFIED alive - re-run the experiment.")
         else:
             print(">> Could not clear the debugger; re-run with --auto-restart.")
@@ -248,18 +212,12 @@ def run(timeout=120, quiet=False):
         print("STEP LOG: (missing - the script never started)")
         print(">> Usually a COMPILE error (see dialog text above), or a")
         print(">> previously paused script blocking execution.")
-        for shot in capture_script_editor():
+        for shot in capture_script_editor(executable=executable):
             print(f">> Altium window captured: {shot}")
     return False
 
 
 PING_BODY = "SandboxLog('ping');\nResultText := '{\"ping\": true}';"
-
-
-def altium_running():
-    r = subprocess.run(["tasklist", "/FI", "IMAGENAME eq X2.EXE"],
-                       capture_output=True, text=True)
-    return "X2.EXE" in r.stdout
 
 
 def restart_altium(wait=180):
@@ -268,10 +226,17 @@ def restart_altium(wait=180):
     WARNING: kills X2.EXE - any unsaved Altium work is lost. Only used when
     --auto-restart is passed explicitly.
     """
+    executable = configured_altium_exe()
+    if not executable:
+        return False
     print("  >> restarting Altium to clear the wedged executor...")
-    subprocess.run(["taskkill", "/F", "/IM", "X2.EXE"], capture_output=True)
+    target = Path(executable).resolve()
+    for pid in pids_by_name(target.name):
+        image = image_path(pid)
+        if image and Path(image).resolve() == target:
+            subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True)
     time.sleep(5)
-    subprocess.Popen(f'"{config["altium_exe_path"]}"', shell=True)
+    subprocess.Popen([executable])
     # Altium is ready when a sandbox ping actually executes
     saved = SANDBOX_PAS.read_text(encoding="utf-8")
     inject(PING_BODY)
@@ -279,7 +244,7 @@ def restart_altium(wait=180):
     try:
         while time.time() - start < wait:
             time.sleep(10)
-            handle_dialogs()
+            handle_dialogs(executable)
             if run(timeout=45, quiet=True):
                 print(f"  >> Altium ready after {int(time.time() - start)}s")
                 return True

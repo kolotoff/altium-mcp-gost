@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -13,9 +12,11 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 if __package__:
     from .board_test_localization import LANGUAGE_MODES, ui_text
     from .pcb_3d_registration import CameraRegistration, load_registration
+    from .pcb_svg_geometry import component_transform, exported_designator_aliases, parse_numbers
 else:
     from board_test_localization import LANGUAGE_MODES, ui_text
     from pcb_3d_registration import CameraRegistration, load_registration
+    from pcb_svg_geometry import component_transform, exported_designator_aliases, parse_numbers
 
 
 MM_PER_MIL = 0.0254
@@ -109,28 +110,6 @@ def crop_with_padding(image: Image.Image, center: tuple[float, float], size: tup
     return canvas
 
 
-def parse_numbers(text: str) -> list[float]:
-    return [float(value) for value in re.findall(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?", text)]
-
-
-def exported_designator_aliases(element: ET.Element) -> list[str]:
-    """Return logical designator aliases for panelized Altium SVG instances."""
-    component = str(element.get("data-component") or "").strip()
-    if not component:
-        return []
-    aliases = [component]
-    instance = str(element.get("data-instance") or "").strip()
-    if instance == component:
-        aliases.append(f"{component}_1")
-    else:
-        match = re.fullmatch(re.escape(component) + r"-(\d+)", instance)
-        if match:
-            aliases.append(f"{component}_{match.group(1)}")
-        elif instance:
-            aliases.append(instance)
-    return list(dict.fromkeys(aliases))
-
-
 def svg_component_pixels(
     path: Path,
     image_size: tuple[int, int],
@@ -150,10 +129,10 @@ def svg_component_pixels(
             aliases = exported_designator_aliases(element)
             if not aliases or not identifier.endswith(suffix) or all(alias in positions for alias in aliases):
                 continue
-            match = re.search(r"translate\(\s*([-+0-9.eE]+)[ ,]+([-+0-9.eE]+)\s*\)", element.get("transform", ""))
-            if not match:
+            transform = component_transform(element)
+            if transform is None:
                 continue
-            x, y = float(match.group(1)), float(match.group(2))
+            x, y = transform.x, transform.y
             if registration is not None:
                 registration.validate_image_size(image_size)
                 center = registration.pixel_for_physical(x, y)

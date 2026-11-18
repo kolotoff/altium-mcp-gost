@@ -191,6 +191,89 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue((await second)["success"])
             await asyncio.gather(*jobs)
 
+    async def test_sandbox_keeps_shared_lock_after_client_cancellation(self):
+        bridge, second = main.AltiumBridge(), main.AltiumBridge()
+        started, complete = asyncio.Event(), asyncio.Event()
+
+        @main._serialized_sandbox
+        async def sandbox_operation():
+            started.set()
+            await complete.wait()
+
+        async def launch():
+            self.reply(self.claim())
+            return True
+
+        with patch.object(main, "altium_bridge", bridge), patch.object(second, "run_altium_script", side_effect=launch) as launch:
+            task = asyncio.create_task(sandbox_operation())
+            await started.wait()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            following = asyncio.create_task(second.execute_command("read", {}, timeout=1))
+            try:
+                await asyncio.sleep(0.025)
+                launch.assert_not_awaited()
+            finally:
+                complete.set()
+            self.assertTrue((await following)["success"])
+
+    async def test_drc_refuses_existing_dialog_before_publishing_request(self):
+        import drc
+
+        bridge = main.AltiumBridge()
+        with (patch.object(main, "altium_bridge", bridge),
+              patch.object(drc, "find_dialog", return_value=123),
+              patch.object(bridge, "run_altium_script", new=AsyncMock()) as launch):
+            reply = json.loads(await main.run_drc(None))
+        self.assertFalse(reply["success"])
+        self.assertIn("already open", reply["error"])
+        launch.assert_not_awaited()
+        self.assertFalse(self.request.exists())
+
+    async def test_drc_driver_waits_for_the_queued_command_to_start(self):
+        import drc
+
+        first, bridge = main.AltiumBridge(), main.AltiumBridge()
+        first_started, first_complete = asyncio.Event(), asyncio.Event()
+        drc_request = None
+        driver_started = asyncio.Event()
+
+        async def launch_first():
+            request = self.claim()
+            first_started.set()
+            await first_complete.wait()
+            self.reply(request)
+            return True
+
+        async def launch_drc():
+            nonlocal drc_request
+            drc_request = self.claim()
+            return True
+
+        async def drive(outcome, *_args, **_kwargs):
+            self.assertEqual(drc_request["command"], "run_drc")
+            outcome.pressed = True
+            driver_started.set()
+            atomic_json(self.response, dict(success=True, request_id=drc_request["request_id"], result={}))
+
+        with (patch.object(main, "altium_bridge", bridge),
+              patch.object(first, "run_altium_script", side_effect=launch_first),
+              patch.object(bridge, "run_altium_script", side_effect=launch_drc),
+              patch.object(drc, "find_dialog", return_value=None) as check,
+              patch.object(drc, "drive_dialog", side_effect=drive)):
+            before = asyncio.create_task(first.execute_command("read", {}, timeout=1))
+            await first_started.wait()
+            pending = asyncio.create_task(main.run_drc(None))
+            try:
+                await asyncio.sleep(0.025)
+                check.assert_not_called()
+                self.assertFalse(driver_started.is_set())
+            finally:
+                first_complete.set()
+            self.assertTrue((await before)["success"])
+            self.assertTrue(json.loads(await pending)["ran"])
+
     async def test_unclaimed_request_can_be_withdrawn(self):
         bridge = main.AltiumBridge()
         with patch.object(bridge, "run_altium_script", return_value=True):

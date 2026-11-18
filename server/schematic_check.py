@@ -29,11 +29,10 @@ designator and visible parameters that collides with nothing (designator left
 and value right of a vertical part, above/below a horizontal one, ...).
 """
 import math
-import os
 import sys
 from collections import defaultdict
-from pathlib import Path
 
+from altium_files import read_project
 from schdoc_reader import coord, read_schdoc_streams
 
 # Altium draws schematic text at 0.903 x the font size in 10-mil units
@@ -956,14 +955,8 @@ def check_sheet(path) -> dict:
 
 def project_sheets(prjpcb) -> list:
     """The .SchDoc files a .PrjPcb lists, as absolute paths."""
-    prj = Path(prjpcb)
-    out = []
-    for line in prj.read_text(encoding="cp1252", errors="replace").splitlines():
-        if line.startswith("DocumentPath=") and line.lower().endswith(".schdoc"):
-            # normpath, not resolve: keep the path the way the project names
-            # it rather than whatever junction it leads through
-            out.append(Path(os.path.normpath(prj.parent / line.split("=", 1)[1])))
-    return out
+    sheets, _, _ = read_project(prjpcb)
+    return sheets
 
 
 if __name__ == "__main__":

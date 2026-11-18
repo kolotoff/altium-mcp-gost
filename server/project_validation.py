@@ -56,6 +56,20 @@ async def _project(execute, project, board):
         for key in ("request_id", "execution_state")
         if response.get(key)
     }
+    result = response.get("result")
+    if response.get("success") and isinstance(result, str):
+        result = json.loads(result)
+    # The bridge preserves the structured result when it lifts a native
+    # failure into the outer response. A missing prerequisite still skips
+    # this stage even when that normalization has already happened.
+    if isinstance(result, dict) and result.get("code") == "schematic_not_validated":
+        return _stage(
+            "project",
+            "skipped",
+            result.get("error", "The project schematic has not been validated."),
+            action="Validate the project in Altium, then rerun this tool.",
+            evidence=request,
+        ), None
     if not response.get("success"):
         return _stage(
             "project",
@@ -68,22 +82,14 @@ async def _project(execute, project, board):
             ),
             evidence=request,
         ), None
-    result = response.get("result")
-    if isinstance(result, str):
-        result = json.loads(result)
     if not isinstance(result, dict):
         raise ValueError("Project query returned an invalid response")
     if not result.get("success"):
-        needs_validation = result.get("code") == "schematic_not_validated"
         return _stage(
             "project",
-            "skipped" if needs_validation else "error",
+            "error",
             result.get("error", "Project query failed."),
-            action=(
-                "Validate the project in Altium, then rerun this tool."
-                if needs_validation
-                else "Check that the exact PCB belongs to the open project."
-            ),
+            action="Check that the exact PCB belongs to the open project.",
             evidence=request,
         ), None
     if not same_board(project, result.get("path", "")) or not same_board(

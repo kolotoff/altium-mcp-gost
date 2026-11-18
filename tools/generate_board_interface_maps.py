@@ -18,6 +18,11 @@ import xml.etree.ElementTree as ET
 from collections import Counter
 from pathlib import Path
 
+if __package__:
+    from .pcb_svg_geometry import component_transform, parse_numbers
+else:
+    from pcb_svg_geometry import component_transform, parse_numbers
+
 
 SVG = "http://www.w3.org/2000/svg"
 ET.register_namespace("", SVG)
@@ -45,10 +50,6 @@ POWER_FILL_OPACITY = "0.30"
 
 def qname(name: str) -> str:
     return f"{{{SVG}}}{name}"
-
-
-def parse_numbers(text: str) -> list[float]:
-    return [float(value) for value in re.findall(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?", text)]
 
 
 def assembly_path_vertices(path_data: str) -> list[tuple[float, float]]:
@@ -149,10 +150,10 @@ def component_positions(
             designator = element.get("data-component")
             if not designator or not identifier.endswith(suffix) or designator in positions:
                 continue
-            match = re.search(r"translate\(\s*([-+0-9.eE]+)[ ,]+([-+0-9.eE]+)\s*\)", element.get("transform", ""))
-            if not match:
+            transform = component_transform(element)
+            if transform is None:
                 continue
-            x, y = float(match.group(1)), float(match.group(2))
+            x, y = transform.x, transform.y
             if bottom:
                 # Bottom assembly exports are mirrored around the board-view
                 # centre. Derive that axis from the SVG rather than assuming a
@@ -172,9 +173,8 @@ def component_body_polygons(
         designator = element.get("data-component")
         if not designator or not element.get("id", "").endswith("-assembly"):
             continue
-        transform = element.get("transform", "")
-        origin = re.search(r"translate\(\s*([-+0-9.eE]+)[ ,]+([-+0-9.eE]+)\s*\)", transform)
-        if origin is None:
+        transform = component_transform(element)
+        if transform is None:
             continue
         coordinates: list[tuple[float, float]] = []
         for path in element.iter(qname("path")):
@@ -185,16 +185,9 @@ def component_body_polygons(
         max_x = max(point[0] for point in coordinates)
         min_y = min(point[1] for point in coordinates)
         max_y = max(point[1] for point in coordinates)
-        angle_match = re.search(r"rotate\(\s*([-+0-9.eE]+)", transform)
-        angle = math.radians(float(angle_match.group(1))) if angle_match else 0.0
-        cosine, sine = math.cos(angle), math.sin(angle)
-        local_y_sign = -1.0 if re.search(r"scale\(\s*1[ ,]+-1\s*\)", transform) else 1.0
-        tx, ty = float(origin.group(1)), float(origin.group(2))
         points = []
         for local_x, local_y in ((min_x, min_y), (max_x, min_y), (max_x, max_y), (min_x, max_y)):
-            local_y *= local_y_sign
-            global_x = tx + local_x * cosine - local_y * sine
-            global_y = ty + local_x * sine + local_y * cosine
+            global_x, global_y = transform.to_board(local_x, local_y)
             if bottom:
                 global_x = 2.0 * view_x + view_width - global_x
             points.append((board_x + global_x - view_x, board_y - global_y - view_y))

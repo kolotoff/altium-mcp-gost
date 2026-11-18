@@ -10,6 +10,25 @@ from tools.pcb_3d_registration import CameraRegistration
 
 
 class ThreeDTestMapTests(unittest.TestCase):
+    def test_accepts_a_board_side_without_callouts(self):
+        source = (
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 80">'
+            '<text data-map-title="2d">TOP SIDE TEST ACCESS MAP</text>'
+            '<svg x="10" y="10" width="100" height="50" viewBox="0 0 20 10"/>'
+            '</svg>'
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            map_path, render_path, output_path = (root / name for name in ("map.svg", "render.png", "3d.svg"))
+            map_path.write_text(source, encoding="utf-8")
+            Image.new("RGB", (200, 100), "#FFFFFF").save(render_path)
+            build_page(map_path, render_path, output_path,
+                       registration=CameraRegistration(0, 20, 0, 10, False, 200, 100))
+
+            result = ET.parse(output_path)
+            self.assertIsNotNone(result.find(qname("image")))
+            self.assertFalse(any(node.get("data-callout") for node in result.iter()))
+
     def test_reuses_label_and_line_without_circles(self):
         source = (
             '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 80">'

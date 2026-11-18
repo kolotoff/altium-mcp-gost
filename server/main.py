@@ -24,6 +24,8 @@ from PIL import Image
 import glob
 import io
 import re
+from contextlib import asynccontextmanager
+from functools import wraps
 import xml.etree.ElementTree as ET
 
 # Support the stdio script entry point and imports from the repository root.
@@ -634,7 +636,8 @@ class AltiumBridge:
         return None
 
     async def execute_command(self, command: str, params: Dict[str, Any], timeout: float = RESPONSE_TIMEOUT,
-                              watcher: Optional[Callable[[asyncio.Event], Awaitable[None]]] = None) -> Dict[str, Any]:
+                              watcher: Optional[Callable[[asyncio.Event], Awaitable[None]]] = None,
+                              preflight: Optional[Callable[[], Optional[str]]] = None) -> Dict[str, Any]:
         """Execute a command in Altium via the bridge script.
 
         watcher, if given, runs beside the command while it holds the locks
@@ -646,7 +649,11 @@ class AltiumBridge:
         so the Stop cannot reach the next command's script, and the response
         has "aborted": true.
         """
-        task = asyncio.create_task(self._execute_command(command, params, timeout, watcher))
+        return await self._finish_execution(self._execute_command(command, params, timeout, watcher, preflight))
+
+    async def _finish_execution(self, execution):
+        """Keep ownership of an Altium operation if its MCP caller disconnects."""
+        task = asyncio.create_task(execution)
         self._command_tasks.add(task)
         task.add_done_callback(self._command_tasks.discard)
         try:
@@ -655,8 +662,47 @@ class AltiumBridge:
             task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
             raise
 
+    @asynccontextmanager
+    async def exclusive_execution(self, *, bridge_script=False):
+        """Serialize bridge and sandbox work against the same Altium instance."""
+        async with self._command_lock:
+            if bridge_script:
+                problem = await self.ensure_paths()
+                if problem:
+                    yield {"success": False, "error": problem}
+                    return
+            if not await self._exchange_lock.acquire(LOCK_TIMEOUT):
+                yield {"success": False, "error": f"Altium MCP is busy with another command after {LOCK_TIMEOUT} s."}
+                return
+            try:
+                problem = self._reconcile_pending_command()
+                if problem is None and bridge_script and await asyncio.to_thread(sandbox.altium_hung):
+                    problem = {"success": False, "error": ALTIUM_HUNG_ERROR}
+                yield problem
+            finally:
+                self._exchange_lock.release()
+
+    def _reconcile_pending_command(self):
+        try:
+            pending = self._pending.load()
+            if pending is None:
+                return None
+            response = self._pending.response(pending["request_id"], legacy=True)
+            if response is None:
+                return {
+                    "success": False,
+                    "error": "Previous Altium command is unresolved; inspect its status before retrying",
+                    "execution_state": "unknown",
+                    "pending_command": pending,
+                }
+            self._pending.archive(pending, response)
+        except (OSError, ValueError) as error:
+            return {"success": False, "error": str(error), "execution_state": "inspect_pending_receipt"}
+        return None
+
     async def _execute_command(self, command: str, params: Dict[str, Any], timeout: float,
-                               watcher: Optional[Callable[[asyncio.Event], Awaitable[None]]]) -> Dict[str, Any]:
+                               watcher: Optional[Callable[[asyncio.Event], Awaitable[None]]],
+                               preflight: Optional[Callable[[], Optional[str]]] = None) -> Dict[str, Any]:
         if {"request_id", "command"} & params.keys():
             return {"success": False, "error": "Reserved transport fields cannot be overridden"}
         if command == "pcb_routing":
@@ -664,42 +710,19 @@ class AltiumBridge:
                 timeout = max(timeout, ROUTING_NATIVE_DRC_TIMEOUT)
             elif _is_mutating(command, params):
                 timeout = max(timeout, ROUTING_MUTATION_TIMEOUT)
-        async with self._command_lock:
-            problem = await self.ensure_paths()
+        async with self.exclusive_execution(bridge_script=True) as problem:
             if problem:
-                return {"success": False, "error": problem}
-            if not await self._exchange_lock.acquire(LOCK_TIMEOUT):
-                return {"success": False,
-                        "error": f"Not run: another Altium MCP server (another Claude session) "
-                                 f"has had a command running in Altium for over {LOCK_TIMEOUT} s. "
-                                 f"Retry when it has finished."}
+                return problem
             try:
-                pending = self._pending.load()
-                if pending is not None:
-                    response = self._pending.response(pending["request_id"], legacy=True)
-                    if response is None:
-                        return {
-                            "success": False,
-                            "error": "Previous Altium command is unresolved; inspect its status before retrying",
-                            "execution_state": "unknown",
-                            "pending_command": pending,
-                        }
-                    self._pending.archive(pending, response)
-                # A launch sent to a hung Altium only queues up behind whatever
-                # holds its UI thread; say so now instead of after the start
-                # timeout. Checked with the exchange lock held: while waiting
-                # for it, Altium is busy with another server's command, which
-                # is no reason to give up.
-                if await asyncio.to_thread(sandbox.altium_hung):
-                    return {"success": False, "error": ALTIUM_HUNG_ERROR}
+                preflight_error = preflight() if preflight else None
+                if preflight_error:
+                    return {"success": False, "error": preflight_error}
                 if watcher is None:
                     response = await self._execute_command_locked(command, params, timeout)
                 else:
                     response = await self._execute_watched(command, params, timeout, watcher)
             except (OSError, ValueError) as error:
                 return {"success": False, "error": str(error), "execution_state": "inspect_pending_receipt"}
-            finally:
-                self._exchange_lock.release()
         return _lift_failed_result(response)
 
     async def _execute_watched(self, command: str, params: Dict[str, Any], timeout: float,
@@ -722,6 +745,7 @@ class AltiumBridge:
                 task.cancel()
             if not run.done() and not abort.is_set():
                 run.cancel()  # this call itself was cancelled
+            await asyncio.gather(watch, aborted, return_exceptions=True)
         if run.done():
             return run.result()
         # The script was cancelled and will not answer: stop it while this
@@ -760,7 +784,7 @@ class AltiumBridge:
         instance ... is busy"), so Altium's message boxes are closed first.
         Harmless when nothing is paused.
         """
-        _dismiss_altium_dialogs(message_boxes_only=True)
+        _dismiss_altium_dialogs(message_boxes_only=True, executable=self.config.altium_exe_path)
         await asyncio.sleep(1)
         logger.warning("Sending -REditScript:Stop to Altium to unblock the script executor")
         try:
@@ -846,7 +870,7 @@ class AltiumBridge:
             if not started:
                 # Each refused launch left an OK-only "Another script executing
                 # now" box in Altium: do not leave it in front of the user
-                _dismiss_altium_dialogs(message_boxes_only=True)
+                _dismiss_altium_dialogs(message_boxes_only=True, executable=self.config.altium_exe_path)
                 logger.error("Altium never started the bridge script")
                 # Tools pass on only "error", so the explanation goes in it
                 why = ("A script of ours was stuck in Altium's debugger and stopping it did "
@@ -1812,31 +1836,7 @@ SANDBOX_DIALOGS = EXCHANGE_DIR / "dialogs"
 SANDBOX_SNAPSHOTS = _data_dir() / "snapshots"
 
 
-def _window_process_name(hwnd) -> str:
-    """Executable file name of the process that owns a window ('' if unknown)."""
-    try:
-        import ctypes
-        from ctypes import wintypes
-    except ImportError:
-        return ""
-    user32 = ctypes.windll.user32
-    kernel32 = ctypes.windll.kernel32
-    pid = wintypes.DWORD()
-    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-    handle = kernel32.OpenProcess(0x1000, False, pid.value)  # PROCESS_QUERY_LIMITED_INFORMATION
-    if not handle:
-        return ""
-    try:
-        buf = ctypes.create_unicode_buffer(1024)
-        size = wintypes.DWORD(len(buf))
-        if kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
-            return os.path.basename(buf.value)
-        return ""
-    finally:
-        kernel32.CloseHandle(handle)
-
-
-def _dismiss_altium_dialogs(message_boxes_only: bool = False):
+def _dismiss_altium_dialogs(message_boxes_only: bool = False, executable=None):
     """Close Altium modal popups that would otherwise block a script run.
 
     Altium uses two kinds: Win32 task dialogs (#32770) and Delphi TMessageForm
@@ -1851,38 +1851,15 @@ def _dismiss_altium_dialogs(message_boxes_only: bool = False):
     the caller can tell the user (a closed dialog may have been one the user
     had open).
     """
-    try:
-        import ctypes
-        from ctypes import wintypes
-    except ImportError:
-        return []
-    user32 = ctypes.windll.user32
     found = []
-
-    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-    def cb(hwnd, lparam):
-        if not user32.IsWindowVisible(hwnd):
-            return True
-        cls = ctypes.create_unicode_buffer(64)
-        user32.GetClassNameW(hwnd, cls, 64)
-        if cls.value not in ("#32770", "TMessageForm", "TForm_RunScriptParameters"):
-            return True
-        n = user32.GetWindowTextLengthW(hwnd)
-        buf = ctypes.create_unicode_buffer(n + 1)
-        user32.GetWindowTextW(hwnd, buf, n + 1)
-        title = buf.value
-        if cls.value == "TMessageForm" and title not in ("Error", "Warning", "Information", "Confirm"):
-            return True
-        if message_boxes_only and (cls.value != "TMessageForm" or title not in ("Error", "Information")):
-            return True
-        if _window_process_name(hwnd).lower() != "x2.exe":
-            return True
-        found.append((hwnd, cls.value, title))
-        return True
-
-    user32.EnumWindows(cb, 0)
-    for h, _, _ in found:
-        user32.PostMessageW(h, 0x0010, 0, 0)
+    for dialog in sandbox.altium_dialogs(executable):
+        if message_boxes_only and (dialog.cls != "TMessageForm" or dialog.title not in ("Error", "Information")):
+            continue
+        try:
+            win32gui.PostMessage(dialog.hwnd, win32con.WM_CLOSE, 0, 0)
+        except win32gui.error:
+            continue  # The dialog closed after enumeration.
+        found.append((dialog.hwnd, dialog.cls, dialog.title))
     return found
 
 
@@ -1892,7 +1869,22 @@ def _sandbox() -> sandbox.Sandbox:
                            snapshots_dir=SANDBOX_SNAPSHOTS, dialogs_dir=SANDBOX_DIALOGS)
 
 
+def _serialized_sandbox(tool):
+    @wraps(tool)
+    async def call(*args, **kwargs):
+        async def run():
+            async with altium_bridge.exclusive_execution() as problem:
+                if problem:
+                    return json.dumps(problem, indent=2)
+                return await tool(*args, **kwargs)
+
+        return await altium_bridge._finish_execution(run())
+
+    return call
+
+
 @_tool()
+@_serialized_sandbox
 async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 120,
                             skip_lint: bool = False, snapshot: Optional[List[str]] = None) -> str:
     """
@@ -2061,7 +2053,7 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
     report = {}
     # A script-error dialog left open blocks every new run. Answer it only
     # when a script of ours is stuck; one from the user's own script is theirs.
-    if any(d.is_script_error for d in sandbox.altium_dialogs()):
+    if any(d.is_script_error for d in sandbox.altium_dialogs(sb.altium_exe)):
         if not STUCK_MARKER.exists():
             return json.dumps({
                 "success": False,
@@ -2069,8 +2061,10 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
                          "did not start. Answer or close it in Altium, then retry.",
                 "executor_wedged": False}, indent=2)
         report["recovered_before_run"] = await asyncio.to_thread(sb.recover)
-        if report["recovered_before_run"]["recovered"]:
-            _clear_script_stuck()
+        if not report["recovered_before_run"]["recovered"]:
+            return json.dumps({"success": False, "error": "Altium's script executor could not be recovered.",
+                               "executor_wedged": True, **report}, indent=2)
+        _clear_script_stuck()
 
     # The loops stop early enough for the script to finish and its result to
     # arrive before this tool gives up on it
@@ -2096,6 +2090,7 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
         built = sb.write(files, script, guard_seconds, snap_paths)
     except Exception as e:
         return json.dumps({"success": False, "error": f"could not write the run file: {e}"})
+    existing_dialogs = {d.hwnd for d in sandbox.altium_dialogs(sb.altium_exe)}
     sb.launch(files)
     report["run_file"] = str(files.script)
 
@@ -2116,7 +2111,9 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
 
     while not files.result.exists() and time.time() - start < timeout_seconds:
         await asyncio.sleep(0.5)
-        for d in sandbox.altium_dialogs():
+        for d in sandbox.altium_dialogs(sb.altium_exe):
+            if d.hwnd in existing_dialogs:
+                continue
             # A syntax error stops the script before 'sandbox start' is
             # logged and shows Altium's Error box instead of the
             # "Continue execution?" dialog
@@ -2138,8 +2135,10 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
     report["dialog_snapshots"] = [p for p in snapshots.values() if p]
     steps = (sandbox.read_when_ready(files.log, read_altium_text).splitlines()
              if files.log.exists() else [])
-    if snap_dir is not None:
-        # What the run left on disk, so a rollback can tell later saves apart
+    finished = files.result.exists()
+    if snap_dir is not None and finished:
+        # A terminal result confirms the script and its undo cleanup finished.
+        # A timed-out script may still change files after a hash is taken.
         try:
             sandbox.record_run_end(snap_dir, steps)
         except OSError as e:
@@ -2152,7 +2151,7 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
                                           "snapshot holds the file on disk, without those changes.")
     steps = [s for s in steps if not s.startswith((sandbox.DOC_STATE_PREFIX, sandbox.DOC_AFTER_PREFIX))]
 
-    if files.result.exists():
+    if finished:
         _clear_script_stuck()  # our script ran to the end: Altium is free
         result_text = sandbox.read_when_ready(files.result, read_altium_text).strip()
         sb.prune()
@@ -2278,15 +2277,30 @@ def _restore_snapshot_files(snap_dir: Path, entries: List[dict]) -> Tuple[List[s
     """Copy each entry's snapshot back over its file: (restored, failed)."""
     restored, failed = [], []
     for e in entries:
+        path = Path(e["path"])
+        temporary = None
         try:
-            shutil.copy2(snap_dir / e["copy"], e["path"])
+            with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".altium-rollback-", delete=False) as staging:
+                temporary = Path(staging.name)
+            shutil.copy2(snap_dir / e["copy"], temporary)
+            if sandbox.changed_since_run([e]):
+                failed.append({"path": e["path"], "error": "The file changed during rollback."})
+                continue
+            os.replace(temporary, path)
             restored.append(e["path"])
         except OSError as err:
             failed.append({"path": e["path"], "error": str(err)})
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError as err:
+                    logger.warning("Could not remove rollback staging file %s: %s", temporary, err)
     return restored, failed
 
 
 @_tool()
+@_serialized_sandbox
 async def rollback_altium_script(ctx: Context, run_id: str, discard_unsaved: bool = False) -> str:
     """
     Undo a run_altium_script run by restoring the documents it snapshotted.
@@ -2359,7 +2373,7 @@ async def rollback_altium_script(ctx: Context, run_id: str, discard_unsaved: boo
         return json.dumps({"success": False, "error": problem})
     if await asyncio.to_thread(sandbox.altium_hung):
         return json.dumps({"success": False, "error": ALTIUM_HUNG_ERROR})
-    if any(d.is_script_error for d in sandbox.altium_dialogs()):
+    if any(d.is_script_error for d in sandbox.altium_dialogs(sb.altium_exe)):
         return json.dumps({"success": False, "error": "not run: Altium is showing a script error "
                                                       "dialog. Answer or close it, then retry."})
 
@@ -2396,7 +2410,9 @@ async def rollback_altium_script(ctx: Context, run_id: str, discard_unsaved: boo
             refused["left_unsaved_by_run"] = left_by_run
         return json.dumps(refused, indent=2)
 
-    closed = await asyncio.to_thread(sb.run_quick, sandbox.close_script(paths), 30.0, dialogs)
+    closed = await asyncio.to_thread(
+        sb.run_quick, sandbox.close_script(paths, discard_unsaved=discard_unsaved), 30.0, dialogs
+    )
     if closed is None:
         return json.dumps({"success": False, "error": "Altium did not close the documents; nothing "
                                                       "was restored", "dialogs_closed": dialogs})
@@ -2412,20 +2428,24 @@ async def rollback_altium_script(ctx: Context, run_id: str, discard_unsaved: boo
     was_open = [e["path"] for e in entries if status.get(e["path"].lower()) == "open"]
     # Projects first: a sheet opened before its project lands in Free Documents
     # Reopened under the name Altium had for them, not the snapshot's spelling
-    reopen = sorted([names[p.lower()] for p in was_open if p in restored],
+    reopen = sorted([names[p.lower()] for p in was_open if Path(p).is_file()],
                     key=lambda p: not p.lower().endswith(".prjpcb"))
-    reopened = None
+    reopened = []
     if reopen:
-        reopened = await asyncio.to_thread(sb.run_quick, sandbox.reopen_script(reopen), 30.0,
-                                           dialogs) is not None
+        reply = await asyncio.to_thread(sb.run_quick, sandbox.reopen_script(reopen), 30.0, dialogs)
+        states, _ = sandbox.parse_states(reply)
+        reopened = [p for p in reopen if states.get(p.lower()) == "open"]
     sb.prune()
-    report = {"success": not failed and not still_open, "restored": restored, "failed": failed,
-              "reopened": reopen if reopened else []}
+    not_reopened = [p for p in reopen if p not in reopened]
+    report = {"success": not failed and not still_open and not not_reopened,
+              "restored": restored, "failed": failed,
+              "reopened": reopened}
     if still_open:
         report["not_restored_still_open"] = still_open
         report["note"] = "Altium did not close these, so their files were left as they are."
-    if reopen and not reopened:
-        report["reopen_error"] = "Altium did not reopen them; open them by hand"
+    if not_reopened:
+        report["reopen_error"] = "Altium did not confirm reopening every document."
+        report["not_reopened"] = not_reopened
     if dialogs:
         report["dialogs_closed"] = dialogs
     return json.dumps(report, indent=2)
@@ -2938,10 +2958,10 @@ async def edit_schematic(ctx: Context, sheet_path: str, operations: list, unit: 
     if error:
         return json.dumps({"success": False, "error": error})
     logger.info(f"Editing {sheet_path}: {len(lines)} operations")
-    # Part names and parameter values may hold text that is not plain ASCII
-    write_altium_text(EXCHANGE_DIR / "sch_edit_spec.txt", "\n".join(lines) + "\n")
+    # Carry the operations in the atomic bridge request, so they stay paired
+    # with the sheet and save flag even while this command waits for Altium.
     response = await altium_bridge.execute_command("edit_schematic", {
-        "sheet_path": sheet_path, "save": bool(save)})
+        "sheet_path": sheet_path, "save": bool(save), "edit_ops": lines})
     if not response.get("success", False):
         return json.dumps({"success": False,
                            "error": f"Failed to edit the sheet: {response.get('error', 'unknown error')}"})
@@ -5863,8 +5883,10 @@ async def route_connections(ctx: Context, designators: list = None, nets: list =
                                       include_pads=True, board_path=board_path))
     if not lay.get("success"):
         return json.dumps(lay)
-    signal = sorted({p["layer"] for p in lay["pads"] if p["layer"] != "Multi Layer"} |
-                    {t["layer"] for t in lay["tracks"]} | {a["layer"] for a in lay["arcs"]} | set(layers))
+    signal = sorted(set(layers) | {
+        obj["layer"] for kind in ("pads", "tracks", "arcs", "fills", "regions")
+        for obj in lay.get(kind, []) if obj["layer"] != "Multi Layer"
+    })
     base_shapes = router.shapes_from_layout(lay, signal)
 
     def end_layers(layer):
@@ -5897,8 +5919,9 @@ async def route_connections(ctx: Context, designators: list = None, nets: list =
                 i1, j1 = grid.cell(min(c["from"][0], c["to"][0]) - 100, min(c["from"][1], c["to"][1]) - 100)
                 i2, j2 = grid.cell(max(c["from"][0], c["to"][0]) + 100, max(c["from"][1], c["to"][1]) + 100)
                 window = (max(0, i1), max(0, j1), min(grid.nx - 1, i2), min(grid.ny - 1, j2))
-                found = router.route_one(grid, c["net"], c["from"], c["to"], sl, el, window=window) or \
-                    router.route_one(grid, c["net"], c["from"], c["to"], sl, el)
+                found = router.route_one(grid, c["net"], c["from"], c["to"], sl, el,
+                                         window=window, routing_layers=layers) or \
+                    router.route_one(grid, c["net"], c["from"], c["to"], sl, el, routing_layers=layers)
                 if found is None:
                     if k + 1 < len(widths(c["net"])):
                         pending.append((c, k + 1))   # try again at the rule's minimum width
@@ -7899,19 +7922,21 @@ async def run_drc(ctx: Context, board_path: str = "", max_violations: int = 200,
     logger.info(f"Running DRC on {board_path or 'the focused board'}")
     started = time.time()
     outcome = drc.DialogOutcome()
-    driver = asyncio.create_task(drc.drive_dialog(outcome, PROGRESS_FILE))
-    try:
-        response = await altium_bridge.execute_command(
-            "run_drc", {"board_path": board_path,
-                        # filtered: the violations Altium kept (500 unless its
-                        # limit was raised), up to a cap, then filter
-                        "max_violations": drc.FILTER_FETCH if filtered else int(max_violations)})
-    finally:
-        driver.cancel()
-        try:
-            await driver
-        except asyncio.CancelledError:
-            pass
+    def preflight():
+        if drc.find_dialog(executable=altium_bridge.config.altium_exe_path) is not None:
+            return "The Design Rule Checker is already open. Close it before starting another check."
+        return None
+
+    response = await altium_bridge.execute_command(
+        "run_drc",
+        {"board_path": board_path,
+         # Fetch up to the cap when filtering the violations Altium kept.
+         "max_violations": drc.FILTER_FETCH if filtered else int(max_violations)},
+        preflight=preflight,
+        watcher=lambda _abort: drc.drive_dialog(
+            outcome, PROGRESS_FILE, executable=altium_bridge.config.altium_exe_path
+        ),
+    )
 
     if not response.get("success", False):
         return json.dumps({"success": False, "ran": outcome.pressed,

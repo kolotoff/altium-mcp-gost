@@ -2,9 +2,13 @@
 
 Run from server/:  python -m unittest tests.test_sch_edit -v
 """
+import asyncio
 import os
 import sys
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
@@ -208,6 +212,47 @@ class SheetAndWireTest(unittest.TestCase):
         self.assertEqual(lines, ["WIREVTX|10000|20000|30000|40000", "LABELMOVE|10000|20000|A|||||1000000",
                                  "LABELMOVE|10000|20000||50000|60000|1||"])
         self.assertIn("together", encode_operations([{"op": "move_net_label", "x": 1, "y": 2, "to_x": 5}])[1])
+
+
+class EditToolTest(unittest.IsolatedAsyncioTestCase):
+    async def test_overlapping_edits_keep_operations_with_their_sheet(self):
+        import main
+
+        entered = asyncio.Event()
+        second_sent = asyncio.Event()
+        requests = {}
+
+        async def execute(command, params):
+            self.assertEqual(command, "edit_schematic")
+            sheet = Path(params["sheet_path"]).name
+            if sheet == "first.SchDoc":
+                entered.set()
+                await second_sent.wait()
+            else:
+                second_sent.set()
+            requests[sheet] = params
+            return {"success": True, "result": {"applied": 1}}
+
+        with tempfile.TemporaryDirectory() as folder, \
+                patch.object(main, "EXCHANGE_DIR", Path(folder)), \
+                patch.object(main.altium_bridge, "execute_command", execute):
+            first = asyncio.create_task(main.edit_schematic(
+                None, str(Path(folder) / "first.SchDoc"), [{"op": "add_junction", "x": 1, "y": 1}]
+            ))
+            await asyncio.wait_for(entered.wait(), timeout=5)
+            try:
+                await main.edit_schematic(
+                    None, str(Path(folder) / "second.SchDoc"), [{"op": "add_junction", "x": 2, "y": 2}],
+                    save=True,
+                )
+                await asyncio.wait_for(first, timeout=5)
+            finally:
+                first.cancel()
+            self.assertEqual(list(Path(folder).iterdir()), [])
+        self.assertEqual(requests["first.SchDoc"]["edit_ops"], ["JUNCTION|10000|10000"])
+        self.assertFalse(requests["first.SchDoc"]["save"])
+        self.assertEqual(requests["second.SchDoc"]["edit_ops"], ["JUNCTION|20000|20000"])
+        self.assertTrue(requests["second.SchDoc"]["save"])
 
 
 if __name__ == "__main__":

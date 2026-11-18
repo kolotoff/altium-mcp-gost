@@ -4,8 +4,13 @@ import json
 import math
 import re
 import sys
+from collections import Counter
 from pathlib import Path
 
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from server.compound_file import CFBError, CompoundBinaryFile
 
 EXCHANGE_DIR = Path(r"C:\Users\Public\altium_mcp")
 RESPONSE_FILE = EXCHANGE_DIR / "response.json"
@@ -843,44 +848,81 @@ def load_pcb_library_model_states(library_path: Path | None) -> list[dict]:
     if library_path is None or not library_path.is_file():
         return []
 
-    text = library_path.read_bytes().decode("latin-1", errors="ignore")
-    states: list[dict] = []
-    for record in text.split("\x00"):
-        if "MODEL.NAME=" not in record or "MODEL.3D.ROTZ=" not in record:
-            continue
-        state = parse_pcb_library_model_state(record)
-        if state is not None:
-            states.append(state)
-    return states
+    def parse(data):
+        for record in data.decode("latin-1").split("\x00"):
+            if "MODEL.NAME=" in record and "MODEL.3D.ROTZ=" in record:
+                state = parse_pcb_library_model_state(record)
+                if state is not None:
+                    yield state
+
+    try:
+        library = CompoundBinaryFile(library_path)
+        states = []
+        for stream in library.stream_paths():
+            storage, separator, name = stream.rpartition("/")
+            if not separator or name.casefold() != "parameters":
+                continue
+            pattern = re.search(rb"(?:^|\|)PATTERN=([^|\x00]+)", library.read_stream(stream), re.I)
+            if not pattern:
+                continue
+            try:
+                data = library.read_stream(f"{storage}/Data")
+            except KeyError:
+                continue
+            footprint = pattern[1].decode("latin-1")
+            states.extend(dict(state, footprint=footprint) for state in parse(data))
+        if states:
+            return states
+    except CFBError:
+        pass
+    # Keep support for legacy libraries whose model records have no footprint storage.
+    return list(parse(library_path.read_bytes()))
 
 
-def model_state_for_body(states: list[dict], footprint: str, model_path: Path) -> dict | None:
-    model_name_key = normalize_model_name(model_path.name)
-    candidates = [state for state in states if state.get("model_name_key") == model_name_key]
-    if not candidates:
-        return None
-
-    footprint_candidates = [
-        state
-        for state in candidates
-        if state.get("identifier") and footprint_name_matches(str(state["identifier"]), footprint)
-    ]
-    if len(footprint_candidates) == 1:
-        return footprint_candidates[0]
-    if len(candidates) == 1:
-        return candidates[0]
-    return None
+def model_stem(name: str) -> str:
+    normalized = normalize_model_name(name)
+    path = Path(normalized)
+    return path.stem if path.suffix.lower() in STEP_EXTENSIONS else normalized
 
 
-def model_state_for_footprint(states: list[dict], footprint: str) -> dict | None:
-    candidates = [
-        state
-        for state in states
-        if state.get("identifier") and footprint_name_matches(str(state["identifier"]), footprint)
-    ]
-    if len(candidates) == 1:
-        return candidates[0]
-    return None
+def model_for_body(
+    body: dict, states: list[dict], step_files: list[Path], *, single_body: bool,
+) -> tuple[Path | None, dict | None, str | None]:
+    """Resolve model file and placement for one body. Reject ambiguous identities."""
+    footprint = str(body["footprint"])
+    identifier = model_stem(str(body.get("identifier") or ""))
+    explicit_name = str(body.get("model_file") or body.get("model_name") or "")
+    local = [state for state in states if str(state.get("footprint", "")).casefold() == footprint.casefold()]
+    candidates = local or [state for state in states if not state.get("footprint")]
+
+    if explicit_name:
+        matches = [state for state in candidates
+                   if state["model_name_key"] == normalize_model_name(explicit_name)]
+    elif identifier:
+        matches = [state for state in candidates if model_stem(str(state.get("identifier") or "")) == identifier]
+        if not matches:
+            matches = [state for state in candidates if model_stem(state["model_name"]) == identifier]
+    else:
+        matches = []
+    if not matches and single_body and not explicit_name:
+        matches = local or [
+            state for state in candidates
+            if state.get("identifier") and footprint_name_matches(str(state["identifier"]), footprint)
+        ]
+    if len(matches) > 1:
+        return None, None, "multiple saved 3D body placements match"
+    state = matches[0] if matches else None
+
+    name = str(state["model_name"]) if state else explicit_name
+    if name:
+        files = [path for path in step_files if normalize_model_name(path.name) == normalize_model_name(name)]
+    else:
+        files = [path for path in step_files if identifier and model_stem(path.name) == identifier]
+        if not files and single_body:
+            files = [path for path in step_files if footprint_name_matches(path.stem, footprint)]
+    if len(files) != 1:
+        return None, state, ("multiple extracted STEP files match" if files else "exact embedded STEP model not found")
+    return files[0], state, None
 
 
 def normalize_rotation_degrees(angle_deg: float) -> float:
@@ -2017,29 +2059,6 @@ def footprint_name_matches(stem: str, footprint: str) -> bool:
     return re.search(rf"(^|[^A-Z0-9]){re.escape(footprint_upper)}($|[^A-Z0-9])", stem_upper) is not None
 
 
-def embedded_model_path(footprint: str, model_dir: Path, model_name: str | None = None) -> Path | None:
-    if model_name:
-        model_name_key = normalize_model_name(model_name)
-        model_name_matches = [
-            path
-            for path in model_dir.rglob("*")
-            if path.is_file()
-            and path.suffix.lower() in STEP_EXTENSIONS
-            and normalize_model_name(path.name) == model_name_key
-        ]
-        if model_name_matches:
-            return sorted(model_name_matches, key=lambda path: (len(path.stem), str(path).upper()))[0]
-
-    footprint_matches = [
-        path
-        for path in model_dir.rglob("*")
-        if path.is_file() and path.suffix.lower() in STEP_EXTENSIONS and footprint_name_matches(path.stem, footprint)
-    ]
-    if not footprint_matches:
-        return None
-    return sorted(footprint_matches, key=lambda path: (len(path.stem), str(path).upper()))[0]
-
-
 def load_response_data(path: Path) -> dict:
     data = json.loads(path.read_text(encoding="utf-8-sig"))
     result = data.get("result", data)
@@ -2061,6 +2080,11 @@ def main() -> int:
     library_path_text = str(response_data.get("library_path", "")).strip()
     library_path = library_path_arg or (Path(library_path_text) if library_path_text else None)
     model_states = load_pcb_library_model_states(library_path)
+    step_files = [
+        path for path in model_dir.rglob("*") if path.is_file() and path.suffix.lower() in STEP_EXTENSIONS
+    ]
+    body_counts = Counter(str(body["footprint"]) for body in bodies)
+    body_indices = Counter()
 
     model_cache: dict[Path, dict] = {}
     lines: list[str] = []
@@ -2071,18 +2095,18 @@ def main() -> int:
     missing_rotation_metadata: list[str] = []
     hidden_line_stats: dict[str, dict] = {}
     optimization_stats: dict[str, dict] = {}
+    projected_footprints = set()
 
     for body in bodies:
         footprint = str(body["footprint"])
-        footprint_model_state = model_state_for_footprint(model_states, footprint)
-        expected_model_name = (
-            str(footprint_model_state["model_name"])
-            if footprint_model_state is not None and footprint_model_state.get("model_name")
-            else None
+        body_indices[footprint] += 1
+        single_body = body_counts[footprint] == 1
+        report_key = footprint if single_body else f"{footprint} body {body_indices[footprint]}"
+        model_path, model_state, model_error = model_for_body(
+            body, model_states, step_files, single_body=single_body,
         )
-        model_path = embedded_model_path(footprint, model_dir, expected_model_name)
         if model_path is None:
-            skipped[footprint] = f"exact embedded STEP model not found in {model_dir}"
+            skipped[report_key] = f"{model_error} in {model_dir}"
             continue
 
         if model_path not in model_cache:
@@ -2096,14 +2120,13 @@ def main() -> int:
         )
         normalized_bbox, was_normalized = normalize_target_bbox(target_bbox)
         if was_normalized:
-            normalized_bboxes[footprint] = {
+            normalized_bboxes[report_key] = {
                 "reported": [round(value, 5) for value in target_bbox],
                 "used": [round(value, 5) for value in normalized_bbox],
             }
 
-        model_state = model_state_for_body(model_states, footprint, model_path) or footprint_model_state
         if model_state is None:
-            missing_rotation_metadata.append(footprint)
+            missing_rotation_metadata.append(report_key)
 
         projection_model_state = projection_state_for_body(
             model_cache[model_path],
@@ -2113,7 +2136,7 @@ def main() -> int:
         )
         projection_rotation_deg = projection_rotation_from_model_state(projection_model_state)
         if projection_model_state is not None:
-            model_rotation_metadata[footprint] = {
+            model_rotation_metadata[report_key] = {
                 "projection_rotation_deg": round(projection_rotation_deg, 6),
                 "model_3d_rotx_deg": round(float(model_state["rotx"]), 6) if model_state and model_state.get("rotx") is not None else None,
                 "model_3d_roty_deg": round(float(model_state["roty"]), 6) if model_state and model_state.get("roty") is not None else None,
@@ -2129,9 +2152,9 @@ def main() -> int:
         projection = visible_edge_projection(model_cache[model_path], projection_model_state)
         source_segments = projection["segments"]
         source_bbox = projection["source_bbox"]
-        hidden_line_stats[footprint] = projection["stats"]
+        hidden_line_stats[report_key] = projection["stats"]
         if not source_segments or source_bbox is None:
-            skipped[footprint] = "no visible projected STEP edges"
+            skipped[report_key] = "no visible projected STEP edges"
             continue
 
         placement_rotation_deg = normalize_rotation_degrees(
@@ -2144,7 +2167,7 @@ def main() -> int:
             placement_rotation_deg,
         )
         if not scaled:
-            skipped[footprint] = "no scaled segments"
+            skipped[report_key] = "no scaled segments"
             continue
 
         primitives, footprint_optimization_stats = optimize_segments_to_primitives(scaled)
@@ -2165,12 +2188,13 @@ def main() -> int:
             footprint_optimization_stats["computed_overall_height_mm"] = round(height_state["overall_height_mm"], 6)
             if "contact_component_repetitions" in height_state:
                 footprint_optimization_stats["computed_contact_component_repetitions"] = int(height_state["contact_component_repetitions"])
-        optimization_stats[footprint] = footprint_optimization_stats
+        optimization_stats[report_key] = footprint_optimization_stats
         if not primitives:
-            skipped[footprint] = "no optimized primitives"
+            skipped[report_key] = "no optimized primitives"
             continue
 
-        used_models[footprint] = str(model_path)
+        projected_footprints.add(footprint)
+        used_models[report_key] = str(model_path)
         for primitive in primitives:
             lines.append(primitive_record(footprint, primitive))
 
@@ -2181,7 +2205,7 @@ def main() -> int:
         json.dumps(
             {
                 "output_file": str(output_file),
-                "footprints": len(used_models),
+                "footprints": len(projected_footprints),
                 "segments": len(lines),
                 "used_models": used_models,
                 "skipped": skipped,

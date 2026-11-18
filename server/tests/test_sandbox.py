@@ -530,7 +530,7 @@ class HelperDialogTest(unittest.TestCase):
         error = sandbox.Dialog(3, "TMessageForm", "Error")
         calls = {"n": 0}
 
-        def dialogs():
+        def dialogs(executable=None):
             calls["n"] += 1
             return [users] if calls["n"] == 1 else [users, prompt, error]
 
@@ -775,6 +775,14 @@ class RollbackToolTest(unittest.TestCase):
         patch = mock.patch.object(main, "SANDBOX_SNAPSHOTS", self.dir / "snaps")
         patch.start()
         self.addCleanup(patch.stop)
+        exchange = mock.patch.multiple(
+            main.altium_bridge,
+            _command_lock=asyncio.Lock(),
+            _exchange_lock=main.ExchangeLock(self.dir / "bridge.lock"),
+            _pending=main.PendingCommand(self.dir),
+        )
+        exchange.start()
+        self.addCleanup(exchange.stop)
         self.sb = main._sandbox()
         sandbox.take_snapshot(self.sb.snapshot_dir("Sbx_1"), [str(self.doc)])
         # The script edits the document and leaves it unsaved
@@ -782,12 +790,14 @@ class RollbackToolTest(unittest.TestCase):
         sandbox.record_run_end(self.sb.snapshot_dir("Sbx_1"),
                                [f"DOC STATE: open|{self.doc}", f"DOC AFTER: unsaved|{self.doc}"])
 
-    def rollback(self, running, replies=(), **kw):
+    def rollback(self, running, replies=(), save_during_close=False, **kw):
         mock, main = self.mock, self.main
         calls = []
 
         def run_quick(_self, script, timeout=30.0, closed_dialogs=None):
             calls.append(script)
+            if save_during_close and "SbxCloseDoc(" in script:
+                self.doc.write_bytes(b"user saved during rollback")
             return replies[len(calls) - 1]
 
         async def ensure_paths(need_script=True):
@@ -796,7 +806,7 @@ class RollbackToolTest(unittest.TestCase):
                 mock.patch.object(main.altium_bridge, "ensure_paths", ensure_paths), \
                 mock.patch.object(main, "altium_limit_problem", lambda: None), \
                 mock.patch.object(sandbox, "altium_hung", lambda: False), \
-                mock.patch.object(sandbox, "altium_dialogs", lambda: []), \
+                mock.patch.object(sandbox, "altium_dialogs", lambda executable=None: []), \
                 mock.patch.object(sandbox.Sandbox, "run_quick", run_quick), \
                 mock.patch.object(sandbox.Sandbox, "prune", lambda _self: None):
             result = self.asyncio.run(main.rollback_altium_script(None, "Sbx_1", **kw))
@@ -826,7 +836,7 @@ class RollbackToolTest(unittest.TestCase):
 
     def test_unsaved_restored_with_discard_unsaved(self):
         result, calls = self.rollback(running=True, discard_unsaved=True,
-                                      replies=[f"unsaved|{self.doc}\n", f"open|{self.doc}\n", "reopened"])
+                                      replies=[f"unsaved|{self.doc}\n", f"open|{self.doc}\n", f"open|{self.doc}\n"])
         self.assertTrue(result["success"], result)
         self.assertEqual(result["reopened"], [str(self.doc)])
         self.assertIn("SbxCloseDoc(", calls[1])
@@ -837,10 +847,28 @@ class RollbackToolTest(unittest.TestCase):
         # name for the document is the one it is reopened under
         shown = str(self.doc).upper()
         result, calls = self.rollback(running=True, discard_unsaved=True,
-                                      replies=[f"unsaved|{self.doc}\n", f"open|{self.doc}|{shown}\n", "reopened"])
+                                      replies=[f"unsaved|{self.doc}\n", f"open|{self.doc}|{shown}\n",
+                                               f"open|{shown}\n"])
         self.assertTrue(result["success"], result)
         self.assertEqual(result["reopened"], [shown])
         self.assertIn(shown.replace("'", "''"), calls[2])
+
+    def test_save_during_rollback_is_preserved_and_reopened(self):
+        result, calls = self.rollback(
+            running=True, save_during_close=True,
+            replies=[f"open|{self.doc}", f"open|{self.doc}", f"open|{self.doc}"],
+        )
+        self.assertFalse(result["success"])
+        self.assertEqual(result["restored"], [])
+        self.assertEqual(result["reopened"], [str(self.doc)])
+        self.assertEqual(self.doc.read_bytes(), b"user saved during rollback")
+
+    def test_reopen_requires_native_confirmation(self):
+        result, _ = self.rollback(
+            running=True, replies=[f"open|{self.doc}", f"open|{self.doc}", '{"error": "script failed"}']
+        )
+        self.assertFalse(result["success"])
+        self.assertEqual(result["not_reopened"], [str(self.doc)])
 
 
 if __name__ == "__main__":

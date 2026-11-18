@@ -38,6 +38,11 @@ import ntpath
 from collections import defaultdict
 from typing import Dict, List, Optional, Set, Tuple
 
+if __package__:
+    from .compiled_pins import compiled_pins, is_auto_net
+else:
+    from compiled_pins import compiled_pins, is_auto_net
+
 # Each kind of change: the comparator's difference kind and the ECO's
 # modification kinds that make it. The .PrjPcb keeps one switch per kind as
 # Type<n> under [Difference Levels] (0 = ignore the difference) and
@@ -126,26 +131,12 @@ def _members(text: str) -> List[str]:
     return [m for m in text.split(",") if m]
 
 
-def _auto_net(net: str, designator: str, pin: str) -> bool:
-    """Whether net is the name Altium gives an unconnected pin."""
-    return net.lower() == f"net{designator}_{pin}".lower()
-
-
 def parse_source(data: dict) -> dict:
     comps = {}
     for item in data.get("components", []):
         uid, des, fp, comment = _split(item, 4)
         comps[uid.lower()] = {"unique_id": uid, "designator": des, "footprint": fp, "comment": comment}
-    pins = {}
-    for item in data.get("pins", []):
-        des, pin, net = _split(item, 3)
-        key = (des.lower(), pin.lower())
-        # A pin every part of a multi-part component has (power pins) is
-        # listed once per part; the copies left unconnected get an auto net
-        # (Net<designator>_<pin>), so a real net wins
-        if key in pins and pins[key] and not _auto_net(pins[key], *key):
-            continue
-        pins[key] = net
+    pins = {key: row[2] for key, row in compiled_pins(data.get("pins", [])).items()}
     classes = []
     for item in data.get("component_classes", []):
         name, sheet, members = _split(item, 3)
@@ -340,7 +331,7 @@ def compare(source: dict, target: dict, single_pin_nets: bool = False, options: 
         sizes = defaultdict(int)
         for n in all_pins.values():
             sizes[n] += 1
-        solo_named = {n for (d, p), n in all_pins.items() if n and sizes[n] == 1 and not _auto_net(n, d, p)}
+        solo_named = {n for (d, p), n in all_pins.items() if n and sizes[n] == 1 and not is_auto_net(n, d, p)}
         all_pins = {k: (n if sizes[n] > 1 or n in solo_named else "") for k, n in all_pins.items()}
     pcb_names = {n for n in target["pads"].values() if n}
     sch_pins = {(sch_to_pcb[d].lower(), p): n for (d, p), n in all_pins.items() if d in sch_to_pcb}

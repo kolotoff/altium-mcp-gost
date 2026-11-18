@@ -59,6 +59,17 @@ def verify(directory):
     return manifest
 
 
+def source_files(source):
+    files = {}
+    for path in sorted(source.rglob("*")):
+        if path.is_symlink() or not path.resolve().is_relative_to(source):
+            raise ValueError("Checkpoint sources cannot contain symlinks/junction escapes")
+        relative = path.relative_to(source).as_posix()
+        if path.is_file() and relative != "checkpoint-manifest.json":
+            files[relative] = bounded_file(source, relative)
+    return files
+
+
 def copy_checkpoint(source, destination, reference=None, immutable_paths=()):
     source, destination = Path(source).resolve(), Path(destination).resolve()
     if (
@@ -79,20 +90,10 @@ def copy_checkpoint(source, destination, reference=None, immutable_paths=()):
         )
     reference_manifest = verify(reference_root) if reference_root else {"files": []}
     reference_files = {row["path"]: row for row in reference_manifest["files"]}
+    files = source_files(source)
     destination.mkdir(parents=True, exist_ok=False)
     rows = []
-    for original in sorted(source.rglob("*")):
-        if original.is_symlink():
-            raise ValueError(
-                "Checkpoint sources cannot contain symlinks/junction escapes"
-            )
-        if (
-            not original.is_file()
-            or original.relative_to(source).as_posix() == "checkpoint-manifest.json"
-        ):
-            continue
-        relative = original.relative_to(source).as_posix()
-        original = bounded_file(source, relative)
+    for relative, original in files.items():
         before = original.stat()
         sha = digest(original)
         target = destination / relative
@@ -123,6 +124,11 @@ def copy_checkpoint(source, destination, reference=None, immutable_paths=()):
         )
     if immutable - {r["path"] for r in rows}:
         raise ValueError("Immutable list contains paths absent from source")
+    current = source_files(source)
+    if current != files or any(
+        digest(current[row["path"]]) != row["sha256"] for row in rows
+    ):
+        raise ValueError("Source changed during checkpoint copy; incomplete output retained")
     manifest = {
         "schema": "altium-mcp-checkpoint/v1",
         "created_utc": datetime.now(timezone.utc).isoformat(),

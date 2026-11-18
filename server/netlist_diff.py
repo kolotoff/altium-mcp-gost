@@ -20,19 +20,17 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
+if __package__:
+    from .compiled_pins import compiled_pins
+else:
+    from compiled_pins import compiled_pins
+
 Netlist = Dict[str, str]          # "U1-3" -> net ("" when unconnected)
 
 
 def from_source(source: dict) -> Netlist:
     """The pins of get_eco_source's reply as {"U1-3": net}."""
-    out = {}
-    for item in source.get("pins", []):
-        parts = item.split("|")
-        if len(parts) < 3:
-            continue
-        des, pin, net = parts[0], parts[1], "|".join(parts[2:])
-        out[f"{des}-{pin}"] = net
-    return out
+    return {f"{des}-{pin}": net for des, pin, net in compiled_pins(source.get("pins", [])).values()}
 
 
 def _nets(netlist: Netlist) -> Dict[str, Set[str]]:

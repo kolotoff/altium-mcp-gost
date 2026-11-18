@@ -1,10 +1,14 @@
+import importlib.util
+import json
+import sys
 import tempfile
 import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from unittest.mock import patch
 
 from tools.crop_native_pcb_3d_export import svg_component_pixels
-from tools.generate_board_test_maps import build_page, component_positions, pad_positions, qname
+from tools.generate_board_test_maps import build_page, component_positions, pad_positions, qname, qualifying_pins
 from tools.pcb_3d_registration import CameraRegistration
 
 
@@ -35,6 +39,16 @@ class TestMapMountingHoleTests(unittest.TestCase):
 
 
 class PanelizedDesignatorTests(unittest.TestCase):
+    def test_bottom_pad_applies_component_mirror_before_board_mirror(self):
+        root = ET.fromstring(
+            '<svg><g id="component-TP-pads" data-component="TP" '
+            'transform="translate(10 10) rotate(0) scale(1 -1)">'
+            '<path data-pad-number="1" d="M 1 2 L 3 2 L 3 4 L 1 4 Z"/>'
+            '</g></svg>'
+        )
+        pads = pad_positions(root, bottom=True, view_x=0, view_y=-20, view_width=30)
+        self.assertEqual((18.0, 13.0), pads[("TP", "1")])
+
     def test_panel_instances_are_available_by_logical_designator(self):
         source = (
             '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -20 40 20">'
@@ -74,6 +88,42 @@ class PanelizedDesignatorTests(unittest.TestCase):
             )
             self.assertEqual((370.0, 150.0), mirrored["TP_1"])
             self.assertEqual((270.0, 150.0), mirrored["TP_2"])
+
+
+class TestInventoryQualification(unittest.TestCase):
+    def test_map_uses_raw_qualifying_ids_from_inventory(self):
+        script = (Path(__file__).resolve().parents[2] / "skills" / "create-board-test-description"
+                  / "scripts" / "prepare_test_inventory.py")
+        spec = importlib.util.spec_from_file_location("prepare_test_inventory", script)
+        inventory_builder = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(inventory_builder)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            components, pins, inventory = (root / name for name in ("components.json", "pins.json", "inventory.json"))
+            components.write_text(json.dumps([{"designator": "SB1", "footprint": "Bridge"}]))
+            pins.write_text(json.dumps([{"designator": "SB1", "pins": [
+                {"name": "1", "net": "GND", "hole_size": 1.2 / 0.0254},
+                {"name": "2", "net": "GND", "hole_size": 0.9996 / 0.0254},
+                {"name": "3", "net": "", "hole_size": 1.5 / 0.0254},
+            ]}]))
+            with patch.object(sys, "argv", [
+                str(script), "--components", str(components), "--pins", str(pins),
+                "--minimum-hole-mm", "1.1", "--output", str(inventory),
+            ]):
+                self.assertEqual(inventory_builder.main(), 0)
+            item = json.loads(inventory.read_text(encoding="utf-8"))["components"][0]
+            self.assertEqual(["1"], item["qualifying_pad_ids"])
+            self.assertEqual(1.0, item["pins"][1]["hole_mm"])
+            self.assertEqual("NC", item["pins"][2]["pcb_net"])
+            self.assertEqual(["1"], [pin["pad"] for pin in qualifying_pins(item, 1.0)])
+
+    def test_legacy_map_skips_nc_and_honors_inventory_threshold(self):
+        item = {"pins": [
+            {"pad": "1", "pcb_net": "GND", "hole_mm": 1.0},
+            {"pad": "2", "pcb_net": "GND", "hole_mm": 1.5},
+            {"pad": "3", "pcb_net": "NC", "hole_mm": 1.5},
+        ]}
+        self.assertEqual(["2"], [pin["pad"] for pin in qualifying_pins(item, 1.25)])
 
 
 if __name__ == "__main__":

@@ -13,23 +13,9 @@ begin
     if RoutingFailure = '' then RoutingFailure := ErrorText;
 end;
 
-function RoutingField(Value : String) : String;
-var I, N : Integer;
-begin
-    Result := '';
-    for I := 1 to Length(Value) do
-    begin
-        N := Ord(Value[I]);
-        if Value[I] = '\' then Result := Result + '\\'
-        else if Value[I] = '"' then Result := Result + '\"'
-        else if (N < 32) or (N > 126) then Result := Result + '\u' + IntToHex(N, 4)
-        else Result := Result + Value[I];
-    end;
-end;
-
 function RoutingQuote(Value : String) : String;
 begin
-    Result := '"' + RoutingField(Value) + '"';
+    Result := '"' + JSONEscapeString(Value) + '"';
 end;
 
 function RoutingFloat(Value : Double) : String;
@@ -55,12 +41,6 @@ begin
         P := Pos(Separator, Value);
     end;
     Fields.Add(Value);
-end;
-
-function RoutingNet(Primitive : IPCB_Primitive) : String;
-begin
-    Result := '';
-    if Primitive.Net <> nil then Result := Primitive.Net.Name;
 end;
 
 function RoutingBoard(ExpectedPath : String) : IPCB_Board;
@@ -194,7 +174,7 @@ begin
         Polygons.Add('name'+#9+'net'+#9+'layer_id'+#9+'definition');
         RatsnestCount:=0; RedundantCount:=0; InvalidNetCount:=0;
         Signature.Clear;
-        Signature.Add('board'+#9+RoutingField(UpperCase(Board.FileName))+#9+IntToStr(Board.XOrigin)+#9+IntToStr(Board.YOrigin)+#9+IntToStr(MilsToCoord(1)));
+        Signature.Add('board'+#9+JSONEscapeString(UpperCase(Board.FileName))+#9+IntToStr(Board.XOrigin)+#9+IntToStr(Board.YOrigin)+#9+IntToStr(MilsToCoord(1)));
         Iterator:=Board.BoardIterator_Create;
         try
             Iterator.AddFilter_ObjectSet(MkSet(eNetObject,ePadObject,eTrackObject,eViaObject,eConnectionObject,eRuleObject,eComponentObject,eArcObject,ePolyObject));
@@ -207,28 +187,28 @@ begin
                     eNetObject:
                     begin
                         Net:=Primitive;
-                        Nets.Add(RoutingField(Net.Name)+#9+IntToStr(Net.PinCount)+#9+IntToStr(Net.ViaCount)+#9+IntToStr(Net.RoutedLength)+#9+RoutingBool(Net.ConnectivelyInvalid)+#9+RoutingBool(Net.ConnectsVisible));
-                        Signature.Add('net'+#9+RoutingField(Net.Name)+#9+IntToStr(Net.PinCount));
+                        Nets.Add(JSONEscapeString(Net.Name)+#9+IntToStr(Net.PinCount)+#9+IntToStr(Net.ViaCount)+#9+IntToStr(Net.RoutedLength)+#9+RoutingBool(Net.ConnectivelyInvalid)+#9+RoutingBool(Net.ConnectsVisible));
+                        Signature.Add('net'+#9+JSONEscapeString(Net.Name)+#9+IntToStr(Net.PinCount));
                         if Net.ConnectivelyInvalid then Inc(InvalidNetCount);
                     end;
                     ePadObject:
                     begin
                         Pad:=Primitive; Refdes:='';
                         if Pad.Component<>nil then Refdes:=Pad.Component.Name.Text;
-                        Row:=RoutingField(Refdes)+#9+RoutingField(Pad.Name)+#9+RoutingField(RoutingNet(Pad))+#9+IntToStr(Pad.X)+#9+IntToStr(Pad.Y)+#9+IntToStr(Pad.Layer)+#9+RoutingField(Layer2String(Pad.Layer))+#9+RoutingFloat(Pad.Rotation)+#9+IntToStr(Pad.TopXSize)+#9+IntToStr(Pad.TopYSize)+#9+IntToStr(Pad.HoleSize);
+                        Row:=JSONEscapeString(Refdes)+#9+JSONEscapeString(Pad.Name)+#9+JSONEscapeString(PCBPrimitiveNetName(Pad))+#9+IntToStr(Pad.X)+#9+IntToStr(Pad.Y)+#9+IntToStr(Pad.Layer)+#9+JSONEscapeString(Layer2String(Pad.Layer))+#9+RoutingFloat(Pad.Rotation)+#9+IntToStr(Pad.TopXSize)+#9+IntToStr(Pad.TopYSize)+#9+IntToStr(Pad.HoleSize);
                         Pads.Add(Row+#9+RoutingBool(Pad.Selected)); Signature.Add('pad'+#9+Row);
                     end;
                     eTrackObject:
                     begin
                         Track:=Primitive;
-                        Row:=RoutingField(RoutingNet(Track))+#9+IntToStr(Track.X1)+#9+IntToStr(Track.Y1)+#9+IntToStr(Track.X2)+#9+IntToStr(Track.Y2)+#9+IntToStr(Track.Width)+#9+IntToStr(Track.Layer)+#9+RoutingField(Layer2String(Track.Layer));
+                        Row:=JSONEscapeString(PCBPrimitiveNetName(Track))+#9+IntToStr(Track.X1)+#9+IntToStr(Track.Y1)+#9+IntToStr(Track.X2)+#9+IntToStr(Track.Y2)+#9+IntToStr(Track.Width)+#9+IntToStr(Track.Layer)+#9+JSONEscapeString(Layer2String(Track.Layer));
                         Tracks.Add(Row+#9+RoutingBool(Track.Selected));
-                        Signature.Add('track'+#9+RoutingField(RoutingNet(Track))+#9+RoutingGeometry(Track));
+                        Signature.Add('track'+#9+JSONEscapeString(PCBPrimitiveNetName(Track))+#9+RoutingGeometry(Track));
                     end;
                     eViaObject:
                     begin
                         Via:=Primitive;
-                        Row:=RoutingField(RoutingNet(Via))+#9+IntToStr(Via.X)+#9+IntToStr(Via.Y)+#9+IntToStr(Via.Size)+#9+IntToStr(Via.HoleSize)+#9+IntToStr(Via.LowLayer)+#9+IntToStr(Via.HighLayer);
+                        Row:=JSONEscapeString(PCBPrimitiveNetName(Via))+#9+IntToStr(Via.X)+#9+IntToStr(Via.Y)+#9+IntToStr(Via.Size)+#9+IntToStr(Via.HoleSize)+#9+IntToStr(Via.LowLayer)+#9+IntToStr(Via.HighLayer);
                         Vias.Add(Row+#9+RoutingBool(Via.Selected)); Signature.Add('via'+#9+Row);
                     end;
                     eConnectionObject:
@@ -236,32 +216,32 @@ begin
                         Connection:=Primitive; ModeName:='other';
                         if Connection.Mode=eRatsNestConnection then ModeName:='ratsnest';
                         if Connection.Mode=eBrokenNetMarker then ModeName:='broken_net_marker';
-                        Connections.Add(RoutingField(RoutingNet(Connection))+#9+IntToStr(Connection.X1)+#9+IntToStr(Connection.Y1)+#9+IntToStr(Connection.X2)+#9+IntToStr(Connection.Y2)+#9+IntToStr(Connection.Layer1)+#9+IntToStr(Connection.Layer2)+#9+ModeName+#9+RoutingBool(Connection.IsRedundant)+#9+RoutingBool(Connection.Selected));
+                        Connections.Add(JSONEscapeString(PCBPrimitiveNetName(Connection))+#9+IntToStr(Connection.X1)+#9+IntToStr(Connection.Y1)+#9+IntToStr(Connection.X2)+#9+IntToStr(Connection.Y2)+#9+IntToStr(Connection.Layer1)+#9+IntToStr(Connection.Layer2)+#9+ModeName+#9+RoutingBool(Connection.IsRedundant)+#9+RoutingBool(Connection.Selected));
                         if Connection.IsRedundant then Inc(RedundantCount)
                         else if Connection.Mode=eRatsNestConnection then Inc(RatsnestCount);
                     end;
                     eRuleObject:
                     begin
                         Rule:=Primitive;
-                        Row:=RoutingField(Rule.Name)+#9+IntToStr(Rule.RuleKind)+#9+IntToStr(Rule.Priority)+#9+RoutingBool(Rule.DRCEnabled)+#9+RoutingField(Rule.Scope1Expression)+#9+RoutingField(Rule.Scope2Expression)+#9+RoutingField(Rule.GetState_DataSummaryString);
+                        Row:=JSONEscapeString(Rule.Name)+#9+IntToStr(Rule.RuleKind)+#9+IntToStr(Rule.Priority)+#9+RoutingBool(Rule.DRCEnabled)+#9+JSONEscapeString(Rule.Scope1Expression)+#9+JSONEscapeString(Rule.Scope2Expression)+#9+JSONEscapeString(Rule.GetState_DataSummaryString);
                         Rules.Add(Row); Signature.Add('rule'+#9+Row);
                     end;
                     eComponentObject:
                     begin
                         Component:=Primitive;
-                        Row:=RoutingField(Component.Name.Text)+#9+RoutingField(Component.Comment.Text)+#9+RoutingField(Component.Pattern)+#9+IntToStr(Component.X)+#9+IntToStr(Component.Y)+#9+RoutingFloat(Component.Rotation)+#9+IntToStr(Component.Layer)+#9+RoutingField(Layer2String(Component.Layer));
+                        Row:=JSONEscapeString(Component.Name.Text)+#9+JSONEscapeString(Component.Comment.Text)+#9+JSONEscapeString(Component.Pattern)+#9+IntToStr(Component.X)+#9+IntToStr(Component.Y)+#9+RoutingFloat(Component.Rotation)+#9+IntToStr(Component.Layer)+#9+JSONEscapeString(Layer2String(Component.Layer));
                         Components.Add(Row); Signature.Add('component'+#9+Row);
                     end;
                     eArcObject:
                     begin
                         Arc:=Primitive;
-                        Row:=RoutingField(RoutingNet(Arc))+#9+IntToStr(Arc.XCenter)+#9+IntToStr(Arc.YCenter)+#9+IntToStr(Arc.Radius)+#9+RoutingFloat(Arc.StartAngle)+#9+RoutingFloat(Arc.EndAngle)+#9+IntToStr(Arc.LineWidth)+#9+IntToStr(Arc.Layer);
+                        Row:=JSONEscapeString(PCBPrimitiveNetName(Arc))+#9+IntToStr(Arc.XCenter)+#9+IntToStr(Arc.YCenter)+#9+IntToStr(Arc.Radius)+#9+RoutingFloat(Arc.StartAngle)+#9+RoutingFloat(Arc.EndAngle)+#9+IntToStr(Arc.LineWidth)+#9+IntToStr(Arc.Layer);
                         Arcs.Add(Row+#9+RoutingBool(Arc.Selected)); Signature.Add('arc'+#9+Row);
                     end;
                     ePolyObject:
                     begin
                         Polygon:=Primitive;
-                        Row:=RoutingField(Polygon.Name)+#9+RoutingField(RoutingNet(Polygon))+#9+IntToStr(Polygon.Layer)+#9+RoutingField(RoutingPolygonDefinition(Polygon));
+                        Row:=JSONEscapeString(Polygon.Name)+#9+JSONEscapeString(PCBPrimitiveNetName(Polygon))+#9+IntToStr(Polygon.Layer)+#9+JSONEscapeString(RoutingPolygonDefinition(Polygon));
                         Polygons.Add(Row); Signature.Add('polygon'+#9+Row);
                     end;
                 end;
@@ -277,13 +257,13 @@ begin
         begin
             Inc(LayerCount);
             if LayerCount>64 then begin RoutingFail('Layer stack iteration exceeded 64 entries.'); Exit; end;
-            Row:=IntToStr(LayerCount)+#9+IntToStr(LayerObject.V6_LayerID)+#9+RoutingField(LayerObject.Name)+#9+IntToStr(LayerObject.CopperThickness);
+            Row:=IntToStr(LayerCount)+#9+IntToStr(LayerObject.V6_LayerID)+#9+JSONEscapeString(LayerObject.Name)+#9+IntToStr(LayerObject.CopperThickness);
             Layers.Add(Row); Signature.Add('layer'+#9+Row);
             LayerObject:=Stack.NextLayer(LayerObject);
         end;
         Signature.Sort;
         Summary.Add('field'+#9+'value');
-        Summary.Add('board_file'+#9+RoutingField(Board.FileName));
+        Summary.Add('board_file'+#9+JSONEscapeString(Board.FileName));
         Summary.Add('coordinate_units'+#9+'Altium internal units');
         Summary.Add('field_encoding'+#9+'json-string');
         Summary.Add('internal_units_per_mil'+#9+IntToStr(MilsToCoord(1)));
@@ -349,7 +329,7 @@ begin
         Primitive:=Iterator.FirstPCBObject;
         while Primitive<>nil do
         begin
-            if (RoutingKind(Primitive)=Kind) and (RoutingNet(Primitive)=NetName) and (RoutingGeometry(Primitive)=Geometry) then
+            if (RoutingKind(Primitive)=Kind) and (PCBPrimitiveNetName(Primitive)=NetName) and (RoutingGeometry(Primitive)=Geometry) then
             begin
                 Result:=Primitive; Inc(Matches);
             end;
@@ -444,7 +424,7 @@ begin
             begin
                 Pad:=Primitive;
                 if RoutingViaOverlapsPadBounds(Via,Pad) then
-                    if not AllowViaInPad or (RoutingNet(Pad)<>RoutingNet(Via)) then begin RoutingFail('Via in pad requires explicit same-net allowance.'); Exit; end;
+                    if not AllowViaInPad or (PCBPrimitiveNetName(Pad)<>PCBPrimitiveNetName(Via)) then begin RoutingFail('Via in pad requires explicit same-net allowance.'); Exit; end;
             end;
             Primitive:=Iterator.NextPCBObject;
         end;
@@ -514,7 +494,7 @@ begin
             while Primitive<>nil do
             begin
                 for I:=1 to Count do
-                    if ((Kinds[I]='all') or (Kinds[I]=RoutingKind(Primitive))) and (RoutingNet(Primitive)=Nets[I]) then
+                    if ((Kinds[I]='all') or (Kinds[I]=RoutingKind(Primitive))) and (PCBPrimitiveNetName(Primitive)=Nets[I]) then
                         if (Geometries[I]='') or (Geometries[I]=RoutingGeometry(Primitive)) then
                             MatchesList[I-1]:=IntToStr(StrToInt(MatchesList[I-1])+1);
                 Primitive:=Iterator.NextPCBObject;
@@ -542,7 +522,7 @@ begin
             begin
                 Wanted:=False;
                 for I:=1 to Count do
-                    if ((Kinds[I]='all') or (Kinds[I]=RoutingKind(Primitive))) and (RoutingNet(Primitive)=Nets[I]) then
+                    if ((Kinds[I]='all') or (Kinds[I]=RoutingKind(Primitive))) and (PCBPrimitiveNetName(Primitive)=Nets[I]) then
                         if (Geometries[I]='') or (Geometries[I]=RoutingGeometry(Primitive)) then Wanted:=True;
                 Primitive.Selected:=Wanted;
                 if Wanted then Inc(SelectedCount);
@@ -635,7 +615,7 @@ begin
         begin
             RoutingRequireActive(Board); if RoutingFailure<>'' then Exit;
             if Targets[I]<>nil then
-                if (RoutingNet(Targets[I])<>Nets[I]) or (RoutingGeometry(Targets[I])<>OldGeometry[I]) then begin RoutingFail('Target changed during batch.'); Exit; end;
+                if (PCBPrimitiveNetName(Targets[I])<>Nets[I]) or (RoutingGeometry(Targets[I])<>OldGeometry[I]) then begin RoutingFail('Target changed during batch.'); Exit; end;
             RoutingStatus(Directory,RequestID,'applying_partial_changes_possible',I,Completed);
             Audit[I]:=IntToStr(I)+#9+Kinds[I]+#9+Actions[I]+#9+'mutation_attempted';
             Audit.SaveToFile(Directory+'\batch-audit.tsv');
@@ -721,7 +701,7 @@ begin
         if Action='edit' then
         begin
             if Matches<>1 then begin RoutingFail('Polygon name must resolve exactly once.'); Exit; end;
-            if (RoutingPolygonDefinition(Target)<>OldDefinition) or (Target.Layer<>LayerID) or (RoutingNet(Target)<>Net.Name) then begin RoutingFail('Polygon target changed.'); Exit; end;
+            if (RoutingPolygonDefinition(Target)<>OldDefinition) or (Target.Layer<>LayerID) or (PCBPrimitiveNetName(Target)<>Net.Name) then begin RoutingFail('Polygon target changed.'); Exit; end;
         end;
         for I:=2 to Lines.Count-1 do
         begin
@@ -805,7 +785,7 @@ begin
                         Primitive:=Children.NextPCBObject;
                     end;
                 finally Polygon.GroupIterator_Destroy(Children); end;
-                Rows.Add(RoutingField(Polygon.Name)+#9+RoutingField(RoutingNet(Polygon))+#9+IntToStr(Polygon.Layer)+#9+
+                Rows.Add(JSONEscapeString(Polygon.Name)+#9+JSONEscapeString(PCBPrimitiveNetName(Polygon))+#9+IntToStr(Polygon.Layer)+#9+
                     IntToStr(Tracks)+#9+IntToStr(Arcs)+#9+IntToStr(Regions)+#9+IntToStr(Fills));
                 Polygon:=Iterator.NextPCBObject;
             end;

@@ -5427,20 +5427,15 @@ begin
     end;
 end;
 
-function EditSchematic(SheetPath: String; SpecPath: String; Save: Boolean): String;
+function EditSchematic(SheetPath: String; Spec: TStringList; Save: Boolean): String;
 var
     Doc       : ISch_Document;
     ServerDoc : IServerDocument;
-    Spec, Errors, Props : TStringList;
+    Errors, Props : TStringList;
     i, Applied : Integer;
     Msg       : String;
     Ok        : Boolean;
 begin
-    if not FileExists(SpecPath) then
-    begin
-        Result := 'ERROR: edit spec not found';
-        Exit;
-    end;
     Doc := SchServer.GetSchDocumentByPath(SheetPath);
     if Doc = nil then
     begin
@@ -5459,11 +5454,9 @@ begin
         Exit;
     end;
 
-    Spec := TStringList.Create;
     Errors := TStringList.Create;
     Props := TStringList.Create;
     try
-        Spec.LoadFromFile(SpecPath);
         Applied := 0;
         // PostProcess must run whatever happens, or Altium's undo stays broken
         SchServer.ProcessControl.PreProcess(Doc, '');
@@ -5508,7 +5501,6 @@ begin
         Props.Add(BuildJSONArray(Errors, 'errors'));
         Result := BuildJSONObject(Props);
     finally
-        Spec.Free;
         Errors.Free;
         Props.Free;
     end;

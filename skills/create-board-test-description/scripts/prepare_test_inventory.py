@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -59,6 +60,8 @@ def main() -> int:
     parser.add_argument("--minimum-hole-mm", type=float, default=1.0)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    if not math.isfinite(args.minimum_hole_mm) or args.minimum_hole_mm <= 0:
+        parser.error("--minimum-hole-mm must be a positive finite number")
 
     components = load_payload(args.components)
     pin_records = load_payload(args.pins)
@@ -93,26 +96,27 @@ def main() -> int:
             categories.append("keystone-5016")
 
         pins = pins_by_designator.get(designator, [])
-        eligible_holes = [
-            pad
-            for pad in pins
-            if not str(pad.get("name", "")).upper().startswith("MP")
-            and str(pad.get("net", "")).strip()
-            and float(pad.get("hole_size") or 0.0) * MM_PER_MIL + 1e-9 >= args.minimum_hole_mm
-        ]
-        if eligible_holes:
+        pad_rows = []
+        qualifying_pads = set()
+        for pad in pins:
+            name = str(pad.get("name") or "").strip()
+            net = str(pad.get("net") or "").strip()
+            hole_mm = float(pad.get("hole_size") or 0.0) * MM_PER_MIL
+            qualifies = (bool(name and net) and not name.upper().startswith("MP")
+                         and hole_mm + 1e-9 >= args.minimum_hole_mm)
+            if qualifies:
+                qualifying_pads.add(name)
+            pad_rows.append((name, net, hole_mm, qualifies))
+        if qualifying_pads:
             categories.append("through-hole-signal")
         if not categories:
             continue
 
-        selected_pins = pins
-        if categories == ["through-hole-signal"]:
-            selected_pins = eligible_holes
-
         normalized_pins: list[dict[str, Any]] = []
-        for pad in selected_pins:
-            pad_name = str(pad.get("name", "")).strip()
-            pcb_net = str(pad.get("net", "")).strip() or "NC"
+        for pad_name, net, hole_mm, qualifies in pad_rows:
+            if categories == ["through-hole-signal"] and not qualifies:
+                continue
+            pcb_net = net or "NC"
             resolved_net = source_net(designator, pad_name, pcb_net, overrides)
             if GENERATED_NET.match(resolved_net):
                 unresolved.append(f"{designator}.{pad_name}={resolved_net}")
@@ -121,7 +125,7 @@ def main() -> int:
                     "pad": pad_name,
                     "pcb_net": pcb_net,
                     "source_net": resolved_net,
-                    "hole_mm": round(float(pad.get("hole_size") or 0.0) * MM_PER_MIL, 3),
+                    "hole_mm": round(hole_mm, 3),
                 }
             )
 
@@ -140,6 +144,7 @@ def main() -> int:
                 "height": component.get("height"),
                 "rotation": component.get("rotation"),
                 "pins": normalized_pins,
+                "qualifying_pad_ids": sorted(qualifying_pads),
             }
         )
 

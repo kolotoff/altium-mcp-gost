@@ -263,6 +263,24 @@ begin
             Result := Result + 1;
 end;
 
+function MaterialComponentHasUniqueId(Flat: IDocument; ComponentId: String): Boolean;
+var
+    i: Integer;
+    Found: Boolean;
+begin
+    Result := False;
+    if ComponentId = '' then Exit;
+    ComponentId := UpperCase(ComponentId);
+    Found := False;
+    for i := 0 to Flat.DM_ComponentCount - 1 do
+        if UpperCase(Flat.DM_Components(i).DM_UniqueId) = ComponentId then
+        begin
+            if Found then Exit;
+            Found := True;
+        end;
+    Result := Found;
+end;
+
 function SameBaseMaterial(Source, Target: IComponent): Boolean;
 begin
     Result := (Source.DM_LibraryReference = Target.DM_LibraryReference) and
@@ -354,7 +372,9 @@ begin
             if SourceComponent = nil then
                 ErrorText := 'Source designator missing or ambiguous: ' + SourceChange.DM_PhysicalDesignator
             else if SourceComponent.DM_UniqueId <> SourceChange.DM_UniqueId then
-                ErrorText := 'Source variant has a stale component ID: ' + SourceChange.DM_PhysicalDesignator;
+                ErrorText := 'Source variant has a stale component ID: ' + SourceChange.DM_PhysicalDesignator
+            else if not MaterialComponentHasUniqueId(SourceFlat, SourceComponent.DM_UniqueId) then
+                ErrorText := 'Source component ID is missing or ambiguous: ' + SourceChange.DM_PhysicalDesignator;
             if TargetComponent = nil then
                 Missing.Add('"' + JSONEscapeString(SourceChange.DM_PhysicalDesignator) + '"')
             else if SourceComponent <> nil then
@@ -362,8 +382,7 @@ begin
                 if not SameBaseMaterial(SourceComponent, TargetComponent) then
                     ErrorText := 'Base component mismatch: ' + SourceChange.DM_PhysicalDesignator;
                 if (Mapped.IndexOf(SourceChange.DM_PhysicalDesignator) >= 0) or
-                   (TargetIds.IndexOf(TargetComponent.DM_UniqueId) >= 0) or
-                   (TargetComponent.DM_UniqueId = '') then
+                   (not MaterialComponentHasUniqueId(TargetFlat, TargetComponent.DM_UniqueId)) then
                     ErrorText := 'Duplicate or empty component identity: ' + SourceChange.DM_PhysicalDesignator;
                 Mapped.Add(SourceChange.DM_PhysicalDesignator);
                 TargetIds.Add(TargetComponent.DM_UniqueId);
@@ -581,6 +600,11 @@ begin
             if Component.DM_LibraryReference = LibraryReference then
             begin
                 SourceCount := SourceCount + 1;
+                if not MaterialComponentHasUniqueId(SourceFlat, Component.DM_UniqueId) then
+                begin
+                    ErrorText := 'Source component ID is missing or ambiguous: ' + Component.DM_PhysicalDesignator;
+                    Break;
+                end;
                 Change := SourceVariant.DM_FindComponentVariationByUniqueId(Component.DM_UniqueId);
                 if Change = nil then
                     ErrorText := 'Source material is only partially overridden; refusing a global material rule.'
@@ -596,7 +620,7 @@ begin
                     ErrorText := 'Source material has conflicting base values or override values.';
             end;
         end;
-        if (SourceCount = 0) or (TemplateChange = nil) then
+        if (ErrorText = '') and ((SourceCount = 0) or (TemplateChange = nil)) then
             ErrorText := 'No source material rule found for the exact library reference.';
         if ErrorText = '' then
             for i := 0 to TargetFlat.DM_ComponentCount - 1 do
@@ -607,7 +631,7 @@ begin
                     TargetCount := TargetCount + 1;
                     if not SameBaseMaterial(TemplateComponent, Component) then
                         ErrorText := 'Target base material differs: ' + Component.DM_PhysicalDesignator;
-                    if (Component.DM_UniqueId = '') or
+                    if (not MaterialComponentHasUniqueId(TargetFlat, Component.DM_UniqueId)) or
                        (MaterialComponentMatchCount(TargetFlat, Component.DM_PhysicalDesignator) <> 1) then
                         ErrorText := 'Target identity missing or ambiguous: ' + Component.DM_PhysicalDesignator;
                     Change := TargetVariant.DM_FindComponentVariationByDesignator(Component.DM_PhysicalDesignator);
@@ -622,7 +646,7 @@ begin
                         ErrorText := 'Existing target override conflicts: ' + Component.DM_PhysicalDesignator;
                 end;
             end;
-        if TargetCount = 0 then ErrorText := 'No compatible target material found.';
+        if (ErrorText = '') and (TargetCount = 0) then ErrorText := 'No compatible target material found.';
         ServerDocument := TargetProject.DM_ServerDocument;
         if ServerDocument = nil then ErrorText := 'Target project server document is unavailable.';
         if (ErrorText = '') and ApplyChanges and (Pending.Count > 0) then

@@ -922,7 +922,15 @@ def model_for_body(
             files = [path for path in step_files if footprint_name_matches(path.stem, footprint)]
     if len(files) != 1:
         return None, state, ("multiple extracted STEP files match" if files else "exact embedded STEP model not found")
-    return files[0], state, None
+    model = files[0]
+    if state is None:
+        key = normalize_model_name(model.name)
+        matches = [candidate for candidate in candidates if candidate["model_name_key"] == key]
+        if len(matches) > 1:
+            return None, None, "multiple saved 3D body placements match"
+        if matches:
+            state = matches[0]
+    return model, state, None
 
 
 def normalize_rotation_degrees(angle_deg: float) -> float:

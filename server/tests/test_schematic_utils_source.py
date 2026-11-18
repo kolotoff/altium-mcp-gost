@@ -265,7 +265,7 @@ class PcbLayoutDuplicatorSourceTest(unittest.TestCase):
         source = source_path.read_text(encoding="utf-8")
 
         move_index = source.index("ConnectedPrim.MoveByXY(AnchorOffsetX, AnchorOffsetY)")
-        net_assign_index = source.index("ConnectedPrim.Net := Net")
+        net_assign_index = source.index("SetLayoutDuplicatorPrimitiveNet(ConnectedPrim, Net)")
 
         self.assertLess(
             move_index,
@@ -273,7 +273,7 @@ class PcbLayoutDuplicatorSourceTest(unittest.TestCase):
             "Copied routing primitives must be moved to the destination before pad-based net assignment.",
         )
         self.assertIn(
-            "SourcePadCount := CountComponentPads(CmpSrc)",
+            "PadCount := CountComponentPads(CmpSrc)",
             source,
             "The base component should be chosen from the source component with the most pads, not list order.",
         )
@@ -318,7 +318,7 @@ class PcbLayoutDuplicatorSourceTest(unittest.TestCase):
             "Copied vias or other primitives not reached by pad tracing must not keep source nets.",
         )
         self.assertLess(
-            source.index("ConnectedPrim.Net := Net"),
+            source.index("SetLayoutDuplicatorPrimitiveNet(ConnectedPrim, Net)"),
             source.index("TranslateLayoutDuplicatorPrimitiveNets(Board, GroupObjects, NetNameMap)"),
             "Fallback source-net translation should run after normal pad-based net assignment.",
         )

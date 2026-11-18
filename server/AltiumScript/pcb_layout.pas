@@ -133,6 +133,84 @@ begin
         Result := 1;
 end;
 
+procedure LayoutAddPadRecord(Board: IPCB_Board; Pad: IPCB_Pad; Lines: TStringList);
+var
+    Designator, NetName: String;
+    Bounds: TCoordRect;
+begin
+    Designator := '';
+    if Pad.InComponent and (Pad.Component <> nil) then Designator := Pad.Component.Name.Text;
+    NetName := PCBPrimitiveNetName(Pad);
+    Lines.Add('P|' + Designator + '|' + Pad.Name + '|' + IntToStr(Pad.X - Board.XOrigin) + '|' +
+              IntToStr(Pad.Y - Board.YOrigin) + '|' + Layer2String(Pad.Layer) + '|' + IntToStr(Pad.TopShape) + '|' +
+              IntToStr(Pad.TopXSize) + '|' + IntToStr(Pad.TopYSize) + '|' + LayoutAngle(Pad.Rotation) + '|' +
+              IntToStr(Pad.HoleSize) + '|' + NetName);
+    if (Pad.Layer = eMultiLayer) and (Pad.Mode <> ePadMode_Simple) then
+    begin
+        Bounds := Pad.BoundingRectangle;
+        Lines.Add('PB|' + IntToStr(Bounds.Left - Board.XOrigin) + '|' + IntToStr(Bounds.Bottom - Board.YOrigin) + '|' +
+                  IntToStr(Bounds.Right - Board.XOrigin) + '|' + IntToStr(Bounds.Top - Board.YOrigin));
+    end;
+end;
+
+function LayoutAddComponentCopper(Board: IPCB_Board; X1, Y1, X2, Y2: Integer; Touching: Boolean;
+    Seen, Lines: TStringList): Integer;
+var
+    Components: IPCB_BoardIterator;
+    Children: IPCB_GroupIterator;
+    Comp: IPCB_Component;
+    Prim: IPCB_Primitive;
+    Bounds: TCoordRect;
+    Address: String;
+    Inside: Boolean;
+begin
+    Result := 0;
+    // The board spatial iterator need not return copper owned by a footprint.
+    Components := Board.BoardIterator_Create;
+    try
+        Components.AddFilter_ObjectSet(MkSet(eComponentObject));
+        Components.AddFilter_LayerSet(AllLayers);
+        Components.AddFilter_Method(eProcessAll);
+        Comp := Components.FirstPCBObject;
+        while Comp <> nil do
+        begin
+            Bounds := Comp.BoundingRectangleNoNameComment;
+            if (Bounds.Left <= X2) and (Bounds.Right >= X1) and
+               (Bounds.Bottom <= Y2) and (Bounds.Top >= Y1) then
+            begin
+                Children := Comp.GroupIterator_Create;
+                try
+                    Children.SetState_FilterAll;
+                    Children.AddFilter_ObjectSet(MkSet(eTrackObject, eArcObject, eViaObject, eFillObject, eRegionObject));
+                    Prim := Children.FirstPCBObject;
+                    while Prim <> nil do
+                    begin
+                        Bounds := Prim.BoundingRectangle;
+                        Inside := (Bounds.Left >= X1) and (Bounds.Right <= X2) and
+                                  (Bounds.Bottom >= Y1) and (Bounds.Top <= Y2);
+                        if Inside or (Touching and (Bounds.Left <= X2) and (Bounds.Right >= X1) and
+                                      (Bounds.Bottom <= Y2) and (Bounds.Top >= Y1)) then
+                        begin
+                            Address := IntToStr(Prim.I_ObjectAddress);
+                            if (Seen.IndexOf(Address) < 0) and (not Prim.InPolygon) then
+                            begin
+                                Seen.Add(Address);
+                                Result := Result + LayoutPrimRecord(Board, Prim, Lines);
+                            end;
+                        end;
+                        Prim := Children.NextPCBObject;
+                    end;
+                finally
+                    Comp.GroupIterator_Destroy(Children);
+                end;
+            end;
+            Comp := Components.NextPCBObject;
+        end;
+    finally
+        Board.BoardIterator_Destroy(Components);
+    end;
+end;
+
 // The nets whose every pad belongs to one of the components in Designators
 // (upper-case names): a group's own nets. Upper-case names, in Local.
 procedure LayoutLocalNets(Board: IPCB_Board; Designators: TStringList; Local: TStringList);
@@ -188,10 +266,11 @@ end;
 // by Margin. Copper is listed when it lies wholly inside the area, or, with
 // Touching, when it reaches into it; with LocalNets also, wherever it runs,
 // copper on the designators' own nets (nets with no pad on another part).
-// Copper that belongs to a component or that a pour poured is never listed:
-// the pour itself is.
+// Footprint copper is optional. Enumerate pours themselves instead of their
+// poured primitives.
 function GetLayout(Designators: TStringList; HasArea: Boolean; AX1, AY1, AX2, AY2: Integer;
-                   Margin: Integer; Touching: Boolean; LocalNets: Boolean; Pads: Boolean): String;
+                   Margin: Integer; Touching: Boolean; LocalNets: Boolean; Pads: Boolean;
+                   ComponentCopper: Boolean): String;
 var
     Board    : IPCB_Board;
     Comps    : TInterfaceList;
@@ -297,18 +376,7 @@ begin
                 if Seen.IndexOf(Addr) < 0 then
                 begin
                     Seen.Add(Addr);
-                    NetName := '';
-                    if Prim.Net <> nil then NetName := Prim.Net.Name;
-                    if Prim.InComponent and (Prim.Component <> nil) then
-                        Lines.Add('P|' + Prim.Component.Name.Text + '|' + Prim.Name + '|' + IntToStr(Prim.X - Board.XOrigin) + '|' +
-                                  IntToStr(Prim.Y - Board.YOrigin) + '|' + Layer2String(Prim.Layer) + '|' + IntToStr(Prim.TopShape) + '|' +
-                                  IntToStr(Prim.TopXSize) + '|' + IntToStr(Prim.TopYSize) + '|' + LayoutAngle(Prim.Rotation) + '|' +
-                                  IntToStr(Prim.HoleSize) + '|' + NetName)
-                    else
-                        Lines.Add('P||' + Prim.Name + '|' + IntToStr(Prim.X - Board.XOrigin) + '|' +
-                                  IntToStr(Prim.Y - Board.YOrigin) + '|' + Layer2String(Prim.Layer) + '|' + IntToStr(Prim.TopShape) + '|' +
-                                  IntToStr(Prim.TopXSize) + '|' + IntToStr(Prim.TopYSize) + '|' + LayoutAngle(Prim.Rotation) + '|' +
-                                  IntToStr(Prim.HoleSize) + '|' + NetName);
+                    LayoutAddPadRecord(Board, Prim, Lines);
                 end;
                 Prim := Iterator.NextPCBObject;
             end;
@@ -355,7 +423,7 @@ begin
         Prim := Iterator.FirstPCBObject;
         while Prim <> nil do
         begin
-            if (not Prim.InComponent) and (not Prim.InPolygon) then
+            if (ComponentCopper or (not Prim.InComponent)) and (not Prim.InPolygon) then
             begin
                 Addr := IntToStr(Prim.I_ObjectAddress);
                 if Seen.IndexOf(Addr) < 0 then
@@ -372,6 +440,9 @@ begin
             Prim := Iterator.NextPCBObject;
         end;
         Board.SpatialIterator_Destroy(Iterator);
+
+        if ComponentCopper then
+            Skipped := Skipped + LayoutAddComponentCopper(Board, X1, Y1, X2, Y2, Touching, Seen, Lines);
 
         // The group's own nets, where their copper leaves the area
         if Local.Count > 0 then

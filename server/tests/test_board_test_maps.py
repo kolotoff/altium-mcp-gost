@@ -91,7 +91,7 @@ class PanelizedDesignatorTests(unittest.TestCase):
 
 
 class TestInventoryQualification(unittest.TestCase):
-    def test_map_uses_raw_qualifying_ids_from_inventory(self):
+    def test_map_uses_exact_physical_pad_qualification_from_inventory(self):
         script = (Path(__file__).resolve().parents[2] / "skills" / "create-board-test-description"
                   / "scripts" / "prepare_test_inventory.py")
         spec = importlib.util.spec_from_file_location("prepare_test_inventory", script)
@@ -105,6 +105,7 @@ class TestInventoryQualification(unittest.TestCase):
                 {"name": "1", "net": "GND", "hole_size": 1.2 / 0.0254},
                 {"name": "2", "net": "GND", "hole_size": 0.9996 / 0.0254},
                 {"name": "3", "net": "", "hole_size": 1.5 / 0.0254},
+                {"name": "1", "net": "GND", "hole_size": 0.0},
             ]}]))
             with patch.object(sys, "argv", [
                 str(script), "--components", str(components), "--pins", str(pins),
@@ -115,7 +116,14 @@ class TestInventoryQualification(unittest.TestCase):
             self.assertEqual(["1"], item["qualifying_pad_ids"])
             self.assertEqual(1.0, item["pins"][1]["hole_mm"])
             self.assertEqual("NC", item["pins"][2]["pcb_net"])
-            self.assertEqual(["1"], [pin["pad"] for pin in qualifying_pins(item, 1.0)])
+            self.assertEqual([item["pins"][0]], qualifying_pins(item, 1.0))
+
+    def test_map_supports_inventories_with_only_qualifying_ids(self):
+        item = {"qualifying_pad_ids": ["2"], "pins": [
+            {"pad": "1", "pcb_net": "GND", "hole_mm": 1.0},
+            {"pad": "2", "pcb_net": "GND", "hole_mm": 1.0},
+        ]}
+        self.assertEqual([item["pins"][1]], qualifying_pins(item, 1.0))
 
     def test_legacy_map_skips_nc_and_honors_inventory_threshold(self):
         item = {"pins": [

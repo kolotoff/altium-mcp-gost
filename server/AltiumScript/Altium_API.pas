@@ -1877,6 +1877,7 @@ var
     Touching    : Boolean;
     LocalNets   : Boolean;
     Pads        : Boolean;
+    ComponentCopper : Boolean;
     Designators : TStringList;
 begin
     Area := '';
@@ -1884,6 +1885,7 @@ begin
     Touching := False;
     LocalNets := False;
     Pads := False;
+    ComponentCopper := False;
     Designators := TStringList.Create;
     try
         for i := 0 to RequestData.Count - 1 do
@@ -1899,14 +1901,16 @@ begin
             else if Pos('"layout_local_nets"', RequestData[i]) > 0 then
                 LocalNets := Pos('true', RequestData[i]) > 0
             else if Pos('"layout_pads"', RequestData[i]) > 0 then
-                Pads := Pos('true', RequestData[i]) > 0;
+                Pads := Pos('true', RequestData[i]) > 0
+            else if Pos('"layout_component_copper"', RequestData[i]) > 0 then
+                ComponentCopper := Pos('true', RequestData[i]) > 0;
         end;
         if Area <> '' then
             Result := GetLayout(Designators, True, StrToInt(GetFieldFromPipeString(Area, 0)),
                                 StrToInt(GetFieldFromPipeString(Area, 1)), StrToInt(GetFieldFromPipeString(Area, 2)),
-                                StrToInt(GetFieldFromPipeString(Area, 3)), Margin, Touching, LocalNets, Pads)
+                                StrToInt(GetFieldFromPipeString(Area, 3)), Margin, Touching, LocalNets, Pads, ComponentCopper)
         else
-            Result := GetLayout(Designators, False, 0, 0, 0, 0, Margin, Touching, LocalNets, Pads);
+            Result := GetLayout(Designators, False, 0, 0, 0, 0, Margin, Touching, LocalNets, Pads, ComponentCopper);
     finally
         Designators.Free;
     end;

@@ -720,6 +720,27 @@ class RunFilesTest(unittest.TestCase):
 
 
 class DialogTest(unittest.TestCase):
+    def test_hung_check_ignores_other_altium_installations(self):
+        from unittest.mock import Mock, patch
+
+        executable = r"C:\Configured\X2.EXE"
+        user32 = Mock()
+        user32.IsWindowVisible.return_value = True
+        user32.IsHungAppWindow.side_effect = lambda hwnd: hwnd == 10
+
+        def enumerate_windows(callback, _):
+            for hwnd in (10, 20):
+                if not callback(hwnd, 0):
+                    break
+
+        user32.EnumWindows.side_effect = enumerate_windows
+        with patch.object(sandbox.ctypes.windll, "user32", user32), \
+                patch.object(sandbox.win_processes, "window_belongs_to",
+                             side_effect=lambda hwnd, path: hwnd == 20 and path == executable):
+            self.assertFalse(sandbox.altium_hung(executable))
+            user32.IsHungAppWindow.side_effect = lambda hwnd: hwnd == 20
+            self.assertTrue(sandbox.altium_hung(executable))
+
     def test_script_error_detection(self):
         err = sandbox.Dialog(1, "#32770", "X2", "Undeclared identifier: X at Line:5, Char:20. Continue execution?")
         self.assertTrue(err.is_script_error)
@@ -805,7 +826,7 @@ class RollbackToolTest(unittest.TestCase):
         with mock.patch.object(type(main.altium_bridge), "_altium_running", staticmethod(lambda: running)), \
                 mock.patch.object(main.altium_bridge, "ensure_paths", ensure_paths), \
                 mock.patch.object(main, "altium_limit_problem", lambda: None), \
-                mock.patch.object(sandbox, "altium_hung", lambda: False), \
+                mock.patch.object(sandbox, "altium_hung", return_value=False), \
                 mock.patch.object(sandbox, "altium_dialogs", lambda executable=None: []), \
                 mock.patch.object(sandbox.Sandbox, "run_quick", run_quick), \
                 mock.patch.object(sandbox.Sandbox, "prune", lambda _self: None):

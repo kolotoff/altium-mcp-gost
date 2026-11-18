@@ -53,6 +53,43 @@ class ShapeTest(unittest.TestCase):
         self.assertTrue(shapes[0].g.get("pad"))
         self.assertEqual([s.kind for s in shapes].count("seg"), len(shapes) - 2)
 
+    def test_via_clearance_includes_rotated_inner_layer_fills(self):
+        inner = "Mid Layer 1"
+        b = board(layers=(TOP, inner, BOT), nets=("A", "B"))
+        layout = {"fills": [{"net": "B", "layer": inner, "corner1": [80, 45],
+                             "corner2": [120, 55], "rotation": 90}]}
+        for shape in router.shapes_from_layout(layout, b.layers):
+            b.add(shape)
+        self.assertTrue(b.free(TOP, *b.cell(100, 85), b.id("A")))
+        self.assertFalse(b.via_free(*b.cell(100, 85), b.id("A")))
+
+    def test_via_clearance_includes_larger_layers_of_a_pad_stack(self):
+        from pcb_layout import parse_layout
+
+        b = board(layers=(TOP, BOT), nets=("A", "B"))
+        layout = parse_layout(
+            "P|J1|1|1000000|500000|Multi Layer|1|200000|200000|0|150000|B\n"
+            "PB|600000|300000|1400000|700000"
+        )
+        self.assertEqual(layout["pads"][0]["size"], [20, 20])
+        for shape in router.shapes_from_layout(layout, b.layers):
+            b.add(shape)
+        self.assertFalse(b.via_free(*b.cell(145, 50), b.id("A")))
+        self.assertTrue(b.via_free(*b.cell(170, 50), b.id("A")))
+
+    def test_via_clearance_includes_both_directions_of_curved_region_edges(self):
+        inner = "Mid Layer 1"
+        arc = {"center": [100, 50], "radius": 30, "start_angle": 270, "end_angle": 90}
+        for y1, y2 in ((20, 80), (80, 20)):
+            with self.subTest(start_y=y1):
+                b = board(layers=(TOP, inner, BOT), nets=("A", "B"))
+                outline = [{"x": 100, "y": y1, "arc": arc}, {"x": 100, "y": y2}]
+                layout = {"regions": [{"net": "B", "layer": inner, "outline": outline}]}
+                for shape in router.shapes_from_layout(layout, b.layers):
+                    b.add(shape)
+                self.assertFalse(b.via_free(*b.cell(125, 50), b.id("A")))
+                self.assertTrue(b.via_free(*b.cell(75, 50), b.id("A")))
+
 
 class RouteTest(unittest.TestCase):
     def test_straight(self):
@@ -144,13 +181,14 @@ class RouteConnectionsToolTest(unittest.IsolatedAsyncioTestCase):
         ]}
         with (patch.object(main, "get_unrouted_connections", new=AsyncMock(return_value=json.dumps(
                   {"success": True, "connections": connections}))),
-              patch.object(main, "get_layout", new=AsyncMock(return_value=json.dumps(layout))),
+              patch.object(main, "get_layout", new=AsyncMock(return_value=json.dumps(layout))) as get_layout,
               patch.object(main, "_net_rules", new=AsyncMock(return_value={}))):
             reply = json.loads(await main.route_connections(
                 None, nets=["SIGNAL"], layers=[TOP], grid_mils=10, dry_run=True,
             ))
         self.assertTrue(reply["success"])
         self.assertEqual((reply["routed"], reply["track_list"], reply["via_list"]), (0, [], []))
+        self.assertTrue(get_layout.await_args.kwargs["include_component_copper"])
 
 
 if __name__ == "__main__":

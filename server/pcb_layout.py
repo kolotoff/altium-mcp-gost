@@ -146,6 +146,8 @@ def parse_layout(text):
             out["pads"].append({"designator": f[1], "pad": f[2], "x": _mil(f[3]), "y": _mil(f[4]), "layer": f[5],
                                 "shape": PAD_SHAPES.get(int(f[6]), f[6]), "size": [_mil(f[7]), _mil(f[8])],
                                 "rotation": _deg(f[9]), "hole": _mil(f[10]), "net": "|".join(f[11:])})
+        elif k == "PB" and out["pads"]:
+            out["pads"][-1]["stack_bounds"] = [_mil(v) for v in f[1:5]]
         elif k == "X":
             out["skipped"] = int(f[1])
         elif k == "B":

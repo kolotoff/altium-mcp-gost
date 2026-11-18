@@ -1,4 +1,14 @@
-// Function to duplicate selected objects of a specific type
+procedure AddLayoutDuplicatorPrimitive(Board: IPCB_Board; Prim: IPCB_Primitive);
+begin
+    PCBServer.SendMessageToRobots(Prim.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+    try
+        Board.AddPCBObject(Prim);
+    finally
+        PCBServer.SendMessageToRobots(Prim.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+    end;
+end;
+
+// Duplicate selected objects of the given types.
 procedure DuplicateSelectedObjects(Board: IPCB_Board; ObjectSet: TSet; DuplicatedObjects: TObjectList);
 var
     Iterator       : IPCB_BoardIterator;
@@ -18,12 +28,7 @@ begin
                 if OrigObj.Selected then
                 begin
                     NewObj := OrigObj.Replicate;
-                    PCBServer.SendMessageToRobots(NewObj.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
-                    try
-                        Board.AddPCBObject(NewObj);
-                    finally
-                        PCBServer.SendMessageToRobots(NewObj.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
-                    end;
+                    AddLayoutDuplicatorPrimitive(Board, NewObj);
                     DuplicatedObjects.Add(NewObj);
                 end;
                 OrigObj := Iterator.NextPCBObject;
@@ -444,6 +449,16 @@ begin
     end;
 end;
 
+procedure SetLayoutDuplicatorPrimitiveNet(Prim: IPCB_Primitive; Net: IPCB_Net);
+begin
+    Prim.BeginModify;
+    try
+        Prim.Net := Net;
+    finally
+        Prim.EndModify;
+    end;
+end;
+
 procedure TranslateLayoutDuplicatorPrimitiveNets(Board: IPCB_Board; GroupObjects: TObjectList; NetNameMap: TStringList);
 var
     i          : Integer;
@@ -469,9 +484,7 @@ begin
                 DestNet := FindLayoutDuplicatorBoardNetByName(Board, DestName);
                 if (DestNet <> nil) then
                 begin
-                    Prim.BeginModify;
-                    Prim.Net := DestNet;
-                    Prim.EndModify;
+                    SetLayoutDuplicatorPrimitiveNet(Prim, DestNet);
 
                     Board.DispatchMessage(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Prim.I_ObjectAddress);
                 end;
@@ -629,12 +642,7 @@ begin
                                 DestNet := FindLayoutDuplicatorBoardNetByName(Board, DestName);
                                 if (DestNet <> nil) then
                                 begin
-                                    Prim.BeginModify;
-                                    try
-                                        Prim.Net := DestNet;
-                                    finally
-                                        Prim.EndModify;
-                                    end;
+                                    SetLayoutDuplicatorPrimitiveNet(Prim, DestNet);
 
                                     Board.DispatchMessage(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Prim.I_ObjectAddress);
                                     RepairedCount := RepairedCount + 1;
@@ -678,6 +686,31 @@ begin
         finally
             NetNameMap.Free;
             ResultProps.Free;
+        end;
+    end;
+end;
+
+function FindLayoutDuplicatorAnchor(Board: IPCB_Board; SourceList, DestList: TStringList;
+    GroupStart, GroupEnd: Integer): Integer;
+var
+    CmpSrc, CmpDst: IPCB_Component;
+    i, PadCount, LargestPadCount: Integer;
+begin
+    Result := -1;
+    LargestPadCount := -1;
+    // Use the most-connected source component as the placement anchor.
+    for i := GroupStart to GroupEnd do
+    begin
+        CmpSrc := Board.GetPcbComponentByRefDes(SourceList[i]);
+        CmpDst := Board.GetPcbComponentByRefDes(DestList[i]);
+        if (CmpSrc <> nil) and (CmpDst <> nil) then
+        begin
+            PadCount := CountComponentPads(CmpSrc);
+            if PadCount > LargestPadCount then
+            begin
+                LargestPadCount := PadCount;
+                Result := i;
+            end;
         end;
     end;
 end;
@@ -726,8 +759,8 @@ var
     NetsToInvalidate: TStringList;
 
     // For source-relative placement around the destination base component
-    SourcePadCount  : Integer;
-    AnchorPadCount  : Integer;
+    Anchors         : TStringList;
+    AnchorPair      : Integer;
     AnchorDstOriginalX : TCoord;
     AnchorDstOriginalY : TCoord;
     AnchorOffsetX   : TCoord;
@@ -746,19 +779,19 @@ begin
         Exit;
     end;
 
-    // Create result properties
+    SourceGroupSize := DetermineLayoutDuplicatorSourceGroupSize(SourceList);
+    Result := '{"success": false, "error": "Source and destination lists must contain one or more complete layout duplicator groups."}';
+    if SourceGroupSize <= 0 then Exit;
+    if ((SourceList.Count mod SourceGroupSize) <> 0) or (DestList.Count < SourceList.Count) then Exit;
+
     ResultProps := TStringList.Create;
     EditStarted := False;
     MovedCount := 0;
     PolygonCount := 0;
-    AnchorSrc := nil;
-    AnchorDst := nil;
-    AnchorPadCount := -1;
     AnchorDstOriginalX := 0;
     AnchorDstOriginalY := 0;
     AnchorOffsetX := 0;
     AnchorOffsetY := 0;
-    SourceGroupSize := DetermineLayoutDuplicatorSourceGroupSize(SourceList);
     SelectedObjects := nil;
     GroupObjects := nil;
 
@@ -780,35 +813,31 @@ begin
     // Create stack for tracking points to process
     TraceStack := TStringList.Create;
 
-    if (SourceGroupSize <= 0) or ((SourceList.Count mod SourceGroupSize) <> 0) or (DestList.Count < SourceList.Count) then
-    begin
-        AddJSONBoolean(ResultProps, 'success', False);
-        AddJSONProperty(ResultProps, 'error', 'Source and destination lists must contain one or more complete layout duplicator groups.');
-
-        OutputLines := TStringList.Create;
-        try
-            OutputLines.Text := BuildJSONObject(ResultProps);
-            Result := OutputLines.Text;
-        finally
-            OutputLines.Free;
-        end;
-
-        NetsToInvalidate.Free;
-        ProcessedObjects.Free;
-        ProcessedPoints.Free;
-        TraceStack.Free;
-        ResultProps.Free;
-        Exit;
-    end;
-
     // Set a small tolerance for connection checking (1 mil)
     Tolerance := MilsToCoord(1);
 
     // Create collection for all selected template objects
     TemplateObjects := TObjectList.Create; // Don't own objects
     TemplateObjects.OwnsObjects := False; // Don't destroy objects when list is freed
+    Anchors := TStringList.Create;
 
     try
+        // Check every group before moving any components or copying copper.
+        GroupStart := 0;
+        while GroupStart < SourceList.Count do
+        begin
+            AnchorPair := FindLayoutDuplicatorAnchor(Board, SourceList, DestList, GroupStart,
+                GroupStart + SourceGroupSize - 1);
+            if AnchorPair < 0 then
+            begin
+                Result := '{"success": false, "error": "No valid source/destination component pair in group ' +
+                    IntToStr(GroupStart div SourceGroupSize + 1) + '."}';
+                Exit;
+            end;
+            Anchors.Add(IntToStr(AnchorPair));
+            GroupStart := GroupStart + SourceGroupSize;
+        end;
+
         // Begin board modification
         PCBServer.PreProcess;
         EditStarted := True;
@@ -836,48 +865,9 @@ begin
         begin
             GroupEnd := GroupStart + SourceGroupSize - 1;
 
-            AnchorSrc := nil;
-            AnchorDst := nil;
-            AnchorPadCount := -1;
-
-            // Choose the base component from the source component with the most pads.
-            // This keeps the IC location stable even when source list order is arbitrary.
-            for i := GroupStart to GroupEnd do
-            begin
-                NameSrc := SourceList.Get(i);
-                CmpSrc := Board.GetPcbComponentByRefDes(NameSrc);
-
-                NameDst := DestList.Get(i);
-                CmpDst := Board.GetPcbComponentByRefDes(NameDst);
-
-                if ((CmpSrc <> nil) and (CmpDst <> nil)) then
-                begin
-                    SourcePadCount := CountComponentPads(CmpSrc);
-                    if (SourcePadCount > AnchorPadCount) then
-                    begin
-                        AnchorPadCount := SourcePadCount;
-                        AnchorSrc := CmpSrc;
-                        AnchorDst := CmpDst;
-                    end;
-                end;
-            end;
-
-            if ((AnchorSrc = nil) or (AnchorDst = nil)) then
-            begin
-                AddJSONBoolean(ResultProps, 'success', False);
-                AddJSONProperty(ResultProps, 'error', 'No valid source/destination component pair found for layout duplication.');
-
-                OutputLines := TStringList.Create;
-                try
-                    OutputLines.Text := BuildJSONObject(ResultProps);
-                    Result := OutputLines.Text;
-                finally
-                    OutputLines.Free;
-                end;
-
-                Exit;
-            end;
-
+            AnchorPair := StrToInt(Anchors[GroupStart div SourceGroupSize]);
+            AnchorSrc := Board.GetPcbComponentByRefDes(SourceList[AnchorPair]);
+            AnchorDst := Board.GetPcbComponentByRefDes(DestList[AnchorPair]);
             AnchorDstOriginalX := AnchorDst.x;
             AnchorDstOriginalY := AnchorDst.y;
             AnchorOffsetX := AnchorDstOriginalX - AnchorSrc.x;
@@ -898,15 +888,16 @@ begin
                     else
                     begin
                         NewPrim := TemplatePrim.Replicate;
-                        PCBServer.SendMessageToRobots(NewPrim.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
-                        Board.AddPCBObject(NewPrim);
-                        PCBServer.SendMessageToRobots(NewPrim.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
+                        AddLayoutDuplicatorPrimitive(Board, NewPrim);
                     end;
 
                     ConnectedPrim := NewPrim;
                     ConnectedPrim.BeginModify;
-                    ConnectedPrim.MoveByXY(AnchorOffsetX, AnchorOffsetY);
-                    ConnectedPrim.EndModify;
+                    try
+                        ConnectedPrim.MoveByXY(AnchorOffsetX, AnchorOffsetY);
+                    finally
+                        ConnectedPrim.EndModify;
+                    end;
 
                     Board.DispatchMessage(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, ConnectedPrim.I_ObjectAddress);
                     GroupObjects.Add(NewPrim);
@@ -925,18 +916,16 @@ begin
 
                     if ((CmpSrc <> nil) and (CmpDst <> nil)) then
                     begin
-                        // Begin modify component
                         CmpDst.BeginModify;
-
-                        // Move Destination Components to Match Source Components
-                        CmpDst.Rotation := CmpSrc.Rotation;
-                        CmpDst.Layer_V6 := CmpSrc.Layer_V6;
-                        CmpDst.x := CmpSrc.x + AnchorOffsetX;
-                        CmpDst.y := CmpSrc.y + AnchorOffsetY;
-                        CmpDst.Selected := True;
-
-                        // End modify component
-                        CmpDst.EndModify;
+                        try
+                            CmpDst.Rotation := CmpSrc.Rotation;
+                            CmpDst.Layer_V6 := CmpSrc.Layer_V6;
+                            CmpDst.x := CmpSrc.x + AnchorOffsetX;
+                            CmpDst.y := CmpSrc.y + AnchorOffsetY;
+                            CmpDst.Selected := True;
+                        finally
+                            CmpDst.EndModify;
+                        end;
 
                         // Register component with the board
                         Board.DispatchMessage(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, CmpDst.I_ObjectAddress);
@@ -1014,9 +1003,7 @@ begin
                                                CheckWithTolerance(ConnectedPrim.x2, ConnectedPrim.y2, X, Y) then
                                             begin
                                                 // Apply the net
-                                                ConnectedPrim.BeginModify;
-                                                ConnectedPrim.Net := Net;
-                                                ConnectedPrim.EndModify;
+                                                SetLayoutDuplicatorPrimitiveNet(ConnectedPrim, Net);
 
                                                 // Register primitive with the board
                                                 Board.DispatchMessage(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, ConnectedPrim.I_ObjectAddress);
@@ -1041,9 +1028,7 @@ begin
                                                CheckWithTolerance(ConnectedPrim.EndX, ConnectedPrim.EndY, X, Y) then
                                             begin
                                                 // Apply the net
-                                                ConnectedPrim.BeginModify;
-                                                ConnectedPrim.Net := Net;
-                                                ConnectedPrim.EndModify;
+                                                SetLayoutDuplicatorPrimitiveNet(ConnectedPrim, Net);
 
                                                 // Register primitive with the board
                                                 Board.DispatchMessage(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, ConnectedPrim.I_ObjectAddress);
@@ -1066,9 +1051,7 @@ begin
                                             // Check single point
                                             if CheckWithTolerance(ConnectedPrim.x, ConnectedPrim.y, X, Y) then
                                             begin
-                                                ConnectedPrim.BeginModify;
-                                                ConnectedPrim.Net := Net;
-                                                ConnectedPrim.EndModify;
+                                                SetLayoutDuplicatorPrimitiveNet(ConnectedPrim, Net);
 
                                                 // Register primitive with the board
                                                 Board.DispatchMessage(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, ConnectedPrim.I_ObjectAddress);
@@ -1141,9 +1124,7 @@ begin
                                             if Overlapping then
                                             begin
                                                 // Assign pad's net to the polygon
-                                                Polygon.BeginModify;
-                                                Polygon.Net := Net;
-                                                Polygon.EndModify;
+                                                SetLayoutDuplicatorPrimitiveNet(Polygon, Net);
 
                                                 // Register with board
                                                 Board.DispatchMessage(Board.I_ObjectAddress, c_Broadcast, PCBM_BoardRegisteration, Polygon.I_ObjectAddress);
@@ -1217,6 +1198,7 @@ begin
         try
             if EditStarted then PCBServer.PostProcess;
         finally
+            Anchors.Free;
             NetNameMap.Free;
             TemplateObjects.Free;
             NetsToInvalidate.Free;

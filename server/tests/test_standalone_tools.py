@@ -110,6 +110,19 @@ class BoardDescriptionGeneratorTest(unittest.TestCase):
 
 
 class StepBodyModelTest(unittest.TestCase):
+    def test_footprint_filename_matches_unscoped_legacy_placement(self):
+        file = Path("QFN48.step")
+        state = {"identifier": "", "model_name": file.name,
+                 "model_name_key": file.name.upper(), "rotz": 90.0}
+        body = {"footprint": "QFN48"}
+        model, placement, error = model_for_body(body, [state], [file], single_body=True)
+        self.assertEqual((model, placement, error), (file, state, None))
+
+        model, placement, error = model_for_body(body, [state, dict(state, rotz=45)], [file], single_body=True)
+        self.assertIsNone(model)
+        self.assertIsNone(placement)
+        self.assertIn("multiple saved 3D body placements", error)
+
     def test_each_body_uses_its_own_model_and_rotation(self):
         files = [Path("Receiver-v1.step"), Path("Shield-v1.step")]
         states = [

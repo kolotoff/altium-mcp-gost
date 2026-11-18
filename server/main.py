@@ -220,11 +220,11 @@ ALTIUM_HUNG_ERROR = (
     "stays frozen, only ending X2.EXE frees it, and unsaved work is then lost.")
 
 
-async def _altium_remains_hung():
+async def _altium_remains_hung(executable: str) -> bool:
     # The bridge writes its response before Altium finishes leaving the
     # script. Give the next serialized command a chance to see the idle UI.
     deadline = time.monotonic() + 3.0
-    while await asyncio.to_thread(sandbox.altium_hung):
+    while await asyncio.to_thread(sandbox.altium_hung, executable):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return True
@@ -688,7 +688,8 @@ class AltiumBridge:
                 return
             try:
                 problem = self._reconcile_pending_command()
-                if problem is None and bridge_script and await _altium_remains_hung():
+                if (problem is None and bridge_script and
+                        await _altium_remains_hung(self.config.altium_exe_path)):
                     problem = {"success": False, "error": ALTIUM_HUNG_ERROR}
                 yield problem
             finally:
@@ -2058,7 +2059,7 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
     if problem:
         return json.dumps({"success": False, "error": problem, "executor_wedged": False}, indent=2)
 
-    if await _altium_remains_hung():
+    if await _altium_remains_hung(altium_bridge.config.altium_exe_path):
         return json.dumps({"success": False, "error": ALTIUM_HUNG_ERROR, "executor_wedged": False}, indent=2)
 
     sb = _sandbox()
@@ -2242,7 +2243,7 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
 
     # Still running: Stop and the recovery probe are window messages Altium
     # is not reading, and each probe launch would only queue up behind it
-    if steps and await asyncio.to_thread(sandbox.altium_hung):
+    if steps and await asyncio.to_thread(sandbox.altium_hung, sb.altium_exe):
         _mark_script_stuck("run_altium_script")
         return json.dumps({
             "success": False,
@@ -2383,7 +2384,7 @@ async def rollback_altium_script(ctx: Context, run_id: str, discard_unsaved: boo
     problem = altium_limit_problem() or await altium_bridge.ensure_paths(need_script=False)
     if problem:
         return json.dumps({"success": False, "error": problem})
-    if await _altium_remains_hung():
+    if await _altium_remains_hung(sb.altium_exe):
         return json.dumps({"success": False, "error": ALTIUM_HUNG_ERROR})
     if any(d.is_script_error for d in sandbox.altium_dialogs(sb.altium_exe)):
         return json.dumps({"success": False, "error": "not run: Altium is showing a script error "
@@ -5478,7 +5479,7 @@ def _names(values, what):
 @_tool(read_only=True)
 async def get_layout(ctx: Context, designators: list = None, area: list = None, margin_mils: float = 40,
                      include_touching: bool = False, include_local_nets: bool = True, include_pads: bool = False,
-                     board_path: str = "", out_file: str = "") -> str:
+                     board_path: str = "", out_file: str = "", include_component_copper: bool = False) -> str:
     """
     Read the layout of a group of components or of an area: the components'
     placement and the copper around them (tracks, arcs, vias, fills, copper
@@ -5507,14 +5508,17 @@ async def get_layout(ctx: Context, designators: list = None, area: list = None, 
             (default true).
         include_pads (bool): Also list every pad reaching into the area
             (designator, pad, x, y, layer, shape, size [x, y], rotation,
-            hole, net), e.g. to see what new copper must keep clear of.
+            hole, net). Non-simple multilayer pads also have stack_bounds
+            [x1, y1, x2, y2] for the whole stack.
         board_path (str): Full path of the .PcbDoc; empty for the focused
             board, or the one the PCB tools last used.
         out_file (str): Write the layout to this JSON file and return only a
             summary; for large areas.
+        include_component_copper (bool): Include footprint-owned copper for
+            clearance and routing checks. Defaults to false for layout copying.
 
-    Never listed: copper that belongs to a component or that a pour poured
-    (the pour itself is), keepouts, and objects on non-copper layers
+    Never listed: copper that a pour poured (the pour itself is), keepouts,
+    and objects on non-copper layers
     (counted in skipped).
 
     To see everything in a box, on any layer and with refs that clearance
@@ -5555,6 +5559,7 @@ async def get_layout(ctx: Context, designators: list = None, area: list = None, 
     params = {"layout_designators": ";".join(names), "layout_margin": int(round(margin * pcb_layout.COORD_PER_MIL)),
               "layout_touching": bool(include_touching), "layout_local_nets": bool(include_local_nets),
               "layout_pads": bool(include_pads),
+              "layout_component_copper": bool(include_component_copper),
               "layout_area": "" if box is None else "|".join(str(int(round(v * pcb_layout.COORD_PER_MIL))) for v in box)}
     if board_path:
         params["board_path"] = long_path(board_path)
@@ -5892,13 +5897,10 @@ async def route_connections(ctx: Context, designators: list = None, nets: list =
     margin = 150.0
     box = [min(xs) - margin, min(ys) - margin, max(xs) + margin, max(ys) + margin]
     lay = json.loads(await get_layout(ctx, area=box, include_touching=True, include_local_nets=False,
-                                      include_pads=True, board_path=board_path))
+                                      include_pads=True, board_path=board_path, include_component_copper=True))
     if not lay.get("success"):
         return json.dumps(lay)
-    signal = sorted(set(layers) | {
-        obj["layer"] for kind in ("pads", "tracks", "arcs", "fills", "regions")
-        for obj in lay.get(kind, []) if obj["layer"] != "Multi Layer"
-    })
+    signal = router.layout_signal_layers(lay, layers)
     base_shapes = router.shapes_from_layout(lay, signal)
 
     def end_layers(layer):
@@ -6048,8 +6050,7 @@ async def fanout_pads(ctx: Context, designators: list, nets: list = None, pads: 
            and (not want_nets or p["net"].upper() in want_nets)
            and (not want_pads or p["pad"].upper() in want_pads
                 or f"{p['designator']}-{p['pad']}".upper() in want_pads)]
-    signal = sorted({p["layer"] for p in lay["pads"] if p["layer"] != "Multi Layer"} |
-                    {t["layer"] for t in lay["tracks"]} | {"Top Layer", "Bottom Layer"})
+    signal = router.layout_signal_layers(lay, ("Top Layer", "Bottom Layer"))
     rules = await _net_rules({p["net"] for p in sel}, "Top Layer", board_path)
     clearance = clearance_mils or max([r["clearance"] for r in rules.values() if r.get("clearance")] or [6.0])
 

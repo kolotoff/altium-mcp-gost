@@ -126,6 +126,7 @@ def main() -> int:
                     "pcb_net": pcb_net,
                     "source_net": resolved_net,
                     "hole_mm": round(hole_mm, 3),
+                    "qualifies_for_drill_callout": qualifies,
                 }
             )
 

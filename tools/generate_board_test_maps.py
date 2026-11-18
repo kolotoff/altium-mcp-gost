@@ -63,9 +63,15 @@ def qualifying_pins(item: dict, minimum_hole_mm: float) -> list[dict]:
     pins = item.get("pins", [])
     if "qualifying_pad_ids" in item:
         ids = set(item["qualifying_pad_ids"])
-        if not ids.issubset(str(pin.get("pad", "")) for pin in pins):
+        # Physical pad rows can share a pad number. Older inventories
+        # tracked qualification only by number.
+        qualified = [
+            pin for pin in pins
+            if str(pin.get("pad", "")) in ids and pin.get("qualifies_for_drill_callout", True)
+        ]
+        if not ids.issubset(str(pin.get("pad", "")) for pin in qualified):
             raise ValueError(f"{item['designator']} inventory is missing a qualifying pad")
-        return [pin for pin in pins if str(pin.get("pad", "")) in ids]
+        return qualified
     # Legacy inventories only retained rounded diameters and represented
     # unassigned copper with the NC placeholder.
     return [

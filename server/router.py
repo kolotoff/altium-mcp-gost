@@ -42,11 +42,15 @@ def _point_in_poly(x, y, pts):
     return inside
 
 
-def _arc_points(cx, cy, r, a1, a2, step=10.0):
-    sweep = (a2 - a1) % 360 or 360
-    n = max(2, int(sweep / step) + 1)
-    return [(cx + r * math.cos(math.radians(a1 + sweep * k / (n - 1))),
-             cy + r * math.sin(math.radians(a1 + sweep * k / (n - 1)))) for k in range(n)]
+def _arc_polyline(cx, cy, radius, start, end):
+    """Sample the arc and bound the error between a chord and the curve."""
+    sweep = (end - start) % 360 or 360
+    steps = max(2, math.ceil(sweep / 5))
+    step = math.radians(sweep / steps)
+    start = math.radians(start)
+    points = [(cx + radius * math.cos(start + step * k),
+               cy + radius * math.sin(start + step * k)) for k in range(steps + 1)]
+    return points, radius * (1 - math.cos(step / 2))
 
 
 class Shape:
@@ -67,7 +71,8 @@ class Shape:
             e = math.hypot(g["hx"], g["hy"])
             return g["cx"] - e, g["cy"] - e, g["cx"] + e, g["cy"] + e
         xs, ys = [p[0] for p in g["pts"]], [p[1] for p in g["pts"]]
-        return min(xs), min(ys), max(xs), max(ys)
+        margin = g.get("margin", 0)
+        return min(xs) - margin, min(ys) - margin, max(xs) + margin, max(ys) + margin
 
     def dist(self, x, y):
         """Distance from (x, y) to the copper (0 inside)."""
@@ -84,7 +89,30 @@ class Shape:
         if _point_in_poly(x, y, g["pts"]):
             return 0.0
         pts = g["pts"]
-        return min(_seg_dist(x, y, *pts[i], *pts[(i + 1) % len(pts)]) for i in range(len(pts)))
+        distance = min(_seg_dist(x, y, *pts[i], *pts[(i + 1) % len(pts)]) for i in range(len(pts)))
+        return max(0.0, distance - g.get("margin", 0))
+
+
+def _region_outline(vertices):
+    points, margin = [], 0.0
+    for vertex in vertices:
+        point = (vertex["x"], vertex["y"])
+        points.append(point)
+        arc = vertex.get("arc")
+        if arc and arc["radius"] > 0:
+            edge, error = _arc_polyline(*arc["center"], arc["radius"], arc["start_angle"], arc["end_angle"])
+            if math.dist(point, edge[-1]) < math.dist(point, edge[0]):
+                edge.reverse()
+            points.extend(edge[1:-1])
+            margin = max(margin, error)
+    return points, margin
+
+
+def layout_signal_layers(layout, required):
+    return sorted(set(required) | {
+        obj["layer"] for kind in ("pads", "tracks", "arcs", "fills", "regions")
+        for obj in layout.get(kind, []) if obj["layer"] != "Multi Layer"
+    })
 
 
 def shapes_from_layout(lay, signal_layers):
@@ -93,7 +121,11 @@ def shapes_from_layout(lay, signal_layers):
     for p in lay.get("pads", []):
         layers = list(signal_layers) if p["layer"] == "Multi Layer" else [p["layer"]]
         sx, sy = p["size"]
-        if p["shape"] == "round" and abs(sx - sy) < 1e-6:
+        if "stack_bounds" in p:
+            x1, y1, x2, y2 = p["stack_bounds"]
+            out.append(Shape("rect", p["net"], layers, cx=(x1 + x2) / 2, cy=(y1 + y2) / 2,
+                             hx=(x2 - x1) / 2, hy=(y2 - y1) / 2, cos=1, sin=0, pad=True))
+        elif p["shape"] == "round" and abs(sx - sy) < 1e-6:
             out.append(Shape("circle", p["net"], layers, cx=p["x"], cy=p["y"], r=sx / 2, pad=True))
         else:
             a = math.radians(p["rotation"])
@@ -103,16 +135,20 @@ def shapes_from_layout(lay, signal_layers):
         out.append(Shape("seg", t["net"], [t["layer"]], ax=t["start"][0], ay=t["start"][1], bx=t["end"][0],
                          by=t["end"][1], hw=t["width"] / 2))
     for a in lay.get("arcs", []):
-        pts = _arc_points(a["center"][0], a["center"][1], a["radius"], a["start_angle"], a["end_angle"])
+        pts, error = _arc_polyline(*a["center"], a["radius"], a["start_angle"], a["end_angle"])
         for (ax, ay), (bx, by) in zip(pts, pts[1:]):
-            out.append(Shape("seg", a["net"], [a["layer"]], ax=ax, ay=ay, bx=bx, by=by, hw=a["width"] / 2))
+            out.append(Shape("seg", a["net"], [a["layer"]], ax=ax, ay=ay, bx=bx, by=by, hw=a["width"] / 2 + error))
     for v in lay.get("vias", []):
         out.append(Shape("circle", v["net"], list(signal_layers), cx=v["x"], cy=v["y"], r=v["diameter"] / 2))
     for f in lay.get("fills", []):
         (x1, y1), (x2, y2) = f["corner1"], f["corner2"]
-        out.append(Shape("poly", f["net"], [f["layer"]], pts=[(x1, y1), (x2, y1), (x2, y2), (x1, y2)]))
+        angle = math.radians(f.get("rotation", 0))
+        out.append(Shape("rect", f["net"], [f["layer"]], cx=(x1 + x2) / 2, cy=(y1 + y2) / 2,
+                         hx=abs(x2 - x1) / 2, hy=abs(y2 - y1) / 2, cos=math.cos(angle), sin=math.sin(angle)))
     for r in lay.get("regions", []):
-        out.append(Shape("poly", r["net"], [r["layer"]], pts=[(v["x"], v["y"]) for v in r["outline"]]))
+        points, margin = _region_outline(r["outline"])
+        if len(points) >= 3:
+            out.append(Shape("poly", r["net"], [r["layer"]], pts=points, margin=margin))
     return out
 
 

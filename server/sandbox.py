@@ -982,8 +982,8 @@ def altium_dialogs(executable: Optional[str] = None) -> List[Dialog]:
     return found
 
 
-def altium_hung() -> bool:
-    """True while Altium's UI thread is not answering window messages.
+def altium_hung(executable: Optional[str] = None) -> bool:
+    """True while the selected Altium's UI thread is not answering messages.
 
     That is the case while a script (or a long command) is still running, and
     for good when a script loops forever. Nothing sent to Altium then has any
@@ -991,18 +991,21 @@ def altium_hung() -> bool:
     """
     from ctypes import wintypes
     user32 = ctypes.windll.user32
-    hung = []
+    hung = False
     proto = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
     def top(hwnd, _):
-        if user32.IsWindowVisible(hwnd) and _process_name(hwnd).lower() == "x2.exe":
-            if user32.IsHungAppWindow(hwnd):
-                hung.append(hwnd)
-                return False
-        return True
+        nonlocal hung
+        if not user32.IsWindowVisible(hwnd) or not user32.IsHungAppWindow(hwnd):
+            return True
+        if executable is not None:
+            hung = win_processes.window_belongs_to(hwnd, executable)
+        else:
+            hung = _process_name(hwnd).lower() == "x2.exe"
+        return not hung
 
     user32.EnumWindows(proto(top), 0)
-    return bool(hung)
+    return hung
 
 
 def snapshot_dialog(d: Dialog, directory: Path, keep: int = 50) -> Optional[str]:

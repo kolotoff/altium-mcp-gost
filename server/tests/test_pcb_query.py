@@ -199,7 +199,7 @@ class WatchedCommandTest(unittest.TestCase):
         bridge._execute_command_locked = lambda command, params, timeout, picked_up=None: script(picked_up)
         bridge.stop_script_debugger = stop
         bridge.STOP_SETTLE = 0
-        with mock.patch.object(main.sandbox, "altium_hung", lambda: False):
+        with mock.patch.object(main.sandbox, "altium_hung", return_value=False):
             response = asyncio.run(bridge.execute_command("query_objects", {}, watcher=watcher))
         return response, stops, bridge
 

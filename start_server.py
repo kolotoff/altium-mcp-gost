@@ -353,7 +353,10 @@ def _spawn_builder():
     kwargs = dict(stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                   close_fds=True)
     if os.name == "nt":
-        flags = (subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        # Give the builder and its children a windowless console of their own.
+        # With DETACHED_PROCESS, venv or pip launchers can open a new console
+        # when they start the actual interpreter.
+        flags = (subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
                  | subprocess.CREATE_BREAKAWAY_FROM_JOB)
         try:
             subprocess.Popen(cmd, creationflags=flags, **kwargs)
@@ -424,4 +427,7 @@ if __name__ == "__main__":
     # main.py keeps config.json in the same per-user folder; hand it the
     # resolved location so the two can never disagree.
     env = dict(os.environ, ALTIUM_MCP_HOME=str(DATA_DIR))
-    sys.exit(subprocess.call([venv_python, server_path], env=env))
+    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    # Pass the MCP client's pipes explicitly because the child has its own console.
+    sys.exit(subprocess.call([venv_python, server_path], env=env, creationflags=flags,
+                             stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr))

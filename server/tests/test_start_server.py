@@ -10,6 +10,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -136,6 +137,25 @@ class InUseTest(unittest.TestCase):
                 proc.wait()
                 for name, value in saved.items():
                     setattr(start_server, name, value)
+
+
+@unittest.skipUnless(os.name == "nt", "Windows process creation flags")
+class BuilderLaunchTest(unittest.TestCase):
+    def test_builder_keeps_its_console_windowless_even_if_breakaway_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            with (
+                patch.object(start_server, "DATA_DIR", data_dir),
+                patch.object(start_server, "BUILD_LOG", data_dir / "build.log"),
+                patch.object(subprocess, "Popen", side_effect=[OSError("breakaway refused"), None]) as spawn,
+            ):
+                start_server._spawn_builder()
+
+        windowless = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+        self.assertEqual(
+            [call.kwargs["creationflags"] for call in spawn.call_args_list],
+            [windowless | subprocess.CREATE_BREAKAWAY_FROM_JOB, windowless],
+        )
 
 
 if __name__ == "__main__":

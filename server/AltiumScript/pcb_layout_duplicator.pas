@@ -1,53 +1,40 @@
 // Function to duplicate selected objects of a specific type
-function DuplicateSelectedObjects(Board: IPCB_Board; ObjectSet: TSet): TObjectList;
+procedure DuplicateSelectedObjects(Board: IPCB_Board; ObjectSet: TSet; DuplicatedObjects: TObjectList);
 var
     Iterator       : IPCB_BoardIterator;
     OrigObj, NewObj : IPCB_Primitive;
-    DuplicatedObjects : TObjectList;
-    Complete       : Boolean;
 begin
-    // Create object list to store duplicated objects
-    DuplicatedObjects := CreateObject(TObjectList);
-    DuplicatedObjects.OwnsObjects := False; // Don't destroy objects when list is freed
-    Complete := False;
-    
+    Iterator := Board.BoardIterator_Create;
     try
-        Iterator := Board.BoardIterator_Create;
-        try
-            Iterator.AddFilter_ObjectSet(ObjectSet);
-            Iterator.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
-            Iterator.AddFilter_Method(eProcessAll);
+        Iterator.AddFilter_ObjectSet(ObjectSet);
+        Iterator.AddFilter_IPCB_LayerSet(LayerSet.AllLayers);
+        Iterator.AddFilter_Method(eProcessAll);
 
-            PCBServer.PreProcess;
-            try
-                OrigObj := Iterator.FirstPCBObject;
-                while OrigObj <> Nil do
+        PCBServer.PreProcess;
+        try
+            OrigObj := Iterator.FirstPCBObject;
+            while OrigObj <> Nil do
+            begin
+                if OrigObj.Selected then
                 begin
-                    if OrigObj.Selected then
-                    begin
-                        NewObj := OrigObj.Replicate;
-                        PCBServer.SendMessageToRobots(NewObj.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
-                        try
-                            Board.AddPCBObject(NewObj);
-                        finally
-                            PCBServer.SendMessageToRobots(NewObj.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
-                        end;
-                        DuplicatedObjects.Add(NewObj);
+                    NewObj := OrigObj.Replicate;
+                    PCBServer.SendMessageToRobots(NewObj.I_ObjectAddress, c_Broadcast, PCBM_BeginModify, c_NoEventData);
+                    try
+                        Board.AddPCBObject(NewObj);
+                    finally
+                        PCBServer.SendMessageToRobots(NewObj.I_ObjectAddress, c_Broadcast, PCBM_EndModify, c_NoEventData);
                     end;
-                    OrigObj := Iterator.NextPCBObject;
+                    DuplicatedObjects.Add(NewObj);
                 end;
-            finally
-                PCBServer.PostProcess;
+                OrigObj := Iterator.NextPCBObject;
             end;
         finally
-            Board.BoardIterator_Destroy(Iterator);
+            PCBServer.PostProcess;
         end;
-        Board.ViewManager_FullUpdate();
-        Result := DuplicatedObjects;
-        Complete := True;
     finally
-        if not Complete then DuplicatedObjects.Free;
+        Board.BoardIterator_Destroy(Iterator);
     end;
+    Board.ViewManager_FullUpdate();
 end;
 
 // Function to get source and destination component lists with pin data
@@ -91,7 +78,8 @@ begin
     ResultProps := TStringList.Create;
     SourceCmps := TStringList.Create;
     SourceArray := TStringList.Create;
-    DuplicatedObjects := nil;
+    DuplicatedObjects := TObjectList.Create;
+    DuplicatedObjects.OwnsObjects := False;
     
     try
         // Get selected components as source
@@ -128,7 +116,7 @@ begin
         end;
         
         // Duplicate all object types in one call
-        DuplicatedObjects := DuplicateSelectedObjects(Board, MkSet(eTrackObject, eArcObject, eViaObject, ePolyObject, eRegionObject, eFillObject));
+        DuplicateSelectedObjects(Board, MkSet(eTrackObject, eArcObject, eViaObject, ePolyObject, eRegionObject, eFillObject), DuplicatedObjects);
         
         // Deselect all original objects to avoid duplicating them again
         Iterator := Board.BoardIterator_Create;
@@ -267,7 +255,7 @@ begin
             DestArray.Free;
         end;
     finally
-        if DuplicatedObjects <> nil then DuplicatedObjects.Free;
+        DuplicatedObjects.Free;
         ResultProps.Free;
         SourceCmps.Free;
         SourceArray.Free;

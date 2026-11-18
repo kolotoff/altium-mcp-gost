@@ -1,0 +1,30 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit-tests:
+    # The server only runs on Windows (pywin32, Altium), and one test reads
+    # the ANSI code page
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+
+      # The same hash-locked set start_server.py installs into its venv, so a
+      # lock that no longer installs fails here instead of on a user's machine
+      - name: Install requirements
+        run: python -m pip install -r requirements.txt
+
+      # The Altium script integration test requires a running Altium Designer.
+      - name: Run unit tests
+        run: |
+          $testFiles = Get-ChildItem -Path server/tests -Filter 'test_*.py' -Name |
+            Where-Object { $_ -ne 'test_altium_script.py' }
+          $testModules = $testFiles | ForEach-Object { "server.tests.$([IO.Path]::GetFileNameWithoutExtension($_))" }
+          python -B -m unittest -v $testModules

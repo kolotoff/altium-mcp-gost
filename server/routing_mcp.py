@@ -15,21 +15,23 @@ from .pcb_routing import (
 )
 
 
-def register_routing_tools(mcp, bridge):
+def register_routing_tools(register_tool, bridge):
     service = RoutingService(
         lambda command, params: bridge.execute_command(command, params),
         lambda directory: continue_polygon_warning(directory, bridge.config.altium_exe_path),
     )
     exported = {}
 
-    def tool(function):
-        exported[function.__name__] = function
-        return mcp.tool()(function)
+    def tool(read_only=False):
+        def register(function):
+            exported[function.__name__] = function
+            return register_tool(read_only=read_only)(function)
+        return register
 
     def encode(value):
         return json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False)
 
-    @tool
+    @tool(read_only=True)
     async def export_pcb_routing_snapshot(
         ctx: Context, expected_board: str, output_directory: str = ""
     ) -> str:
@@ -41,7 +43,7 @@ def register_routing_tools(mcp, bridge):
         """
         return encode(await service.snapshot(expected_board, output_directory))
 
-    @tool
+    @tool(read_only=True)
     async def compare_pcb_snapshots(
         ctx: Context,
         baseline_directory: str,
@@ -72,7 +74,7 @@ def register_routing_tools(mcp, bridge):
             )
         )
 
-    @tool
+    @tool(read_only=True)
     async def export_pcb_drc_report(
         ctx: Context, expected_board: str, output_directory: str = ""
     ) -> str:
@@ -85,7 +87,7 @@ def register_routing_tools(mcp, bridge):
         """
         return encode(await service.export_drc(expected_board, output_directory))
 
-    @tool
+    @tool(read_only=True)
     async def summarize_pcb_drc(
         ctx: Context,
         report_path: str,
@@ -109,7 +111,7 @@ def register_routing_tools(mcp, bridge):
             )
         )
 
-    @tool
+    @tool(read_only=True)
     async def get_effective_routing_rules(
         ctx: Context, snapshot_directory: str, objects: list, output_directory: str = ""
     ) -> str:
@@ -125,7 +127,7 @@ def register_routing_tools(mcp, bridge):
             )
         )
 
-    @tool
+    @tool()
     async def select_pcb_routing(
         ctx: Context,
         snapshot_directory: str,
@@ -145,7 +147,7 @@ def register_routing_tools(mcp, bridge):
             )
         )
 
-    @tool
+    @tool()
     async def apply_pcb_routing_batch(
         ctx: Context,
         snapshot_directory: str,
@@ -175,7 +177,7 @@ def register_routing_tools(mcp, bridge):
             )
         )
 
-    @tool
+    @tool()
     async def set_pcb_polygon_outline(
         ctx: Context,
         snapshot_directory: str,
@@ -205,7 +207,7 @@ def register_routing_tools(mcp, bridge):
             )
         )
 
-    @tool
+    @tool(read_only=True)
     async def audit_pcb_layer_usage(
         ctx: Context,
         snapshot_directory: str,
@@ -230,7 +232,7 @@ def register_routing_tools(mcp, bridge):
             )
         )
 
-    @tool
+    @tool(read_only=True)
     async def compare_pcb_drc(
         ctx: Context,
         baseline_report_path: str,
@@ -256,7 +258,7 @@ def register_routing_tools(mcp, bridge):
             )
         )
 
-    @tool
+    @tool()
     async def repour_pcb_polygons(
         ctx: Context,
         snapshot_directory: str,
@@ -271,7 +273,7 @@ def register_routing_tools(mcp, bridge):
         """
         return encode(await service.repour(snapshot_directory, apply, output_directory))
 
-    @tool
+    @tool()
     async def undo_pcb_routing(
         ctx: Context,
         snapshot_directory: str,
@@ -289,7 +291,7 @@ def register_routing_tools(mcp, bridge):
             await service.undo(snapshot_directory, steps, apply, output_directory)
         )
 
-    @tool
+    @tool(read_only=True)
     async def preview_pcb_route_clearance(
         ctx: Context,
         snapshot_directory: str,
@@ -315,14 +317,14 @@ def register_routing_tools(mcp, bridge):
             )
         )
 
-    @tool
+    @tool(read_only=True)
     async def get_pcb_routing_operation(ctx: Context, operation_directory: str) -> str:
         """Inspect saved progress/reconciliation after interruption; never replays edits."""
         return encode(await asyncio.to_thread(operation_status, operation_directory))
 
-    @tool
+    @tool(read_only=True)
     async def get_altium_command_status(ctx: Context) -> str:
         """Inspect the correlated transport's pending command without sending a script."""
-        return encode(bridge._transport.status())
+        return encode(bridge.command_status())
 
     return exported

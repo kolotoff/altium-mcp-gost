@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 
 from server.pcb_routing import GENERATED
 from server.project_validation import validate_project
-from server.tests.test_routing import write_snapshot
+from server.tests.test_routing_workflow import write_snapshot
 
 
 BOARD = r"D:\Boards, shared\测试\Example.PcbDoc"

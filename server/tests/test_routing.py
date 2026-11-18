@@ -1,732 +1,252 @@
-"""Offline integration checks; no test invokes or modifies Altium."""
+"""Unit tests for routing (pure Python, no Altium needed).
 
-import asyncio
-import json
-import tempfile
+Run from server/:  python -m unittest tests.test_routing -v
+"""
+import os
+import random
+import sys
 import unittest
-import uuid
-from copy import deepcopy
-from pathlib import Path
-from unittest.mock import AsyncMock, patch
 
-from server import pcb_routing as workflow
-from server import routing_audit as audit
-from server.altium_transport import FileCommandTransport, atomic_json
-from server.routing_geometry import (
-    audit_layer_usage,
-    preview_clearance,
-    segment_segment,
-    via_on_layer,
-)
-from server.routing_operations import geometry, plan_batch, reconcile_batch
-from tools.optional import checkpoints
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+
+import routing  # noqa: E402
+
+MIL = routing.COORD_PER_MIL
 
 
-def example_tables():
-    return {
-        "nets": [
-            dict(
-                net="Signal",
-                pin_count="2",
-                via_count="0",
-                routed_length_raw="2000",
-                connectivity_invalid="true",
-                connections_visible="true",
-            ),
-            dict(
-                net="GND",
-                pin_count="1",
-                via_count="1",
-                routed_length_raw="0",
-                connectivity_invalid="false",
-                connections_visible="true",
-            ),
-        ],
-        "pads": [
-            dict(
-                refdes="U1",
-                pad="1",
-                net="Signal",
-                x_raw="1000",
-                y_raw="2000",
-                layer_id="1",
-                layer="Top Layer",
-                rotation_degrees="0",
-                top_x_size_raw="300",
-                top_y_size_raw="300",
-                hole_size_raw="0",
-                selected="false",
-            )
-        ],
-        "tracks": [
-            dict(
-                net="Signal",
-                x1_raw="1000",
-                y1_raw="2000",
-                x2_raw="3000",
-                y2_raw="2000",
-                width_raw="100",
-                layer_id="1",
-                layer="Top Layer",
-                selected="false",
-            )
-        ],
-        "vias": [
-            dict(
-                net="GND",
-                x_raw="6000",
-                y_raw="7000",
-                size_raw="500",
-                hole_size_raw="200",
-                low_layer_id="1",
-                high_layer_id="32",
-                selected="false",
-            )
-        ],
-        "connections": [],
-        "rules": [],
-        "arcs": [],
-        "polygons": [],
-        "components": [
-            dict(
-                refdes="U1",
-                comment="CJK 测试, Кириллица",
-                footprint="QFN",
-                x_raw="1000",
-                y_raw="2000",
-                rotation_degrees="90",
-                layer_id="1",
-                layer="Top Layer",
-            )
-        ],
-        "layers": [
-            dict(
-                stack_index=str(i + 1),
-                layer_id=str(layer),
-                layer_name=name,
-                copper_thickness_raw="1000",
-            )
-            for i, (layer, name) in enumerate(
-                [(1, "Top Layer"), (5, "Internal plane"), (32, "Bottom Layer")]
-            )
-        ],
+def track(net, x1, y1, x2, y2, layer="Top Layer"):
+    return {"layer": layer, "net": net, "x1": x1, "y1": y1, "x2": x2, "y2": y2, "width": 10 * MIL}
+
+
+def geometry(tracks, vias=(), pads=()):
+    return {"tracks": list(tracks), "arcs": [], "vias": list(vias), "pads": list(pads)}
+
+
+class AngleTest(unittest.TestCase):
+    def test_classes(self):
+        self.assertEqual(routing.angle_class(100, 0)[0], "orthogonal")
+        self.assertEqual(routing.angle_class(0, -100)[0], "orthogonal")
+        self.assertEqual(routing.angle_class(70, -70)[0], "45")
+        self.assertEqual(routing.angle_class(0, 0)[0], "zero-length")
+        kind, off = routing.angle_class(100, 10)
+        self.assertEqual(kind, "off-angle")
+        self.assertAlmostEqual(off, 5.71, places=2)
+
+    def test_tolerance(self):
+        # A 45 degree diagonal ending 0.1 mil off over 20 mil is ~0.14 deg out
+        self.assertEqual(routing.angle_class(20 * MIL, 20 * MIL + 1000, tol_deg=0.1)[0], "off-angle")
+        self.assertEqual(routing.angle_class(20 * MIL, 20 * MIL + 1000, tol_deg=0.2)[0], "45")
+
+
+class CheckTest(unittest.TestCase):
+    def test_off_angle_stub_and_sharp_corners(self):
+        geo = geometry([
+            track("A", 0, 0, 100 * MIL, 0), track("A", 100 * MIL, 0, 100 * MIL, 100 * MIL),  # 90 corner
+            track("B", 0, 500 * MIL, 50 * MIL, 500 * MIL), track("B", 50 * MIL, 500 * MIL, 80 * MIL, 530 * MIL),  # 45
+            track("C", 0, 900 * MIL, 34 * MIL, 937 * MIL),  # 47.4 deg stub
+            track("D", 0, 1200 * MIL, 100 * MIL, 1200 * MIL), track("D", 100 * MIL, 1200 * MIL, 0, 1250 * MIL),  # acute
+        ])
+        r = routing.check(geo)
+        self.assertEqual(r["segment_angles"], {"orthogonal": 4, "45": 1, "off-angle": 2})
+        self.assertEqual([s["net"] for s in r["off_angle"]], ["C", "D"])
+        self.assertEqual(r["corner_turns"], {"90": 1, "45": 1, "acute": 1})
+        corner = next(c for c in r["sharp_corners"] if c["net"] == "A")
+        self.assertEqual((corner["kind"], corner["at_mils"]), ("90", [100.0, 0.0]))
+
+    def test_corner_under_via_or_rotated_pad_is_no_corner(self):
+        tracks = [track("A", 0, 0, 100 * MIL, 0), track("A", 100 * MIL, 0, 100 * MIL, 100 * MIL)]
+        self.assertEqual(routing.check(geometry(tracks, vias=[(100 * MIL, 0, 20 * MIL)]))["sharp_corners"], [])
+        self.assertEqual(routing.check(geometry(tracks, pads=[(100 * MIL, 5 * MIL, 4 * MIL, 30 * MIL)]))["sharp_corners"], [])
+
+    def test_different_nets_or_layers_do_not_make_corners(self):
+        geo = geometry([track("A", 0, 0, 100 * MIL, 0), track("B", 100 * MIL, 0, 100 * MIL, 100 * MIL),
+                        track("A", 0, 0, 0, 100 * MIL, layer="Bottom Layer")])
+        self.assertEqual(routing.check(geo)["corner_turns"], {})
+
+    def test_nets_filter(self):
+        geo = geometry([track("GND", 0, 0, 34 * MIL, 37 * MIL), track("SIG", 0, 0, 30 * MIL, 37 * MIL)])
+        self.assertEqual([s["net"] for s in routing.check(geo, nets=["sig"])["off_angle"]], ["SIG"])
+
+    def test_parse_geometry_relative_to_origin(self):
+        text = "\n".join(["O|1000|2000", "T|Top Layer|GND|1100|2100|1200|2100|50",
+                          "T|Mid Layer 2|NET|A|1100|2100|1200|2100|50", "A|Top Layer|GND",
+                          "V|1500|2500|30", "P|1600|2600|40|20"])
+        geo = routing.parse_geometry(text)
+        self.assertEqual(geo["tracks"], [
+            {"layer": "Top Layer", "net": "GND", "x1": 100, "y1": 100, "x2": 200, "y2": 100, "width": 50},
+            {"layer": "Mid Layer 2", "net": "NET|A", "x1": 100, "y1": 100, "x2": 200, "y2": 100, "width": 50}])
+        self.assertEqual((geo["vias"], geo["pads"], len(geo["arcs"])), ([(500, 500, 30)], [(600, 600, 40, 20)], 1))
+
+
+class RouteTest(unittest.TestCase):
+    def assert_clean(self, segments, points):
+        for x1, y1, x2, y2 in segments:
+            self.assertIn(routing.angle_class(x2 - x1, y2 - y1)[0], ("orthogonal", "45"))
+        for a, b in zip(segments, segments[1:]):
+            self.assertEqual(a[2:], b[:2])  # connected end to start
+        self.assertEqual(segments[0][:2], points[0])
+        self.assertEqual(segments[-1][2:], points[-1])
+
+    def test_straight_then_diagonal(self):
+        pts = [(0, 0), (100 * MIL, 40 * MIL)]
+        segs = routing.route(pts)
+        self.assertEqual(segs, [(0, 0, 60 * MIL, 0), (60 * MIL, 0, 100 * MIL, 40 * MIL)])
+        self.assert_clean(segs, pts)
+
+    def test_diagonal_first(self):
+        segs = routing.route([(0, 0), (-40 * MIL, 100 * MIL)], diagonal_first=True)
+        self.assertEqual(segs, [(0, 0, -40 * MIL, 40 * MIL), (-40 * MIL, 40 * MIL, -40 * MIL, 100 * MIL)])
+
+    def test_odd_metric_coordinates_stay_exact(self):
+        # A 5.08 mm pitch pad to a point on a metric grid: the diagonal is
+        # still exactly 45 degrees, whatever the units do
+        pts = [(1999998, 0), (2401574, -350000)]
+        segs = routing.route(pts)
+        self.assert_clean(segs, pts)
+
+    def test_points_in_line_merge_into_one_segment(self):
+        segs = routing.route([(0, 0), (50 * MIL, 0), (50 * MIL, 0), (100 * MIL, 0)])
+        self.assertEqual(segs, [(0, 0, 100 * MIL, 0)])
+
+    def test_chamfer_cuts_right_angles(self):
+        segs = routing.route([(0, 0), (100 * MIL, 0), (100 * MIL, 100 * MIL)], chamfer=20 * MIL)
+        self.assertEqual(segs, [(0, 0, 80 * MIL, 0), (80 * MIL, 0, 100 * MIL, 20 * MIL),
+                                (100 * MIL, 20 * MIL, 100 * MIL, 100 * MIL)])
+        geo = geometry(track("N", *s) for s in segs)
+        self.assertEqual(routing.check(geo)["sharp_corners"], [])
+
+    def test_chamfer_at_most_half_the_shorter_leg(self):
+        segs = routing.route([(0, 0), (10 * MIL, 0), (10 * MIL, 100 * MIL)], chamfer=50 * MIL)
+        self.assertEqual(segs[0], (0, 0, 5 * MIL, 0))
+
+    def test_random_routes_are_clean(self):
+        rnd = random.Random(7)
+        for _ in range(200):
+            pts = [(rnd.randint(-10**7, 10**7), rnd.randint(-10**7, 10**7)) for _ in range(rnd.randint(2, 6))]
+            if any(a == b for a, b in zip(pts, pts[1:])):
+                continue
+            for first in (False, True):
+                self.assert_clean(routing.route(pts, diagonal_first=first), pts)
+                self.assert_clean(routing.route(pts, diagonal_first=first, chamfer=rnd.randint(1, 10**6)), pts)
+
+
+class ViaRecordsTest(unittest.TestCase):
+    def test_defaults_and_overrides(self):
+        recs, err = routing.via_records([[100, 200.5], {"x": 0, "y": 0, "net": "", "diameter_mils": 30,
+                                                       "hole_mils": 15, "end_layer": "Inner 1"}],
+                                        20, 10, net="GND")
+        self.assertEqual(err, "")
+        self.assertEqual(recs, ["1000000|2005000|200000|100000|GND|Top Layer|Bottom Layer",
+                                "0|0|300000|150000||Top Layer|Inner 1"])
+
+    def test_rejects_bad_input(self):
+        self.assertIn("smaller than", routing.via_records([[0, 0]], 10, 10)[1])
+        self.assertIn("expected", routing.via_records([[0]], 20, 10)[1])
+        self.assertIn("expected", routing.via_records([{"x": 0, "y": 0, "size": 1}], 20, 10)[1])
+        self.assertIn("numbers", routing.via_records([["a", 0]], 20, 10)[1])
+        self.assertIn("cannot be sent", routing.via_records([[0, 0]], 20, 10, net="A|B")[1])
+        self.assertEqual(routing.via_records([], 20, 10), (None, "vias is empty"))
+
+
+class PlanPathTest(unittest.TestCase):
+    def test_layer_change_at_the_end_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "lead nowhere"):
+            routing.plan_path((0, 0, "Top Layer"), [(10, 10, None), (10, 10, "Bottom Layer")])
+        # unless the last point is a pad the via leads into
+        tracks, vias = routing.plan_path((0, 0, "Top Layer"), [(10, 0, "Bottom Layer")], end_in_pad=True,
+                                         via_span="layers")
+        self.assertEqual((tracks, vias), ([("Top Layer", 0, 0, 10, 0)], [(10, 0, "Top Layer", "Bottom Layer")]))
+
+    def test_layer_change_drops_a_via(self):
+        tracks, vias = routing.plan_path((0, 0, "Top Layer"),
+                                         [(1000, 500, None), (1000, 500, "Bottom Layer"), (2000, 500, None)])
+        self.assertEqual(tracks, [("Top Layer", 0, 0, 500, 0), ("Top Layer", 500, 0, 1000, 500),
+                                  ("Bottom Layer", 1000, 500, 2000, 500)])
+        self.assertEqual(vias, [(1000, 500, "Top Layer", "Bottom Layer")])
+
+    def test_via_between_the_two_layers(self):
+        tracks, vias = routing.plan_path((0, 0, "Top Layer"), [(500, 0, "Mid Layer 1"), (500, 800, None)],
+                                         via_span="layers")
+        self.assertEqual(vias, [(500, 0, "Top Layer", "Mid Layer 1")])
+        self.assertEqual(tracks[-1], ("Mid Layer 1", 500, 0, 500, 800))
+
+    def test_same_layer_waypoint_is_no_via(self):
+        tracks, vias = routing.plan_path((0, 0, "Top Layer"), [(300, 0, "Top Layer"), (300, 300, None)])
+        self.assertEqual(vias, [])
+        self.assertEqual(len(tracks), 2)
+
+    def test_layer_names_without_case(self):
+        tracks, vias = routing.plan_path((0, 0, "Top Layer"), [(300, 0, "top layer"), (300, 300, "TOP LAYER")])
+        self.assertEqual(vias, [])
+        self.assertEqual({t[0] for t in tracks}, {"Top Layer"})
+
+
+class ResolvePointsTest(unittest.TestCase):
+    # (kind, x, y, layer, net, through_hole) as main reads 'locate'; Altium
+    # calls the through-hole layer "Multi Layer", and the flag tells it
+    LOCATED = {
+        "pad|U1|1": ("pad", 0, 0, "Top Layer", "SIG", False),         # surface-mount, top
+        "pad|U2|1": ("pad", 1000, 0, "Bottom Layer", "SIG", False),   # surface-mount, bottom
+        "pad|J1|1": ("pad", 2000, 0, "Multi Layer", "SIG", True),     # through-hole
+        "pad|U3|2": ("pad", 3000, 0, "Top Layer", "OTHER", False),
+        "via|500|500": ("via", 500, 500, "Multi Layer", "SIG", True),
+        "component|U1": ("component", 10, 10, "", "", False),
     }
 
+    def resolve(self, points, layer="", **kw):
+        return routing.resolve_route_points(points, self.LOCATED, "sig", layer, **kw)
 
-def write_snapshot(directory, tables=None, snapshot_id=None, seal=True):
-    directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=True)
-    tables = deepcopy(tables or example_tables())
-    snapshot_id = snapshot_id or uuid.uuid4().hex
-    counts = {
-        "net_count": len(tables["nets"]),
-        "pad_count": len(tables["pads"]),
-        "track_segment_count": len(tables["tracks"]),
-        "via_count": len(tables["vias"]),
-        "rule_count": len(tables["rules"]),
-        "connection_object_count": len(tables["connections"]),
-        "nonredundant_ratsnest_connections": sum(
-            audit.remaining_edges(tables).values()
-        ),
-        "redundant_connection_objects": sum(
-            r["redundant"] == "true" for r in tables["connections"]
-        ),
-        "connectivity_invalid_nets": sum(
-            r["connectivity_invalid"] == "true" for r in tables["nets"]
-        ),
-    }
-    counts.update({name + "_count": len(tables[name]) for name in audit.EXTRA_HEADERS})
-    board = {
-        "board_file": r"D:\Boards, shared\测试\Example.PcbDoc",
-        "coordinate_units": "Altium internal units",
-        "internal_units_per_mil": "10000",
-        "x_origin_raw": "0",
-        "y_origin_raw": "0",
-        "field_encoding": "json-string",
-        "snapshot_id": snapshot_id,
-        **{k: str(v) for k, v in counts.items()},
-    }
-    tables["board"] = [dict(field=k, value=v) for k, v in board.items()]
-    for name, header in {**audit.HEADERS, **audit.EXTRA_HEADERS}.items():
-        fields = header.split()
-        text = "\t".join(fields) + "\n"
-        for row in tables[name]:
-            text += (
-                "\t".join(json.dumps(row[k], ensure_ascii=True)[1:-1] for k in fields)
-                + "\n"
-            )
-        (directory / f"{name}.tsv").write_text(text, encoding="ascii")
-    (directory / "inventory-status.txt").write_text("complete\n", encoding="ascii")
-    (directory / "board-signature.txt").write_text(
-        json.dumps(tables, sort_keys=True, ensure_ascii=True), encoding="ascii"
-    )
-    if seal:
-        audit.seal_inventory(directory, snapshot_id)
-        return audit.read_snapshot(directory)
+    def test_smd_pad_on_its_layer(self):
+        resolved, first, warnings = self.resolve([("ref", "pad|U1|1"), ("xy", (500, 0, None)), ("ref", "pad|U3|2")],
+                                                 allow_other_net=True)
+        self.assertEqual(first, "Top Layer")
+        self.assertEqual(resolved, [(0, 0, "Top Layer"), (500, 0, None), (3000, 0, "Top Layer")])
+        self.assertEqual(len(warnings), 1)
 
+    def test_no_via_in_an_smd_pad(self):
+        # top pad to bottom pad without changing layer: the via would land in the pad
+        with self.assertRaises(ValueError) as e:
+            self.resolve([("ref", "pad|U1|1"), ("ref", "pad|U2|1")])
+        self.assertIn("allow_via_in_pad", str(e.exception))
+        # changing layer on the way is fine
+        resolved, _, _ = self.resolve([("ref", "pad|U1|1"), ("xy", (500, 0, "Bottom Layer")), ("ref", "pad|U2|1")])
+        tracks, vias = routing.plan_path((0, 0, "Top Layer"), resolved[1:])
+        self.assertEqual(vias, [(500, 0, "Top Layer", "Bottom Layer")])
+        # or allowed explicitly: the route ends in a via in the last pad
+        resolved, first, _ = self.resolve([("ref", "pad|U1|1"), ("ref", "pad|U2|1")], allow_via_in_pad=True)
+        self.assertEqual(resolved[-1], (1000, 0, "Bottom Layer"))
+        tracks, vias = routing.plan_path((0, 0, first), resolved[1:], end_in_pad=True)
+        self.assertEqual(tracks, [("Top Layer", 0, 0, 1000, 0)])
+        self.assertEqual(vias, [(1000, 0, "Top Layer", "Bottom Layer")])
+        # a through-hole pad takes any layer, start or end
+        resolved, first, _ = self.resolve([("ref", "pad|U2|1"), ("ref", "pad|J1|1")])
+        self.assertEqual(resolved[-1], (2000, 0, None))
+        resolved, first, _ = self.resolve([("ref", "pad|J1|1"), ("xy", (2150, 0, None))])
+        self.assertEqual((first, resolved[0]), ("Top Layer", (2000, 0, None)))
 
-class SnapshotTests(unittest.TestCase):
-    def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+    def test_start_layer_against_an_smd_pad(self):
+        with self.assertRaises(ValueError):
+            self.resolve([("ref", "pad|U1|1"), ("xy", (500, 0, None))], layer="Bottom Layer")
+        resolved, first, _ = self.resolve([("ref", "pad|U1|1"), ("xy", (500, 0, None))], layer="Bottom Layer",
+                                          allow_via_in_pad=True)
+        tracks, vias = routing.plan_path((0, 0, first), resolved[1:])
+        self.assertEqual(vias, [(0, 0, "Top Layer", "Bottom Layer")])
+        self.assertEqual(tracks, [("Bottom Layer", 0, 0, 500, 0)])
+        # same layer in another case is no via
+        _, first, _ = self.resolve([("ref", "pad|U1|1"), ("xy", (500, 0, None))], layer="top layer")
+        self.assertEqual(first, "Top Layer")
 
-    def test_sealed_snapshot_roundtrips_unicode_and_detects_tampering(self):
-        snapshot = write_snapshot(self.root / "before")
-        self.assertEqual(
-            "CJK 测试, Кириллица", snapshot["tables"]["components"][0]["comment"]
-        )
-        (self.root / "before/tracks.tsv").write_text("tampered")
-        with self.assertRaisesRegex(ValueError, "was changed"):
-            audit.read_snapshot(self.root / "before")
+    def test_other_net_refused(self):
+        with self.assertRaises(ValueError) as e:
+            self.resolve([("ref", "pad|U1|1"), ("ref", "pad|U3|2")])
+        self.assertIn("allow_other_net", str(e.exception))
 
-    def test_manifest_requires_all_tables_and_correct_generation(self):
-        path = self.root / "before"
-        write_snapshot(path, seal=False, snapshot_id="generation-one")
-        with self.assertRaisesRegex(ValueError, "different snapshot generation"):
-            audit.seal_inventory(path, "generation-two")
-        (path / "polygons.tsv").unlink()
-        with self.assertRaisesRegex(ValueError, "require component"):
-            audit.seal_inventory(path, "generation-one")
-
-    def test_components_layers_and_polygon_changes_are_visible(self):
-        before = write_snapshot(self.root / "before")
-        tables = example_tables()
-        tables["components"][0]["rotation_degrees"] = "180"
-        after = write_snapshot(self.root / "after", tables)
-        self.assertIn(
-            "Immutable components records changed",
-            audit.compare_snapshots(before, after)["regressions"],
-        )
-        self.assertFalse(
-            audit.compare_snapshots(before, after, allow_placement_changes=True)[
-                "regressions"
-            ]
-        )
-
-    def test_intentional_width_change_requires_policy_and_exact_request(self):
-        before = write_snapshot(self.root / "before")
-        old = before["tables"]["tracks"][0]
-        new = dict(old, width_raw="150")
-        plan = plan_batch(before, [dict(kind="track", action="edit", old=old, new=new)])
-        tables = example_tables()
-        tables["tracks"][0]["width_raw"] = "150"
-        after = write_snapshot(self.root / "after", tables)
-        self.assertTrue(reconcile_batch(before, after, plan)["verified"])
-        tables["vias"][0]["hole_size_raw"] = "210"
-        unrelated = write_snapshot(self.root / "unrelated", tables)
-        self.assertFalse(reconcile_batch(before, unrelated, plan)["verified"])
-
-    def test_duplicate_targets_unknown_nets_and_unqualified_via_spans_are_rejected(
-        self,
-    ):
-        before = write_snapshot(self.root / "before")
-        old = before["tables"]["tracks"][0]
-        with self.assertRaisesRegex(ValueError, "targeted only once"):
-            plan_batch(before, [dict(kind="track", action="remove", old=old)] * 2)
-        with self.assertRaisesRegex(ValueError, "known assigned"):
-            plan_batch(
-                before, [dict(kind="track", action="add", new=dict(old, net="UNKNOWN"))]
-            )
-        via = dict(before["tables"]["vias"][0], x_raw="9000", high_layer_id="5")
-        with self.assertRaisesRegex(ValueError, "through span"):
-            plan_batch(before, [dict(kind="via", action="add", new=via)])
-
-    def test_batch_rejects_unrequested_same_net_arc_removal(self):
-        tables = example_tables()
-        tables["arcs"] = [
-            dict(
-                net="Signal",
-                x_raw="1000",
-                y_raw="2000",
-                radius_raw="500",
-                start_angle="0",
-                end_angle="90",
-                width_raw="100",
-                layer_id="1",
-                selected="false",
-            )
-        ]
-        before = write_snapshot(self.root / "before", tables)
-        old = before["tables"]["tracks"][0]
-        plan = plan_batch(
-            before,
-            [
-                dict(
-                    kind="track", action="edit", old=old, new=dict(old, width_raw="150")
-                )
-            ],
-        )
-        tables["tracks"][0]["width_raw"] = "150"
-        tables["arcs"] = []
-        after = write_snapshot(self.root / "after", tables)
-        self.assertFalse(reconcile_batch(before, after, plan)["verified"])
-
-    def test_offcenter_via_overlapping_pad_requires_same_net_allowance(self):
-        before = write_snapshot(self.root / "before")
-        via = dict(
-            before["tables"]["vias"][0],
-            net="Signal",
-            x_raw="1050",
-            y_raw="2000",
-            size_raw="100",
-            hole_size_raw="20",
-        )
-        operations = [dict(kind="via", action="add", new=via)]
-        with self.assertRaisesRegex(ValueError, "Via in pad"):
-            plan_batch(before, operations)
-        self.assertEqual(
-            1, len(plan_batch(before, operations, allow_via_in_pad=True)["operations"])
-        )
-        with self.assertRaisesRegex(ValueError, "Via in pad"):
-            plan_batch(
-                before,
-                [dict(kind="via", action="add", new=dict(via, net="GND"))],
-                allow_via_in_pad=True,
-            )
-
-    def test_reversed_endpoint_targets_are_identical(self):
-        row = example_tables()["tracks"][0]
-        reverse = dict(row, x1_raw=row["x2_raw"], x2_raw=row["x1_raw"])
-        self.assertEqual(geometry("track", row), geometry("track", reverse))
-        self.assertEqual(0, segment_segment((0, 0), (4, 0), (1, 0), (5, 0)))
-
-    def test_preview_uses_physical_stack_order_and_explicit_layer_policy(self):
-        snapshot = write_snapshot(self.root / "before")
-        self.assertTrue(
-            via_on_layer(snapshot["tables"]["vias"][0], 5, {1: 0, 5: 1, 32: 2})
-        )
-        candidate = dict(
-            net="Signal",
-            layer_id=1,
-            x1_raw=6000,
-            y1_raw=6000,
-            x2_raw=6000,
-            y2_raw=8000,
-            width_raw=100,
-        )
-        result = preview_clearance(snapshot, [candidate], 0)
-        self.assertGreater(result["modeled_conflict_count"], 0)
-        self.assertTrue(result["native_drc_required"])
-        with self.assertRaisesRegex(ValueError, "explicit allowed_nets"):
-            audit_layer_usage(snapshot, [dict(layer_id=1, role="ground")])
-        result = audit_layer_usage(
-            snapshot, [dict(layer_id=1, role="ground", allowed_nets=["GND"])]
-        )
-        self.assertFalse(result["passed_policy"])
-        self.assertEqual("Signal", result["violations"][0]["record"]["net"])
-
-    def test_outputs_cannot_escape_generated(self):
-        with patch.object(workflow, "GENERATED", self.root / "generated"):
-            with self.assertRaises(ValueError):
-                workflow.output_directory(str(self.root / "elsewhere"))
-
-    def test_placement_policy_never_silently_allows_pad_net_reassignment(self):
-        before = write_snapshot(self.root / "before")
-        tables = example_tables()
-        tables["pads"][0]["net"] = "GND"
-        after = write_snapshot(self.root / "after", tables)
-        result = audit.compare_snapshots(before, after, allow_placement_changes=True)
-        self.assertIn(
-            "Pad identities, net assignments or dimensions changed",
-            result["regressions"],
-        )
-
-    def test_new_via_at_pad_requires_explicit_same_net_allowance(self):
-        before = write_snapshot(self.root / "before")
-        via = dict(
-            before["tables"]["vias"][0], net="Signal", x_raw="1000", y_raw="2000"
-        )
-        operations = [dict(kind="via", action="add", new=via)]
-        with self.assertRaisesRegex(ValueError, "Via in pad"):
-            plan_batch(before, operations)
-        plan = plan_batch(before, operations, allow_via_in_pad=True)
-        self.assertEqual(1, len(plan["operations"]))
-
-    def test_drc_comparison_rejects_new_timing_occurrences_and_checks_identity(self):
-        def report(finding):
-            return "\n".join(
-                [
-                    r"PCB File : D:\Boards\Example.PcbDoc",
-                    "Date : 2026-11-04",
-                    "Time : 10:00",
-                    "Processing Rule : Delay Constraint (Max=100ps)",
-                    *(
-                        []
-                        if not finding
-                        else [
-                            "   Violation between Net X Actual Propagation Delay = 120ps"
-                        ]
-                    ),
-                    f"Rule Violations : {int(finding)}",
-                    f"Violations Detected : {int(finding)}",
-                    "Waived Violations : 0",
-                ]
-            )
-
-        baseline, current = self.root / "before.drc", self.root / "after.drc"
-        baseline.write_text(report(False))
-        current.write_text(report(True))
-        result = audit.compare_drc_reports(baseline, current)
-        self.assertFalse(result["passed"])
-        self.assertEqual("Delay", result["rejected_added_findings"][0]["category"])
-        with self.assertRaisesRegex(ValueError, "expected PCB"):
-            audit.compare_drc_reports(baseline, current, r"D:\Other\Example.PcbDoc")
-
-
-class WorkflowTests(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
-        self.patch = patch.object(workflow, "GENERATED", self.root)
-        self.patch.start()
-        self.addCleanup(self.patch.stop)
-        self.before = write_snapshot(self.root / "before")
-
-    async def test_undo_dry_run_does_not_touch_native_stack(self):
-        native = AsyncMock()
-        service = workflow.RoutingService(native)
-        for steps in (0, 257, True):
-            with self.assertRaises(ValueError):
-                await service.undo(self.root / "before", steps)
-        result = await service.undo(self.root / "before", 6)
-        self.assertFalse(result["applied"])
-        native.assert_not_awaited()
-
-    async def test_undo_exports_actual_readback_on_the_bound_board(self):
-        async def native(command, params):
-            self.assertEqual("undo", params["operation"])
-            self.assertEqual(
-                self.before["board"]["board_file"], params["expected_board"]
-            )
-            self.assertEqual("6", params["steps"])
-            write_snapshot(
-                params["operation_directory"],
-                example_tables(),
-                params["snapshot_id"],
-                seal=False,
-            )
-            return dict(success=True, result=dict(undo_requested=6))
-
-        result = await workflow.RoutingService(native).undo(
-            self.root / "before", 6, True
-        )
-        self.assertEqual(6, result["undo_requested"])
-        self.assertFalse(result["saved"])
-        self.assertTrue(
-            audit.read_snapshot(Path(result["snapshot_directory"]))["manifest"]
-        )
-
-    async def test_polygon_readback_rejects_wrong_target_and_collateral_copper(self):
-        vertices = [[0, 0], [100, 0], [100, 100], [0, 100]]
-        for defect in (
-            "none",
-            "net",
-            "layer",
-            "arc_segment",
-            "track",
-            "arc",
-            "settings",
-        ):
-            with self.subTest(defect=defect):
-
-                async def native(command, params):
-                    tables = example_tables()
-                    segments = [
-                        f"{1 if defect == 'arc_segment' else 0},{x},{y},0,0,0,0,0"
-                        for x, y in vertices
-                    ]
-                    tables["polygons"] = [
-                        dict(
-                            name="P1",
-                            net="Signal" if defect == "net" else "GND",
-                            layer_id="32" if defect == "layer" else "1",
-                            definition=(
-                                "0,0,1,true,0,200000,10000,30000,false,true,250000000000,true,50000,5000"
-                                if defect == "settings"
-                                else "0,5,1,true,0,200000,10000,30000,false,true,250000000000,true,50000,5000"
-                            )
-                            + ";"
-                            + ";".join(segments),
-                        )
-                    ]
-                    if defect == "track":
-                        tables["tracks"].append(dict(tables["tracks"][0], net="GND"))
-                    if defect == "arc":
-                        tables["arcs"] = [
-                            dict(
-                                net="GND",
-                                x_raw="1000",
-                                y_raw="2000",
-                                radius_raw="500",
-                                start_angle="0",
-                                end_angle="90",
-                                width_raw="100",
-                                layer_id="1",
-                                selected="false",
-                            )
-                        ]
-                    write_snapshot(
-                        params["operation_directory"],
-                        tables,
-                        params["snapshot_id"],
-                        seal=False,
-                    )
-                    return dict(success=True, result=dict(applied=True))
-
-                result = await workflow.RoutingService(native).polygon(
-                    self.root / "before", "P1", "GND", 1, vertices, True
-                )
-                self.assertEqual(defect == "none", result["verified"])
-
-    async def test_dry_run_never_sends_a_native_command(self):
-        native = AsyncMock()
-        service = workflow.RoutingService(native)
-        old = self.before["tables"]["tracks"][0]
-        result = await service.batch(
-            self.root / "before", [dict(kind="track", action="remove", old=old)]
-        )
-        self.assertFalse(result["applied"])
-        native.assert_not_awaited()
-
-    async def test_apply_reconciles_readback_instead_of_trusting_native_success(self):
-        old = self.before["tables"]["tracks"][0]
-        new = dict(old, width_raw="150")
-
-        async def native(command, params):
-            tables = example_tables()  # Simulate a silently ignored write.
-            write_snapshot(
-                params["operation_directory"], tables, params["snapshot_id"], seal=False
-            )
-            return dict(success=True, result=dict(applied=True, completed_rows=1))
-
-        result = await workflow.RoutingService(native).batch(
-            self.root / "before",
-            [dict(kind="track", action="edit", old=old, new=new)],
-            True,
-        )
-        self.assertTrue(result["applied"])
-        self.assertFalse(result["verified"])
-        self.assertIn("tracks", result["geometry_mismatches"])
-
-    async def test_timeout_keeps_progress_artifacts_and_never_replays(self):
-        native = AsyncMock(
-            return_value=dict(success=False, error="timeout", execution_state="unknown")
-        )
-        old = self.before["tables"]["tracks"][0]
-        result = await workflow.RoutingService(native).batch(
-            self.root / "before", [dict(kind="track", action="remove", old=old)], True
-        )
-        self.assertFalse(result["success"])
-        self.assertEqual(1, native.await_count)
-        self.assertTrue((Path(result["operation_directory"]) / "plan.json").exists())
-
-    async def test_successful_apply_exports_a_new_verified_baseline(self):
-        old = self.before["tables"]["tracks"][0]
-        new = dict(old, width_raw="150")
-
-        async def native(command, params):
-            tables = example_tables()
-            tables["tracks"][0]["width_raw"] = "150"
-            write_snapshot(
-                params["operation_directory"], tables, params["snapshot_id"], seal=False
-            )
-            return dict(success=True, result=dict(applied=True, completed_rows=1))
-
-        result = await workflow.RoutingService(native).batch(
-            self.root / "before",
-            [dict(kind="track", action="edit", old=old, new=new)],
-            True,
-        )
-        self.assertTrue(result["verified"])
-        self.assertFalse(result["saved"])
-        self.assertTrue(
-            audit.read_snapshot(Path(result["snapshot_directory"]))["manifest"]
-        )
-
-    async def test_polygon_dry_run_rejects_self_intersection_and_preserves_source(self):
-        service = workflow.RoutingService(AsyncMock())
-        with self.assertRaisesRegex(ValueError, "self-intersects|nonzero area"):
-            await service.polygon(
-                self.root / "before",
-                "P1",
-                "GND",
-                1,
-                [[0, 0], [100, 100], [0, 100], [100, 0]],
-            )
-        result = await service.polygon(
-            self.root / "before", "P1", "GND", 1, [[0, 0], [100, 0], [100, 100]]
-        )
-        self.assertFalse(result["applied"])
-
-
-class TransportTests(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
-
-    async def test_separate_clients_share_an_os_writer_lock_and_correlated_responses(
-        self,
-    ):
-        active = 0
-        maximum = 0
-        jobs = []
-
-        async def launch():
-            nonlocal active, maximum
-            request = json.loads(
-                (self.root / "request.json").read_text(encoding="utf-8-sig")
-            )
-            active += 1
-            maximum = max(maximum, active)
-
-            async def complete():
-                nonlocal active
-                await asyncio.sleep(0.02)
-                active -= 1
-                atomic_json(
-                    self.root / f"response-{request['request_id']}.json",
-                    dict(
-                        success=True,
-                        request_id=request["request_id"],
-                        result=request["command"],
-                    ),
-                )
-
-            jobs.append(asyncio.create_task(complete()))
-            return True
-
-        clients = [
-            FileCommandTransport(self.root, launch, timeout=1, poll=0.005)
-            for _ in range(2)
-        ]
-        results = await asyncio.gather(
-            clients[0].execute("one", {}), clients[1].execute("two", {})
-        )
-        await asyncio.gather(*jobs)
-        self.assertEqual(1, maximum)
-        self.assertEqual(["one", "two"], [r["result"] for r in results])
-        self.assertNotEqual(results[0]["request_id"], results[1]["request_id"])
-
-    async def test_wrong_response_id_times_out_and_blocks_next_launch(self):
-        async def launch():
-            request = json.loads(
-                (self.root / "request.json").read_text(encoding="utf-8-sig")
-            )
-            atomic_json(
-                self.root / f"response-{request['request_id']}.json",
-                dict(success=True, request_id="wrong"),
-            )
-            return True
-
-        launcher = AsyncMock(side_effect=launch)
-        transport = FileCommandTransport(self.root, launcher, timeout=0.025, poll=0.005)
-        first = await transport.execute("edit", {})
-        second = await transport.execute("edit", {})
-        self.assertEqual("unknown", first["execution_state"])
-        self.assertFalse(second["success"])
-        self.assertEqual(1, launcher.await_count)
-        self.assertTrue(transport.status()["pending"])
-
-    async def test_native_mutation_has_a_separate_response_deadline(self):
-        jobs = []
-
-        async def launch():
-            request = json.loads(
-                (self.root / "request.json").read_text(encoding="utf-8-sig")
-            )
-
-            async def complete():
-                await asyncio.sleep(0.04)
-                atomic_json(
-                    self.root / f"response-{request['request_id']}.json",
-                    dict(success=True, request_id=request["request_id"]),
-                )
-
-            jobs.append(asyncio.create_task(complete()))
-            return True
-
-        transport = FileCommandTransport(
-            self.root, launch, timeout=0.01, poll=0.002, mutation_timeout=0.25
-        )
-        result = await transport.execute("pcb_routing", {"operation": "batch"})
-        await asyncio.gather(*jobs)
-        self.assertTrue(result["success"])
-
-    async def test_terminal_response_allows_progress_after_timeout_without_replay(self):
-        launch = AsyncMock(return_value=True)
-        transport = FileCommandTransport(self.root, launch, timeout=0.015, poll=0.005)
-        first = await transport.execute("edit", {})
-        atomic_json(
-            self.root / f"response-{first['request_id']}.json",
-            dict(success=True, request_id=first["request_id"]),
-        )
-        self.assertTrue(transport.status()["terminal_response_available"])
-        await transport.execute("read", {})
-        self.assertEqual(2, launch.await_count)
-
-    async def test_caller_cancellation_does_not_unlock_a_running_native_command(self):
-        launched = asyncio.Event()
-        jobs = []
-        active = 0
-        maximum = 0
-
-        async def launch():
-            nonlocal active, maximum
-            request = json.loads(
-                (self.root / "request.json").read_text(encoding="utf-8-sig")
-            )
-            active += 1
-            maximum = max(active, maximum)
-            launched.set()
-
-            async def complete():
-                nonlocal active
-                await asyncio.sleep(0.025)
-                active -= 1
-                atomic_json(
-                    self.root / f"response-{request['request_id']}.json",
-                    dict(success=True, request_id=request["request_id"]),
-                )
-
-            jobs.append(asyncio.create_task(complete()))
-            return True
-
-        transport = FileCommandTransport(self.root, launch, timeout=1, poll=0.005)
-        task = asyncio.create_task(transport.execute("first", {}))
-        await launched.wait()
-        task.cancel()
-        with self.assertRaises(asyncio.CancelledError):
-            await task
-        second = await transport.execute("second", {})
-        await asyncio.gather(*jobs)
-        self.assertTrue(second["success"])
-        self.assertEqual(1, maximum)
-
-
-class CheckpointTests(unittest.TestCase):
-    def test_default_copy_is_independent_and_manifest_detects_changes(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            source = root / "source"
-            source.mkdir()
-            (source / "Board.PcbDoc").write_bytes(b"saved bytes")
-            with patch.object(checkpoints, "GENERATED", root / "generated"):
-                result = checkpoints.copy_checkpoint(
-                    source, root / "generated/checkpoint"
-                )
-            self.assertEqual(0, result["shared_files"])
-            (source / "Board.PcbDoc").write_bytes(b"changed source")
-            self.assertEqual(
-                b"saved bytes",
-                (root / "generated/checkpoint/Board.PcbDoc").read_bytes(),
-            )
-            checkpoints.verify(root / "generated/checkpoint")
-            (root / "generated/checkpoint/Board.PcbDoc").write_bytes(b"tampered")
-            with self.assertRaisesRegex(ValueError, "bytes changed"):
-                checkpoints.verify(root / "generated/checkpoint")
+    def test_points_vias_and_components(self):
+        resolved, first, _ = self.resolve([("xy", (0, 0, None)), ("ref", "via|500|500"), ("ref", "component|U1")])
+        self.assertEqual(first, "Top Layer")
+        self.assertEqual(resolved, [(0, 0, None), (500, 500, None), (10, 10, None)])
+        _, first, _ = self.resolve([("xy", (0, 0, "Bottom Layer")), ("xy", (1, 1, None))])
+        self.assertEqual(first, "Bottom Layer")
 
 
 if __name__ == "__main__":

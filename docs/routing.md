@@ -274,7 +274,8 @@ approximation; explicit allowance requires the same net, and native DRC is still
 required.
 
 The bridge serializes callers within and across server processes. Every command
-gets a UUID, a correlated response path, and a persistent pending receipt. A
+gets a UUID and a persistent pending receipt. The bridge reads its correlated
+reply from `response.json` while holding the shared exchange lock. A
 timeout is unknown execution, not a failed no-op. Until a terminal response for
 that request appears, later commands cannot overwrite the shared request. Caller
 cancellation also keeps the writer lock until the operation reaches a terminal

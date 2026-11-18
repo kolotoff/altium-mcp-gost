@@ -11,40 +11,6 @@ end;
 
 // JSON utility functions for Altium MCP Bridge
 
-function JSONUnescapeString(const S: String): String;
-var
-    I                       : Integer;
-    NextChar                : Char;
-begin
-    Result := '';
-    I := 1;
-    while I <= Length(S) do
-    begin
-        if (S[I] = '\') and (I < Length(S)) then
-        begin
-            NextChar := S[I + 1];
-            case NextChar of
-                '"': Result := Result + '"';
-                '\': Result := Result + '\';
-                '/': Result := Result + '/';
-                'b': Result := Result + #8;
-                'f': Result := Result + #12;
-                'n': Result := Result + #10;
-                'r': Result := Result + #13;
-                't': Result := Result + #9;
-            else
-                Result := Result + S[I] + NextChar;
-            end;
-            I := I + 2;
-        end
-        else
-        begin
-            Result := Result + S[I];
-            I := I + 1;
-        end;
-    end;
-end;
-
 function TrimJSON(InputStr: String): String;
 begin
   // Remove quotes and commas
@@ -53,24 +19,6 @@ begin
   Result := RemoveChar(Result, ',');
   // Trim whitespace
   Result := Trim(Result);
-  Result := JSONUnescapeString(Result);
-end;
-
-function TrimJSONStringPreserveCommas(InputStr: String): String;
-begin
-  Result := Trim(InputStr);
-  if (Length(Result) > 0) and (Result[Length(Result)] = ',') then
-    Delete(Result, Length(Result), 1);
-  Result := Trim(Result);
-  if (Length(Result) >= 2) and (Result[1] = '"') and (Result[Length(Result)] = '"') then
-  begin
-    Delete(Result, Length(Result), 1);
-    Delete(Result, 1, 1);
-  end
-  else
-    Result := RemoveChar(Result, '"');
-  Result := Trim(Result);
-  Result := JSONUnescapeString(Result);
 end;
 
 // Helper function to escape JSON strings
@@ -162,36 +110,14 @@ begin
     end;
 end;
 
-// Function to write JSON to a file and return as string
+// Return the JSON lines as one string. This used to save them to FileName
+// and load them back, which changed nothing (WriteResponse saves the result
+// the same way) but left temp_*.json copies of design data in the shared,
+// world-readable exchange folder. Nothing reads those files; FileName is
+// kept so the callers stay unchanged.
 function WriteJSONToFile(JSON: TStringList; FileName: String = ''): String;
-var
-    TempFile: String;
 begin
-    // Use provided filename or generate temp filename
-    if Not(AnsiEndsStr('.json', LowerCase(FileName))) then
-    begin
-        TempFile := ROOT_DIR + 'temp_json_output.json';
-    end
-    else
-    begin
-        TempFile := FileName;
-    end;
-    
-    try
-        // Save to file
-        JSON.SaveToFile(TempFile);
-        
-        // Load back the complete JSON data
-        JSON.Clear;
-        JSON.LoadFromFile(TempFile);
-        Result := JSON.Text;
-        
-        // Clean up temporary file if auto-generated
-        if (FileName = '') and FileExists(TempFile) then
-            DeleteFile(TempFile);
-    except
-        Result := '{"error": "Failed to write JSON to file"}';
-    end;
+    Result := JSON.Text;
 end;
 
 // Locale-safe StrToFloat: normalizes '.' to the system decimal separator before parsing.
@@ -227,4 +153,85 @@ begin
         List.Add(JSONPairStr(Name, 'true', False))
     else
         List.Add(JSONPairStr(Name, 'false', False));
+end;
+
+// Decode JSON string escapes: \\ \" \/ \n \r \t and \uXXXX
+function JSONUnescape(S: String): String;
+var
+    i : Integer;
+    C : String;
+begin
+    Result := '';
+    i := 1;
+    while (i <= Length(S)) do
+    begin
+        C := Copy(S, i, 1);
+        if (C = '\') and (i < Length(S)) then
+        begin
+            i := i + 1;
+            C := Copy(S, i, 1);
+            if (C = 'n') then
+                Result := Result + #10
+            else if (C = 'r') then
+                Result := Result + #13
+            else if (C = 't') then
+                Result := Result + #9
+            else if (C = 'b') then
+                Result := Result + #8
+            else if (C = 'f') then
+                Result := Result + #12
+            else if (C = 'u') and (i + 4 <= Length(S)) then
+            begin
+                Result := Result + Chr(StrToInt('$' + Copy(S, i + 1, 4)));
+                i := i + 4;
+            end
+            else
+                Result := Result + C;
+        end
+        else
+            Result := Result + C;
+        i := i + 1;
+    end;
+end;
+
+// The string value of a '"key": "value",' request line: the trailing comma
+// and surrounding quotes removed and JSON escapes decoded. Unlike TrimJSON
+// it keeps commas and quotes inside the value, so file paths arrive intact.
+function JSONLineValue(Line: String): String;
+var
+    S : String;
+begin
+    S := Trim(Copy(Line, Pos(':', Line) + 1, Length(Line)));
+    if (Copy(S, Length(S), 1) = ',') then
+        S := Trim(Copy(S, 1, Length(S) - 1));
+    if (Length(S) >= 2) and (Copy(S, 1, 1) = '"') and (Copy(S, Length(S), 1) = '"') then
+        S := Copy(S, 2, Length(S) - 2);
+    Result := JSONUnescape(S);
+end;
+
+// Read the string array whose key is on RequestData[KeyLine] into List and
+// return the index of the array's closing line, so the caller's scan goes on
+// after it. The server writes '"key": [', one element per line and a line
+// with just ']', or '"key": []' when the list is empty. Each element has its
+// JSON escapes decoded, so backslashes (Altium's overbar notation), quotes,
+// commas and brackets inside a value arrive exactly as sent.
+function ReadJSONStringArray(RequestData: TStringList; KeyLine: Integer; List: TStringList): Integer;
+var
+    Line : String;
+begin
+    Result := KeyLine;
+    if Pos('[]', RequestData[KeyLine]) > 0 then Exit;
+    Result := KeyLine + 1;
+    while Result < RequestData.Count do
+    begin
+        Line := Trim(RequestData[Result]);
+        if (Line = ']') or (Line = '],') then Exit;
+        if Copy(Line, Length(Line), 1) = ',' then
+            Line := Copy(Line, 1, Length(Line) - 1);
+        if (Length(Line) >= 2) and (Copy(Line, 1, 1) = '"') and (Copy(Line, Length(Line), 1) = '"') then
+            Line := Copy(Line, 2, Length(Line) - 2);
+        if Line <> '' then
+            List.Add(JSONUnescape(Line));
+        Result := Result + 1;
+    end;
 end;

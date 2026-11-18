@@ -8,10 +8,9 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 from server import routing_audit as audit
-from server.altium_transport import FileCommandTransport, atomic_json
 from server.pcb_routing import GENERATED, RoutingService, summarize_drc_artifacts
 from server.project_validation import validate_project
-from server.tests.test_routing import write_snapshot
+from server.tests.test_routing_workflow import write_snapshot
 
 
 BOARD = r"D:\Boards, shared\测试\Example.PcbDoc"
@@ -139,41 +138,6 @@ class NativeDRCTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(result["passed"])
         self.assertEqual(result["changes"]["added_count"], 1)
-
-    async def test_native_drc_can_outlast_the_standard_response_timeout(self):
-        directory = self.root / "exchange"
-        completion = None
-
-        async def launch():
-            nonlocal completion
-            request = json.loads(
-                (directory / "request.json").read_text(encoding="utf-8-sig")
-            )
-            request_id = request["request_id"]
-
-            async def respond():
-                await asyncio.sleep(0.04)
-                atomic_json(
-                    directory / f"response-{request_id}.json",
-                    {
-                        "request_id": request_id,
-                        "success": True,
-                    },
-                )
-
-            completion = asyncio.create_task(respond())
-            return True
-
-        transport = FileCommandTransport(
-            directory,
-            launch,
-            timeout=0.01,
-            poll=0.005,
-            native_drc_timeout=0.3,
-        )
-        result = await transport.execute("pcb_routing", {"operation": "native_drc"})
-        await completion
-        self.assertTrue(result["success"])
 
     async def test_cancelled_export_keeps_warning_handler_and_seals_report(self):
         started, release, stopped = asyncio.Event(), asyncio.Event(), asyncio.Event()

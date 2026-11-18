@@ -77,7 +77,7 @@ var
     Obj               : IPCB_Primitive;
 begin
     // Retrieve the current board
-    Board := PCBServer.GetCurrentPCBBoard;
+    Board := GetBoardSafe(0);
     if (Board = Nil) then
     begin
         Result := '{"success": false, "message": "No PCB document is currently active"}';
@@ -735,7 +735,7 @@ var
     NetNameMap      : TStringList;
 begin
     // Retrieve the current board
-    Board := PCBServer.GetCurrentPCBBoard;
+    Board := GetBoardSafe(0);
     if (Board = Nil) then
     begin
         Result := '{"success": false, "error": "No PCB document is currently active"}';

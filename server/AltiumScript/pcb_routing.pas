@@ -5,7 +5,8 @@
   Run. AD 26.11.1 corrupted nested function Result values around selection;
   keep these operations outside the String-returning ExecuteCommand path. }
 
-var RoutingFailure : String;
+var
+    RoutingFailure : String;
 
 procedure RoutingFail(ErrorText : String);
 begin

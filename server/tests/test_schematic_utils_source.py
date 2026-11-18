@@ -417,10 +417,10 @@ class PcbLibraryCustomPadSourceTest(unittest.TestCase):
             source,
             "Selected pad joining should be implemented as a single custom-shape pad operation.",
         )
-        self.assertLess(
-            source.index("function JoinSelectedPadsAsCustomPadShape(JoinAction: String): String; forward;"),
-            source.index("function MovePCBLibraryMechanicalLayers"),
-            "DelphiScript dispatcher must see a forward declaration before calling the custom pad join function.",
+        self.assertEqual(
+            source.count("function JoinSelectedPadsAsCustomPadShape(JoinAction: String): String;"),
+            1,
+            "The bridge bundler orders the definition before the dispatcher without a forward declaration.",
         )
 
         join_start = source.index("function AddJoinCustomPadContourTrack", source.index("function MoveComponentsByDesignators"))

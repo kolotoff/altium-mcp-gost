@@ -1,5 +1,56 @@
 const
     DEFAULT = 'Blank';
+    SCRIPT_ERROR_LOG = 'C:\Users\Public\altium_mcp\script_errors.log';
+    PROGRESS_FILE = 'C:\Users\Public\altium_mcp\progress.txt';
+    // The board the PCB tools last ran on, see FocusBoardForCommand
+    LAST_BOARD_FILE = 'C:\Users\Public\altium_mcp\last_board.txt';
+
+var
+    // Why the last EnsureDocumentFocused call failed; reported to the server.
+    FocusFailure : String;
+    // When ReportProgress last wrote PROGRESS_FILE
+    LastProgress : Double;
+    // The last message passed to LogScriptError during this run. A command
+    // that gives up with an empty result has logged why; Run replies with it.
+    LastScriptError : String;
+
+// Tell the server a long command is still working. The server waits as long
+// as this file keeps changing, instead of stopping the command after a fixed
+// time. Writes at most once a second, so it is cheap to call on every item
+// of a batch.
+procedure ReportProgress;
+var
+    L : TStringList;
+begin
+    if Now - LastProgress < 1 / 86400 then Exit;
+    LastProgress := Now;
+    L := TStringList.Create;
+    try
+        L.Text := FormatDateTime('yyyy-mm-dd hh:nn:ss', Now);
+        L.SaveToFile(PROGRESS_FILE);
+    except
+    end;
+    L.Free;
+end;
+
+// Errors must never be modal. The server is driven by an agent with no hands:
+// a ShowMessage box blocks this script before it writes its response, every
+// later request then times out, and Altium reports "another instance is
+// busy" until a human clicks OK. Log instead; the caller returns the error.
+procedure LogScriptError(Msg: String);
+var
+    L : TStringList;
+begin
+    LastScriptError := Msg;
+    L := TStringList.Create;
+    try
+        if FileExists(SCRIPT_ERROR_LOG) then L.LoadFromFile(SCRIPT_ERROR_LOG);
+        L.Add(FormatDateTime('yyyy-mm-dd hh:nn:ss', Now) + '  ' + Msg);
+        while L.Count > 500 do L.Delete(0);
+        L.SaveToFile(SCRIPT_ERROR_LOG);
+    except
+    end;
+end;
 
 {..............................................................................}
 { Get path of this script project.                                             }
@@ -81,11 +132,306 @@ begin
     end;
 end;
 
+// A path in the form Altium reports it (DM_FullPath): backslashes, no '..'
+function NormalizePath(Path: String): String;
+begin
+    result := ExpandFileName(StringReplace(Path, '/', '\', REPLACEALL));
+end;
+
+function IsAbsolutePath(Path: String): Boolean;
+var
+    P: String;
+begin
+    P := StringReplace(Path, '/', '\', REPLACEALL);
+    Result := (Copy(P, 2, 2) = ':\') or (Copy(P, 1, 2) = '\\');
+end;
+
+// A requested path is used only when it is a full path to an existing
+// .OutJob. A relative path would resolve against Altium's working folder,
+// and any other file type would be opened as an OutJob.
+function IsUsableOutJobPath(RequestedPath: String): Boolean;
+begin
+    Result := IsAbsolutePath(RequestedPath) and
+              (LowerCase(ExtractFileExt(RequestedPath)) = '.outjob') and
+              FileExists(RequestedPath);
+end;
+
+// The OutJob a request names, or the first open one when it names none.
+// Returns '' when the named path is not usable, or nothing is open.
+function ResolveOutJobPath(RequestedPath: String): String;
+begin
+    if RequestedPath <> '' then
+    begin
+        if IsUsableOutJobPath(RequestedPath) then
+            result := NormalizePath(RequestedPath)
+        else
+            result := '';
+    end
+    else
+        result := GetOpenOutputJob();
+end;
+
+// Error text for an OutJob that ResolveOutJobPath could not resolve
+function OutJobNotFoundError(RequestedPath: String): String;
+begin
+    if RequestedPath = '' then
+        result := 'No open OutJob document found'
+    else if not IsAbsolutePath(RequestedPath) then
+        result := 'outjob_path must be a full path: ' + RequestedPath
+    else if LowerCase(ExtractFileExt(RequestedPath)) <> '.outjob' then
+        result := 'Not an .OutJob file: ' + RequestedPath
+    else
+        result := 'OutJob file not found: ' + RequestedPath;
+end;
+
+// Return the Index-th (0-based) field of a pipe-delimited string,
+// e.g. GetFieldFromPipeString('R1|100|200', 1) = '100'.
+// Returns '' if the field does not exist.
+function GetFieldFromPipeString(S: String; Index: Integer): String;
+var
+    i, FieldStart, FieldIndex: Integer;
+begin
+    Result := '';
+    FieldIndex := 0;
+    FieldStart := 1;
+    for i := 1 to Length(S) do
+    begin
+        if S[i] = '|' then
+        begin
+            if FieldIndex = Index then
+            begin
+                Result := Copy(S, FieldStart, i - FieldStart);
+                Exit;
+            end;
+            FieldIndex := FieldIndex + 1;
+            FieldStart := i + 1;
+        end;
+    end;
+    if FieldIndex = Index then
+        Result := Copy(S, FieldStart, Length(S) - FieldStart + 1);
+end;
+
+// The focused PCB document when it is a board. A focused PCB library also
+// has a board, which the PCB server reports as current; it does not count.
+function FocusedBoard(Dummy: Integer): IPCB_Board;
+var
+    Board : IPCB_Board;
+begin
+    Result := nil;
+    Board := GetBoardSafe(0);
+    if (Board <> nil) and (UpperCase(ExtractFileExt(Board.FileName)) = '.PCBDOC') then
+        Result := Board;
+end;
+
+procedure RememberBoard(Path: String);
+var
+    Store : TStringList;
+begin
+    Store := TStringList.Create;
+    try
+        Store.Text := Path;
+        try
+            Store.SaveToFile(LAST_BOARD_FILE);
+        except
+        end;
+    finally
+        Store.Free;
+    end;
+end;
+
+function RememberedBoard(Dummy: Integer): String;
+var
+    Store : TStringList;
+begin
+    Result := '';
+    if not FileExists(LAST_BOARD_FILE) then Exit;
+    Store := TStringList.Create;
+    try
+        try
+            Store.LoadFromFile(LAST_BOARD_FILE);
+            if Store.Count > 0 then Result := Trim(Store[0]);
+        except
+        end;
+    finally
+        Store.Free;
+    end;
+end;
+
+// The net named Name on Board (not case-sensitive), or nil
+function FindBoardNet(Board: IPCB_Board; Name: String): IPCB_Net;
+var
+    Iterator : IPCB_BoardIterator;
+    Net      : IPCB_Net;
+begin
+    Result := nil;
+    Iterator := Board.BoardIterator_Create;
+    Iterator.AddFilter_ObjectSet(MkSet(eNetObject));
+    Iterator.AddFilter_LayerSet(AllLayers);
+    Iterator.AddFilter_Method(eProcessAll);
+    Net := Iterator.FirstPCBObject;
+    while (Net <> nil) and (Result = nil) do
+    begin
+        if UpperCase(Net.Name) = UpperCase(Name) then Result := Net;
+        Net := Iterator.NextPCBObject;
+    end;
+    Board.BoardIterator_Destroy(Iterator);
+end;
+
+// The copper layer of Board called Name: its name in the layer stack
+// ("Inner 1") or Altium's layer name ("Mid Layer 1"), not case-sensitive.
+// eNoLayer when the board has no such copper layer. Not String2Layer alone:
+// it accepts layers the board does not have ("Mid Layer 30" on a four-layer
+// board) and does not know names given in the stack.
+function ResolveBoardLayer(Board: IPCB_Board; Name: String): Integer;
+var
+    Iterator : IPCB_LayerObjectIterator;
+    Layer    : IPCB_LayerObject;
+begin
+    Result := eNoLayer;
+    Name := UpperCase(Trim(Name));
+    Iterator := Board.ElectricalLayerIterator;
+    while (Result = eNoLayer) and Iterator.Next do
+    begin
+        Layer := Iterator.LayerObject;
+        if (UpperCase(Layer.Name) = Name) or (UpperCase(Layer2String(Layer.LayerID)) = Name) then
+            Result := Layer.LayerID;
+    end;
+end;
+
+// Bring a board to the front for a PCB command when none is focused: the
+// board the PCB tools last ran on while it is still open, else the only
+// board in the focused project (or, when that has none, in all open
+// projects). With several to choose from it does not guess: a project often
+// holds a panel or assembly drawing besides the board, and a command run on
+// the wrong one returns empty or wrong data (#33).
+function FocusBoardForCommand(CommandName: String): Boolean;
+var
+    P, I    : Integer;
+    Project : IProject;
+    Doc     : IDocument;
+    Only    : IDocument;
+    Last    : String;
+    Names   : String;
+    Count   : Integer;
+    Shown   : IServerDocument;
+begin
+    Result := False;
+    Last := RememberedBoard(0);
+    if Last <> '' then
+    begin
+        // The path as Altium reported it, so an exact lookup finds it. Not
+        // FindOpenDocument: it is defined further down this unit, and a
+        // routine can only call those defined above it.
+        Shown := Client.GetDocumentByPath(Last);
+        if Shown <> nil then
+        begin
+            Client.ShowDocument(Shown);
+            if FocusedBoard(0) <> nil then
+            begin
+                Result := True;
+                Exit;
+            end;
+        end;
+    end;
+
+    Count := 0;
+    Names := '';
+    Only := nil;
+    for P := -1 to GetWorkspace.DM_ProjectCount - 1 do
+    begin
+        if P < 0 then
+            Project := GetWorkspace.DM_FocusedProject
+        else
+        begin
+            // The focused project's boards come first; only without any
+            // are the other open projects searched
+            if Count > 0 then Break;
+            Project := GetWorkspace.DM_Projects(P);
+            if Project = GetWorkspace.DM_FocusedProject then Continue;
+        end;
+        if Project = nil then Continue;
+        for I := 0 to Project.DM_LogicalDocumentCount - 1 do
+        begin
+            Doc := Project.DM_LogicalDocuments(I);
+            if Doc.DM_DocumentKind = 'PCB' then
+            begin
+                Count := Count + 1;
+                Only := Doc;
+                if Count <= 6 then
+                    Names := Names + ', ' + ExtractFileName(Doc.DM_FullPath);
+            end;
+        end;
+    end;
+
+    if Count = 1 then
+    begin
+        Only.DM_OpenAndFocusDocument;
+        Sleep(500);
+        if FocusedBoard(0) <> nil then
+        begin
+            RememberBoard(FocusedBoard(0).FileName);
+            Result := True;
+            Exit;
+        end;
+        FocusFailure := 'Found a PCB document but could not focus it';
+    end
+    else if Count = 0 then
+        FocusFailure := 'No PCB document found in any open project'
+    else
+    begin
+        if Count > 6 then Names := Names + ', ...';
+        FocusFailure := 'The focused document is not a PCB, and ' + IntToStr(Count) +
+            ' PCB documents could be meant (' + Copy(Names, 3, Length(Names)) + '). ' +
+            'Not guessing: click the board''s tab in Altium (or ask the user to), then retry; ' +
+            'the PCB tools then keep using that board.';
+    end;
+    LogScriptError('EnsureDocumentFocused(' + CommandName + '): ' + FocusFailure);
+end;
+
+// Bring the board at Path to the front, opening it when it is not open, for a
+// command whose request names its board (board_path) instead of acting on
+// whichever board has focus. That is what keeps an edit meant for one board,
+// say a copy being tested, off another. '' when it worked, else why not.
+function FocusBoardByPath(Path: String): String;
+var
+    Doc   : IServerDocument;
+    Board : IPCB_Board;
+begin
+    Result := '';
+    Doc := Client.GetDocumentByPath(Path);
+    if Doc = nil then
+    begin
+        if not FileExists(Path) then
+        begin
+            Result := 'Board not found: ' + Path;
+            Exit;
+        end;
+        Doc := Client.OpenDocument('PCB', Path);
+    end;
+    if Doc = nil then
+    begin
+        Result := 'Could not open the board ' + Path;
+        Exit;
+    end;
+    Client.ShowDocument(Doc);
+    Board := FocusedBoard(0);
+    // Remembered like a board focused any other way, so a later command
+    // that names no board uses this one
+    if (Board = nil) or
+       (UpperCase(ExpandFileName(Board.FileName)) <> UpperCase(ExpandFileName(Path))) then
+        Result := 'Could not bring the board ' + Path + ' to the front'
+    else
+        RememberBoard(Board.FileName);
+end;
+
 // Modify the EnsureDocumentFocused function to handle all document types
-// and return more detailed information
-function EnsureDocumentFocused(CommandName: String): Boolean;
+// and return more detailed information.
+// ViewTypeHint is only consulted by commands that can target more than one
+// document kind (currently take_view_screenshot); pass '' otherwise.
+function EnsureDocumentFocused(CommandName: String; ViewTypeHint: String): Boolean;
 var
     I           : Integer;
+    P           : Integer;
     Project     : IProject;
     Doc         : IDocument;
     DocFound    : Boolean;
@@ -100,10 +446,28 @@ begin
 
     // Commands that handle their own document management - skip focusing
     if (CommandName = 'project_variant_maintenance') or
-       (CommandName = 'search_library_symbol') or
        (CommandName = 'save_current_document') or
+       (CommandName = 'move_pcb_library_mechanical_layers') or
+       (CommandName = 'search_library_symbol') or
+       (CommandName = 'release_outjob') or
+       (CommandName = 'reopen_outjob') or
+       (CommandName = 'add_to_project') or
+       (CommandName = 'build_circuit') or
+       (CommandName = 'edit_schematic') or
+       (CommandName = 'get_schematic_pins') or
+       (CommandName = 'get_symbol_primitives') or
+       (CommandName = 'create_symbols_batch') or
+       (CommandName = 'get_footprint_primitives') or
+       (CommandName = 'create_footprints_batch') or
        (CommandName = 'create_pcb_footprint') or
-       (CommandName = 'take_view_screenshot') then
+       (CommandName = 'get_project_info') or
+       (CommandName = 'get_project_components') or
+       (CommandName = 'get_erc_violations') or
+       (CommandName = 'focus_document') or
+       (CommandName = 'get_eco_source') or
+       (CommandName = 'get_eco_target') or
+       (CommandName = 'list_open_documents') or
+       (CommandName = 'reload_document') then
     begin
         Result := True;
         Exit;
@@ -111,12 +475,14 @@ begin
 
     // For PCB-related commands, ensure PCB is available first
     if (CommandName = 'create_net_class')                    or
+       (CommandName = 'geometry')                            or
        (CommandName = 'get_all_component_data')              or
        (CommandName = 'get_all_components')                  or
        (CommandName = 'get_all_nets')                        or
        (CommandName = 'get_component_pins')                  or
        (CommandName = 'get_pcb_layers')                      or
        (CommandName = 'get_pcb_rules')                       or
+       (CommandName = 'run_drc')                             or
        (CommandName = 'get_selected_components_coordinates') or
        (CommandName = 'layout_duplicator')                   or
        (CommandName = 'layout_duplicator_apply')             or
@@ -125,12 +491,39 @@ begin
        (CommandName = 'move_selected_pads_and_touching_vias') or
        (CommandName = 'copy_pcb_polygon_geometry')           or
        (CommandName = 'add_tented_vias_around_keepout_contour') or
+       (CommandName = 'delete_selected_vias')                 or
+       (CommandName = 'copy_selected_fill_to_signal_layers')  or
+       (CommandName = 'layout_duplicator_repair_copied_nets')  or
+       (CommandName = 'place_components')                    or
+       (CommandName = 'check_placement')                     or
+       (CommandName = 'get_net_connections')                 or
+       (CommandName = 'export_silkscreen_data')              or
+       (CommandName = 'place_designators')                   or
+       (CommandName = 'edit_silk_graphics')                  or
+       (CommandName = 'check_silkscreen')                    or
+       (CommandName = 'auto_place_silkscreen')               or
+       (CommandName = 'set_component_position')              or
+       (CommandName = 'create_vias')                         or
        (CommandName = 'set_pcb_layer_visibility')            or
        (CommandName = 'set_pcb_layer_names_by_id')           or
        (CommandName = 'clear_pcb_route_tool_path_layer')     or
-       (CommandName = 'get_pcb_layer_stackup')               then
+       (CommandName = 'get_pcb_layer_stackup')               or
+       (CommandName = 'create_pcb_rule')                     or
+       (CommandName = 'get_board_summary')                   or
+       (CommandName = 'create_polygon_pour')                 or
+       (CommandName = 'create_cutout')                       or
+       (CommandName = 'get_component_primitives')            then
     begin
         DocumentKind := 'PCB';
+    end
+    // Screenshots can target either domain - follow the caller's view_type
+    // instead of always demanding a PCB.
+    else if (CommandName = 'take_view_screenshot') then
+    begin
+        if LowerCase(ViewTypeHint) = 'sch' then
+            DocumentKind := 'SCH'
+        else
+            DocumentKind := 'PCB';
     end
     else if (CommandName = 'create_schematic_symbol')        or
             (CommandName = 'get_library_symbol_reference')   or
@@ -141,8 +534,7 @@ begin
     else if (CommandName = 'create_pcb_footprint') or
             (CommandName = 'get_pcblib_footprints') or
             (CommandName = 'get_pcblib_footprint_primitives') or
-            (CommandName = 'set_pcb_library_pad_shapes') or
-            (CommandName = 'move_pcb_library_mechanical_layers') then
+            (CommandName = 'set_pcb_library_pad_shapes') then
     begin
         DocumentKind := 'PCBLIB';
     end
@@ -163,7 +555,7 @@ begin
     if DocumentKind = 'PCB' then
     begin
         if PCBServer <> nil then
-            LogMessage := LogMessage + '. Current PCB: ' + BoolToStr(PCBServer.GetCurrentPCBBoard <> nil, True);
+            LogMessage := LogMessage + '. Current PCB: ' + BoolToStr(GetBoardSafe(0) <> nil, True);
     end
     else if DocumentKind = 'SCH' then
     begin
@@ -181,22 +573,26 @@ begin
     
     // ShowMessage(LogMessage); // For debugging
     
+    FocusFailure := '';
     // Retrieve the current project
     Project := GetWorkspace.DM_FocusedProject;
     If Project = Nil Then
     begin
-        // No project is open
+        FocusFailure := 'No project is open';
         Exit;
     end;
 
     // Check if the correct document type is already focused
     if (DocumentKind = 'PCB') and (PCBServer <> Nil) then
     begin
-        if PCBServer.GetCurrentPCBBoard <> Nil then
+        if FocusedBoard(0) <> Nil then
         begin
+            RememberBoard(FocusedBoard(0).FileName);
             Result := True;
-            Exit;
-        end;
+        end
+        else
+            Result := FocusBoardForCommand(CommandName);
+        Exit;
     end
     else if (DocumentKind = 'SCH') and (SchServer <> Nil) then
     begin
@@ -218,7 +614,7 @@ begin
     end
     else if (DocumentKind = 'PCBLIB') and (PCBServer <> Nil) then
     begin
-        if PCBServer.GetCurrentPCBLibrary <> Nil then
+        if GetPcbLibSafe(0) <> Nil then
         begin
             Result := True;
             Exit;
@@ -234,9 +630,21 @@ begin
         end;
     end;
 
-    // Try to find and focus the required document type
-    For I := 0 to Project.DM_LogicalDocumentCount - 1 Do
+    // Try to find and focus the required document type. The focused project
+    // is searched first, then every other open project: after a script run
+    // the focused project is often the script project itself, which has no
+    // design documents at all.
+    For P := -1 to GetWorkspace.DM_ProjectCount - 1 Do
     Begin
+      if P < 0 then
+        Project := GetWorkspace.DM_FocusedProject
+      else
+      begin
+        Project := GetWorkspace.DM_Projects(P);
+        if (Project = Nil) or (Project = GetWorkspace.DM_FocusedProject) then Continue;
+      end;
+      For I := 0 to Project.DM_LogicalDocumentCount - 1 Do
+      Begin
         Doc := Project.DM_LogicalDocuments(I);
         If Doc.DM_DocumentKind = DocumentKind Then
         Begin
@@ -249,7 +657,7 @@ begin
             // Verify that the document is now focused
             if DocumentKind = 'PCB' then
             begin
-                if PCBServer.GetCurrentPCBBoard <> Nil then
+                if GetBoardSafe(0) <> Nil then
                 begin
                     Result := True;
                     // ShowMessage('Successfully focused PCB document');
@@ -278,7 +686,7 @@ begin
             end
             else if DocumentKind = 'PCBLIB' then
             begin
-                if PCBServer.GetCurrentPCBLibrary <> Nil then
+                if GetPcbLibSafe(0) <> Nil then
                 begin
                     Result := True;
                     Exit;
@@ -294,14 +702,18 @@ begin
                 end;
             end;
         End;
+      End;
     End;
 
     // TODO: Do I want to iterate through all workspace projects to find valid document if it is not current document?
     // Could use IWorkspace.DM_ProjectCount and for loop
 
-    // No matching document found or couldn't be focused. Keep the bridge non-modal:
-    // callers receive Result=False and should report errors through JSON instead of
-    // blocking Altium with a message box.
+    // No matching document found or couldn't be focused
+    if not DocFound then
+        FocusFailure := 'No ' + DocumentKind + ' document found in any open project'
+    else
+        FocusFailure := 'Found a ' + DocumentKind + ' document but could not focus it';
+    LogScriptError('EnsureDocumentFocused(' + CommandName + '): ' + FocusFailure);
     
     Result := False;
 end;
@@ -314,7 +726,6 @@ begin
     ResetParameters;
     AddStringParameter('ObjectKind', 'Document');
     AddStringParameter('SaveMode', 'Standard');
-    RunProcess('WorkspaceManager:SaveObject');
     Client.SendMessage('WorkspaceManager:SaveObject', 'ObjectKind=Document|SaveMode=Standard', 255, Client.CurrentView);
 
     ResultProps := TStringList.Create;
@@ -334,8 +745,67 @@ begin
     end;
 end;
 
-// Add a screenshot function that supports both PCB and SCH views
-function TakeViewScreenshot(ViewType: String): String;
+// Zoom the current PCB view to the union bounding box of the given
+// components (plus a margin) so a following screenshot shows them clearly.
+// Returns the number of components found.
+function ZoomToComponents(DesignatorsList: TStringList): Integer;
+var
+    Board      : IPCB_Board;
+    Component  : IPCB_Component;
+    Rect       : TCoordRect;
+    i          : Integer;
+    HaveBounds : Boolean;
+    MinX, MinY, MaxX, MaxY : TCoord;
+    Margin     : TCoord;
+begin
+    Result := 0;
+    HaveBounds := False;
+
+    Board := GetBoardSafe(0);
+    if (Board = nil) then Exit;
+
+    for i := 0 to DesignatorsList.Count - 1 do
+    begin
+        Component := Board.GetPcbComponentByRefDes(Trim(DesignatorsList[i]));
+        if (Component <> nil) then
+        begin
+            Rect := Component.BoundingRectangleNoNameComment;
+            if not HaveBounds then
+            begin
+                MinX := Rect.Left;
+                MaxX := Rect.Right;
+                MinY := Rect.Bottom;
+                MaxY := Rect.Top;
+                HaveBounds := True;
+            end
+            else
+            begin
+                if Rect.Left < MinX then MinX := Rect.Left;
+                if Rect.Right > MaxX then MaxX := Rect.Right;
+                if Rect.Bottom < MinY then MinY := Rect.Bottom;
+                if Rect.Top > MaxY then MaxY := Rect.Top;
+            end;
+            Result := Result + 1;
+        end;
+    end;
+
+    if HaveBounds then
+    begin
+        // 10% margin on the larger span, at least 100 mils
+        Margin := (MaxX - MinX);
+        if (MaxY - MinY) > Margin then Margin := (MaxY - MinY);
+        Margin := Margin div 10;
+        if Margin < MilsToCoord(100) then Margin := MilsToCoord(100);
+
+        Board.GraphicalView_ZoomOnRect(MinX - Margin, MinY - Margin, MaxX + Margin, MaxY + Margin);
+        Board.GraphicalView_ZoomRedraw;
+    end;
+end;
+
+// Add a screenshot function that supports both PCB and SCH views.
+// If DesignatorsList is non-empty (PCB view only), the view is zoomed to
+// those components before the server captures the window.
+function TakeViewScreenshot(ViewType: String; DesignatorsList: TStringList): String;
 var
     Board          : IPCB_Board;
     SchDoc         : ISch_Document;
@@ -344,14 +814,17 @@ var
     ClassName      : String;
     DocType        : String;
     WindowFound    : Boolean;
-    
+    ZoomedCount    : Integer;
+    FocusedKind    : String;
+    FocusedName    : String;
+
     // For screenshot thread
     ThreadStarted  : Boolean;
     ScreenshotResult : String;
 begin
     // Default result
     Result := '{"success": false, "error": "Failed to initialize screenshot capture"}';
-    
+
     // Determine what type of document we need to focus
     if LowerCase(ViewType) = 'pcb' then
     begin
@@ -368,18 +841,35 @@ begin
         Result := '{"success": false, "error": "Invalid view type: ' + ViewType + '. Must be ''pcb'' or ''sch''"}';
         Exit;
     end;
-    
-    // Build the command to call the external screenshot utility
-    // This part depends on how your C# server calls Altium for screenshots
-    
+
+    // Optionally zoom to the requested components before capture
+    ZoomedCount := 0;
+    if (DocType = 'PCB') and (DesignatorsList <> nil) and (DesignatorsList.Count > 0) then
+        ZoomedCount := ZoomToComponents(DesignatorsList);
+
+    // Report what is ACTUALLY focused now that EnsureDocumentFocused has run.
+    // The server compares this against the requested view: if no document of
+    // the requested kind is open, the focus stays where it was and the
+    // capture would otherwise silently show the wrong editor.
+    FocusedKind := '';
+    FocusedName := '';
+    if (Client.CurrentView <> nil) and (Client.CurrentView.OwnerDocument <> nil) then
+    begin
+        FocusedKind := Client.CurrentView.OwnerDocument.Kind;
+        FocusedName := ExtractFileName(Client.CurrentView.OwnerDocument.FileName);
+    end;
+
     // Create result JSON
     ResultProps := TStringList.Create;
     try
         // Add successful result properties
         AddJSONBoolean(ResultProps, 'success', True);
         AddJSONProperty(ResultProps, 'view_type', ViewType);
+        AddJSONProperty(ResultProps, 'focused_kind', FocusedKind);
+        AddJSONProperty(ResultProps, 'focused_document', FocusedName);
         AddJSONProperty(ResultProps, 'class_filter', ClassName);
         AddJSONBoolean(ResultProps, 'window_found', WindowFound);
+        AddJSONInteger(ResultProps, 'zoomed_component_count', ZoomedCount);
         
         // Add signal to the server that it can now capture the screenshot
         AddJSONBoolean(ResultProps, 'ready_for_capture', True);
@@ -397,8 +887,9 @@ begin
     end;
 end;
 
-// Get all available output job containers from the first open OutJob
-function GetOutputJobContainers(ROOT_DIR: String): String;
+// Get all available output job containers from RequestedPath, or from the
+// first open OutJob when RequestedPath is empty
+function GetOutputJobContainers(RequestedPath: String, ROOT_DIR: String): String;
 var
     OutJobPath: String;
     IniFile: TIniFile;
@@ -410,16 +901,15 @@ var
     ContainerProps: TStringList;
     OutputLines: TStringList;
 begin
-    // Get the path of the first open OutJob
-    OutJobPath := GetOpenOutputJob();
+    OutJobPath := ResolveOutJobPath(RequestedPath);
 
-    // Exit if no open OutJob was found
+    // Exit if no OutJob was found
     if OutJobPath = '' then
     begin
         ResultProps := TStringList.Create;
         try
             AddJSONBoolean(ResultProps, 'success', False);
-            AddJSONProperty(ResultProps, 'error', 'No open OutJob document found');
+            AddJSONProperty(ResultProps, 'error', OutJobNotFoundError(RequestedPath));
             Result := BuildJSONObject(ResultProps);
         finally
             ResultProps.Free;
@@ -509,8 +999,119 @@ begin
     end;
 end;
 
-// Run selected output job containers with simplified logic
-function RunOutputJobs(ContainerNames: TStringList, ROOT_DIR: String): String;
+// The open project that holds OutJobPath, or Nil when none does. A Publish
+// container prints [Project Physical Documents], so it needs this project.
+function OutJobProject(OutJobPath: String): IProject;
+var
+    P, I: Integer;
+    Project: IProject;
+begin
+    Result := Nil;
+    for P := 0 to GetWorkspace.DM_ProjectCount - 1 do
+    begin
+        Project := GetWorkspace.DM_Projects(P);
+        if Project = Nil then Continue;
+        for I := 0 to Project.DM_LogicalDocumentCount - 1 do
+        begin
+            if SameText(NormalizePath(Project.DM_LogicalDocuments(I).DM_FullPath),
+                        NormalizePath(OutJobPath)) then
+            begin
+                Result := Project;
+                Exit;
+            end;
+        end;
+    end;
+end;
+
+// Full path of the PDF that Publish container J writes, from its keys in
+// [PublishSettings], or '' when that is not known in advance. As Altium
+// 26.10 publishes from a script:
+// - Folder: a release-managed container (ReleaseManagedJ other than 0)
+//   writes to the project's output folder and ignores OutputBasePathJ.
+//   Otherwise OutputBasePathJ is the folder, relative to the project folder.
+// - Name: PublishMethodJ 0 writes one file, OutputFileNameJ. PublishMethodJ
+//   1 writes every output to OutputFileNameMultiJ, unless
+//   UseOutputNameForMultiJ names each file after its output. A name that
+//   starts with '=' is an expression Altium evaluates.
+// OutputFilePathJ is only a cached full path from the last publish. It goes
+// stale when the project is copied or the name is changed, so only its file
+// name is used, and only when OutputFileNameJ is empty.
+// Without the project the OutJob's folder stands in for the project folder;
+// the file is then never written and the caller reports why.
+function PublishTargetFile(IniFile: TIniFile; J: Integer; Project: IProject;
+                           OutJobPath: String; RelativePath: String): String;
+var
+    FileName, BaseDir, ProjectDir, Method: String;
+begin
+    Result := '';
+    Method := IniFile.ReadString('PublishSettings', 'PublishMethod' + IntToStr(J), '0');
+    if Method = '0' then
+    begin
+        FileName := IniFile.ReadString('PublishSettings', 'OutputFileName' + IntToStr(J), '');
+        if FileName = '' then
+            FileName := ExtractFileName(StringReplace(
+                IniFile.ReadString('PublishSettings', 'OutputFilePath' + IntToStr(J), ''),
+                '/', '\', REPLACEALL));
+    end
+    else if (Method = '1') and
+            (IniFile.ReadString('PublishSettings', 'UseOutputNameForMulti' + IntToStr(J), '0') = '0') then
+        FileName := IniFile.ReadString('PublishSettings', 'OutputFileNameMulti' + IntToStr(J), '')
+    else
+        Exit;
+    if (FileName = '') or (Copy(FileName, 1, 1) = '=') then Exit;
+    if ExtractFileExt(FileName) = '' then
+        FileName := FileName + '.PDF';
+
+    if Project <> Nil then
+        ProjectDir := ExtractFilePath(Project.DM_ProjectFullPath)
+    else
+        ProjectDir := ExtractFilePath(OutJobPath);
+
+    if IniFile.ReadString('PublishSettings', 'ReleaseManaged' + IntToStr(J), '1') <> '0' then
+    begin
+        BaseDir := '';
+        if Project <> Nil then
+            BaseDir := Project.DM_GetOutputPath;
+        if not IsAbsolutePath(BaseDir) then
+            BaseDir := ProjectDir + BaseDir;
+    end
+    else if RelativePath = '' then
+        Exit
+    else if IsAbsolutePath(RelativePath) then
+        BaseDir := RelativePath
+    else
+        BaseDir := ProjectDir + RelativePath;
+    if Copy(BaseDir, Length(BaseDir), 1) <> '\' then
+        BaseDir := BaseDir + '\';
+    Result := BaseDir + FileName;
+end;
+
+// True once TargetFile exists with a time stamp at or after StartTime,
+// polling for up to TimeoutSec. FileAge has 2 s resolution, hence the margin.
+// FileAge is -1 while the file is missing (e.g. mid-replace); that is not a
+// valid file date, so it is checked before conversion.
+function WaitForFileWritten(TargetFile: String; StartTime: TDateTime; TimeoutSec: Integer): Boolean;
+var
+    Deadline: TDateTime;
+    Age: Integer;
+begin
+    Result := False;
+    Deadline := Now + TimeoutSec / 86400;
+    repeat
+        Age := FileAge(TargetFile);
+        if Age <> -1 then
+            if FileDateToDateTime(Age) >= StartTime - 2 / 86400 then
+            begin
+                Result := True;
+                Exit;
+            end;
+        Sleep(250);
+    until Now > Deadline;
+end;
+
+// Run selected output job containers with simplified logic, from
+// RequestedPath or, when that is empty, the first open OutJob
+function RunOutputJobs(ContainerNames: TStringList, RequestedPath: String, ROOT_DIR: String): String;
 var
     OutJobPath: String;
     IniFile: TIniFile;
@@ -525,17 +1126,19 @@ var
     SuccessCount: Integer;
     OutJobDoc: IServerDocument;
     OutputLines: TStringList;
+    Project: IProject;
+    TargetFile: String;
+    StartTime: TDateTime;
 begin
-    // Get the path of the first open OutJob
-    OutJobPath := GetOpenOutputJob();
+    OutJobPath := ResolveOutJobPath(RequestedPath);
 
-    // Exit if no open OutJob was found
+    // Exit if no OutJob was found
     if OutJobPath = '' then
     begin
         ResultProps := TStringList.Create;
         try
             AddJSONBoolean(ResultProps, 'success', False);
-            AddJSONProperty(ResultProps, 'error', 'No open OutJob document found');
+            AddJSONProperty(ResultProps, 'error', OutJobNotFoundError(RequestedPath));
             Result := BuildJSONObject(ResultProps);
         finally
             ResultProps.Free;
@@ -552,17 +1155,12 @@ begin
         // Add the OutJob path to the result
         AddJSONProperty(ResultProps, 'outjob_path', OutJobPath);
 
-        // Open the OutJob document
+        // Open the OutJob document. Checked for Nil before any use: a
+        // caller-supplied outjob_path may name a file Altium cannot open.
         if not(Client.IsDocumentOpen(OutJobPath)) then
-        begin
-            OutJobDoc := Client.OpenDocument('OUTPUTJOB', OutJobPath);
-            OutJobDoc.Focus();
-        end
+            OutJobDoc := Client.OpenDocument('OUTPUTJOB', OutJobPath)
         else
-        begin
             OutJobDoc := Client.GetDocumentByPath(OutJobPath);
-            OutJobDoc.Focus();
-        end;
 
         // Exit if we can't open the OutJob document
         if OutJobDoc = Nil then
@@ -608,8 +1206,13 @@ begin
                                 ContainerAction := IniFile.ReadString(S, 'OutputMedium' + IntToStr(J) + '_Type', DEFAULT);
                                 RelativePath := IniFile.ReadString('PublishSettings', 'OutputBasePath' + IntToStr(J), '');
 
-                                // Ensure document is focused
-                                OutJobDoc.Focus();
+                                // Show the OutJob, not just focus it: with
+                                // only Focus() the Print process wrote no
+                                // file. Done for every container, since a
+                                // previous one may have changed the view.
+                                // Before ResetParameters, so showing the
+                                // document cannot touch the parameters.
+                                Client.ShowDocument(OutJobDoc);
 
                                 // Run the container based on its type
                                 if ContainerAction = 'GeneratedFiles' then
@@ -622,24 +1225,62 @@ begin
                                     AddStringParameter('OutputBasePath', RelativePath);
                                     RunProcess('WorkspaceManager:GenerateReport');
 
-                                    // Assume success
+                                    // The generated file names are not known
+                                    // here, so the output is not checked.
+                                    // output_verified tells the caller.
                                     AddJSONBoolean(ContainerResultProps, 'success', True);
+                                    AddJSONBoolean(ContainerResultProps, 'output_verified', False);
                                     SuccessCount := SuccessCount + 1;
                                 end
                                 else if ContainerAction = 'Publish' then
                                 begin
-                                    // Run PublishToPDF with simpler parameters
+                                    // Only report success once the file the
+                                    // OutJob names has been written.
+                                    // An empty OutputBasePath is not passed.
+                                    Project := OutJobProject(OutJobPath);
+                                    TargetFile := PublishTargetFile(IniFile, J, Project, OutJobPath, RelativePath);
+
                                     ResetParameters;
                                     AddStringParameter('Action', 'PublishToPDF');
                                     AddStringParameter('OutputMedium', ContainerName);
                                     AddStringParameter('ObjectKind', 'OutputBatch');
-                                    AddStringParameter('OutputBasePath', RelativePath);
+                                    // No OutputFilePath: with OutputBatch Altium
+                                    // treats it as a folder and appends the
+                                    // OutJob's file name. The OutJob names the file.
+                                    if RelativePath <> '' then
+                                        AddStringParameter('OutputBasePath', RelativePath);
                                     AddStringParameter('DisableDialog', 'True');
+                                    StartTime := Now;
                                     RunProcess('WorkspaceManager:Print');
 
-                                    // Assume success
-                                    AddJSONBoolean(ContainerResultProps, 'success', True);
-                                    SuccessCount := SuccessCount + 1;
+                                    AddJSONProperty(ContainerResultProps, 'output_file', TargetFile);
+                                    if TargetFile = '' then
+                                    begin
+                                        // Altium decides the name (a default,
+                                        // an expression or the output names)
+                                        // or the folder, so it cannot be checked.
+                                        AddJSONBoolean(ContainerResultProps, 'success', True);
+                                        AddJSONBoolean(ContainerResultProps, 'output_verified', False);
+                                        AddJSONProperty(ContainerResultProps, 'note',
+                                            'Altium decides the PDF name or folder for this container, so the PDF was not checked');
+                                        SuccessCount := SuccessCount + 1;
+                                    end
+                                    else if WaitForFileWritten(TargetFile, StartTime, 15) then
+                                    begin
+                                        AddJSONBoolean(ContainerResultProps, 'success', True);
+                                        AddJSONBoolean(ContainerResultProps, 'output_verified', True);
+                                        SuccessCount := SuccessCount + 1;
+                                    end
+                                    else
+                                    begin
+                                        AddJSONBoolean(ContainerResultProps, 'success', False);
+                                        if Project = Nil then
+                                            AddJSONProperty(ContainerResultProps, 'error',
+                                                'No PDF written. The OutJob''s project is not open in Altium, so there are no project documents to print.')
+                                        else
+                                            AddJSONProperty(ContainerResultProps, 'error',
+                                                'No PDF written to the output file within 15 s');
+                                    end;
                                 end
                                 else
                                 begin
@@ -736,5 +1377,795 @@ begin
                 Exit;
             end;
         end;
+    end;
+end;
+
+// A file path in one canonical spelling for comparisons: lower case,
+// backslashes, and doubled separators collapsed (a leading \\ of a UNC path
+// is kept)
+function NormalizedPath(Path: String): String;
+var
+    Lead : String;
+begin
+    Result := LowerCase(StringReplace(Trim(Path), '/', '\', REPLACEALL));
+    Lead := '';
+    if (Copy(Result, 1, 2) = '\\') then
+    begin
+        Lead := '\\';
+        Result := Copy(Result, 3, Length(Result));
+    end;
+    while (Pos('\\', Result) > 0) do
+        Result := StringReplace(Result, '\\', '\', REPLACEALL);
+    Result := Lead + Result;
+end;
+
+// The open document for a file, or nil. Paths are compared case-
+// insensitively with separators normalised: Client.IsDocumentOpen misses a
+// path spelled differently, and the file would be opened a second time.
+function FindOpenDocument(Path: String): IServerDocument;
+var
+    i, j   : Integer;
+    Module : IServerModule;
+    Want   : String;
+begin
+    Result := nil;
+    Want := NormalizedPath(Path);
+    for i := 0 to Client.Count - 1 do
+    begin
+        Module := Client.ServerModule[i];
+        if (Module <> nil) then
+            for j := 0 to Module.DocumentCount - 1 do
+                if (NormalizedPath(Module.Documents[j].FileName) = Want) then
+                begin
+                    Result := Module.Documents[j];
+                    Exit;
+                end;
+    end;
+end;
+
+// Focus a library document ('SchLib' or 'PcbLib'), opening it only when it
+// is not open yet: re-opening an open document reloads it from disk and
+// silently discards unsaved changes. Returns nil when it cannot be opened.
+function OpenLibraryDocument(Kind: String; Path: String): IServerDocument;
+begin
+    Result := FindOpenDocument(Path);
+    if (Result = nil) then
+        Result := Client.OpenDocument(Kind, Path);
+    if (Result <> nil) then
+    begin
+        Client.ShowDocument(Result);
+        Sleep(500);
+    end;
+end;
+
+// Whether an open document has unsaved changes. Read through BoolToStr:
+// in the bridge, IServerDocument.Modified read directly in a condition or an
+// assignment is always False, while passed as an argument it is right (a
+// sheet with a real unsaved edit read False one way and True the other).
+function DocumentModified(Doc: IServerDocument): Boolean;
+begin
+    Result := False;
+    if Doc = nil then Exit;
+    Result := BoolToStr(Doc.Modified, True) = 'True';
+end;
+
+// Mark an open document as changed, so its tab shows it unsaved and Altium
+// asks before closing it. Objects a script adds to a library through
+// PreProcess/PostProcess do not reliably set the flag (a PCB library never
+// does); the user reviews and saves.
+procedure MarkDocumentModified(Path: String);
+var
+    Doc : IServerDocument;
+begin
+    Doc := FindOpenDocument(Path);
+    if (Doc <> nil) then
+        Doc.Modified := True;
+end;
+
+// OutJob and project file edits (create_outjob, edit_outjob). Below
+// DocumentModified, which they call.
+
+// Before the server edits an OutJob file: close it in Altium if it is open,
+// so Altium does not keep (and later save) the old one. Refused when it has
+// unsaved changes there, which the edit would lose.
+function ReleaseOutJob(Path: String): String;
+var
+    Doc : IServerDocument;
+begin
+    // FindOpenDocument also finds it under another spelling of the path
+    Doc := FindOpenDocument(Path);
+    if Doc = nil then
+    begin
+        Result := '{"success": true, "was_open": false}';
+        Exit;
+    end;
+    if DocumentModified(Doc) then
+    begin
+        Result := 'ERROR: The OutJob has unsaved changes in Altium; save or close it there first';
+        Exit;
+    end;
+    // Altium's own spelling of the path, to open it again under that name
+    Result := '{"success": true, "was_open": true, "name": "' + JSONEscapeString(Doc.FileName) + '"}';
+    Client.CloseDocument(Doc);
+end;
+
+// After the edit: open the OutJob again if it was open before, with its tab
+// shown (OpenDocument alone loads it without a tab)
+function ReopenOutJob(Path: String): String;
+var
+    Doc : IServerDocument;
+begin
+    Doc := Client.OpenDocument('OUTPUTJOB', Path);
+    if Doc = nil then
+        Result := 'ERROR: Altium could not open the edited OutJob: ' + Path
+    else
+    begin
+        Client.ShowDocument(Doc);
+        Result := '{"success": true}';
+    end;
+end;
+
+// Add DocPath to the project ProjectPath (opened if needed) and save the
+// project. Refused when the project has unsaved changes in Altium, which the
+// save would write too.
+function AddDocumentToProject(ProjectPath: String; DocPath: String): String;
+var
+    Project : IProject;
+    ProjDoc : IServerDocument;
+    I       : Integer;
+begin
+    Project := GetWorkspace.DM_OpenProject(ProjectPath, True);
+    if Project = nil then
+    begin
+        Result := 'ERROR: Altium could not open the project ' + ProjectPath;
+        Exit;
+    end;
+    for I := 0 to Project.DM_LogicalDocumentCount - 1 do
+        if SameText(NormalizePath(Project.DM_LogicalDocuments(I).DM_FullPath), NormalizePath(DocPath)) then
+        begin
+            Result := '{"success": true, "added": false, "project": "' + JSONEscapeString(Project.DM_ProjectFullPath) + '"}';
+            Exit;
+        end;
+    ProjDoc := Client.GetDocumentByPath(Project.DM_ProjectFullPath);
+    // DocumentModified: Modified read directly in a condition is always
+    // False in the bridge, and the save below would write those changes
+    if DocumentModified(ProjDoc) then
+    begin
+        Result := 'ERROR: The project has unsaved changes in Altium; save it first, or add the OutJob there';
+        Exit;
+    end;
+    Project.DM_AddSourceDocument(DocPath);
+    ProjDoc := Client.GetDocumentByPath(Project.DM_ProjectFullPath);
+    if ProjDoc <> nil then ProjDoc.DoFileSave('');
+    Result := '{"success": true, "added": true, "project": "' + JSONEscapeString(Project.DM_ProjectFullPath) + '"}';
+end;
+
+// ---------------------------------------------------------------------------
+// Project-level read-only queries (get_project_info, get_erc_violations).
+// Both work on the focused project and never save or modify documents.
+// ---------------------------------------------------------------------------
+
+// Error level of an IViolation as text (TErrorLevel).
+function ErrorLevelName(Level: Integer): String;
+begin
+    case Level of
+        0: Result := 'no_report';
+        1: Result := 'warning';
+        2: Result := 'error';
+        3: Result := 'fatal';
+    else
+        Result := 'level_' + IntToStr(Level);
+    end;
+end;
+
+// Kind of an IComponentVariation as text (TVariationKind).
+function VariationKindName(Kind: Integer): String;
+begin
+    case Kind of
+        0: Result := 'none';
+        1: Result := 'not_fitted';
+        2: Result := 'alternate';
+    else
+        Result := 'kind_' + IntToStr(Kind);
+    end;
+end;
+
+// Focused project: parameters, documents (with unsaved-changes flag) and variants
+function GetProjectInfo(ROOT_DIR: String): String;
+var
+    Project      : IProject;
+    Doc          : IDocument;
+    ServerDoc    : IServerDocument;
+    ProjVariant  : IProjectVariant;
+    Variation    : IComponentVariation;
+    I, J         : Integer;
+    SchCount     : Integer;
+    ModifiedCount: Integer;
+    ResultProps  : TStringList;
+    ParamsArray  : TStringList;
+    DocsArray    : TStringList;
+    VariantsArray: TStringList;
+    VariationsArr: TStringList;
+    ItemProps    : TStringList;
+    OutputLines  : TStringList;
+    OpenState    : String;
+begin
+    Project := GetWorkspace.DM_FocusedProject;
+    if Project = Nil then
+    begin
+        Result := 'ERROR: No focused project';
+        Exit;
+    end;
+
+    ResultProps := TStringList.Create;
+    ParamsArray := TStringList.Create;
+    DocsArray := TStringList.Create;
+    VariantsArray := TStringList.Create;
+    try
+        AddJSONProperty(ResultProps, 'project_path', Project.DM_ProjectFullPath);
+
+        for I := 0 to Project.DM_ParameterCount - 1 do
+        begin
+            ItemProps := TStringList.Create;
+            try
+                AddJSONProperty(ItemProps, 'name', Project.DM_Parameters(I).DM_Name);
+                AddJSONProperty(ItemProps, 'value', Project.DM_Parameters(I).DM_Value);
+                ParamsArray.Add(BuildJSONObject(ItemProps, 1));
+            finally
+                ItemProps.Free;
+            end;
+        end;
+
+        SchCount := 0;
+        ModifiedCount := 0;
+        for I := 0 to Project.DM_LogicalDocumentCount - 1 do
+        begin
+            Doc := Project.DM_LogicalDocuments(I);
+            if Doc.DM_DocumentKind = 'SCH' then Inc(SchCount);
+            ServerDoc := Client.GetDocumentByPath(Doc.DM_FullPath);
+            if ServerDoc = Nil then
+                OpenState := 'closed'
+            else if DocumentModified(ServerDoc) then
+            begin
+                OpenState := 'modified';
+                Inc(ModifiedCount);
+            end
+            else
+                OpenState := 'open';
+            ItemProps := TStringList.Create;
+            try
+                AddJSONProperty(ItemProps, 'path', Doc.DM_FullPath);
+                AddJSONProperty(ItemProps, 'kind', Doc.DM_DocumentKind);
+                AddJSONProperty(ItemProps, 'state', OpenState);
+                DocsArray.Add(BuildJSONObject(ItemProps, 1));
+            finally
+                ItemProps.Free;
+            end;
+        end;
+
+        for I := 0 to Project.DM_ProjectVariantCount - 1 do
+        begin
+            ProjVariant := Project.DM_ProjectVariants(I);
+            VariationsArr := TStringList.Create;
+            ItemProps := TStringList.Create;
+            try
+                for J := 0 to ProjVariant.DM_VariationCount - 1 do
+                begin
+                    Variation := ProjVariant.DM_Variations(J);
+                    VariationsArr.Add('{"designator": "' + JSONEscapeString(Variation.DM_PhysicalDesignator) +
+                        '", "kind": "' + VariationKindName(Variation.DM_VariationKind) + '"}');
+                end;
+                AddJSONProperty(ItemProps, 'name', ProjVariant.DM_Description);
+                ItemProps.Add(BuildJSONArray(VariationsArr, 'variations', 1));
+                VariantsArray.Add(BuildJSONObject(ItemProps, 1));
+            finally
+                ItemProps.Free;
+                VariationsArr.Free;
+            end;
+        end;
+
+        ResultProps.Add(BuildJSONArray(ParamsArray, 'parameters'));
+        AddJSONInteger(ResultProps, 'schematic_sheet_count', SchCount);
+        AddJSONInteger(ResultProps, 'modified_document_count', ModifiedCount);
+        ResultProps.Add(BuildJSONArray(DocsArray, 'documents'));
+        ResultProps.Add(BuildJSONArray(VariantsArray, 'variants'));
+
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := WriteJSONToFile(OutputLines, ROOT_DIR + 'temp_project_info.json');
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        ResultProps.Free;
+        ParamsArray.Free;
+        DocsArray.Free;
+        VariantsArray.Free;
+    end;
+end;
+
+// Compile the focused project (in memory, nothing is saved) and list the
+// compiler/ERC violations. Violations live on the project object; the
+// per-document DM_ViolationCount does not exist in recent Altium versions.
+// The project a compile command works on: ProjectPath when given (found
+// among the open projects, else opened), otherwise the focused project.
+// 'Free Documents' is not a project: compiling it gave results for nothing
+// the caller meant, so it is refused and the caller asked for a path.
+function TargetProject(ProjectPath: String; var Err: String): IProject;
+var
+    P : Integer;
+    Project : IProject;
+begin
+    Result := nil;
+    Err := '';
+    if ProjectPath <> '' then
+    begin
+        for P := 0 to GetWorkspace.DM_ProjectCount - 1 do
+        begin
+            Project := GetWorkspace.DM_Projects(P);
+            if (Project <> nil) and SameText(NormalizePath(Project.DM_ProjectFullPath), NormalizePath(ProjectPath)) then
+            begin
+                Result := Project;
+                Exit;
+            end;
+        end;
+        if not FileExists(ProjectPath) then
+        begin
+            Err := 'Project not found: ' + ProjectPath;
+            Exit;
+        end;
+        Result := GetWorkspace.DM_OpenProject(ProjectPath, True);
+        if Result = nil then Err := 'Altium could not open the project ' + ProjectPath;
+        Exit;
+    end;
+    Result := GetWorkspace.DM_FocusedProject;
+    // Free Documents' full path is just 'Free Documents': a project in a
+    // folder of that name is still a project
+    if (Result = nil) or SameText(Result.DM_ProjectFullPath, 'Free Documents') then
+    begin
+        Result := nil;
+        Err := 'No project is focused (Free Documents has focus); give project_path';
+    end;
+end;
+
+// What a compile of Project reads: a sheet with unsaved changes in Altium is
+// compiled from Altium's copy, not the file; one listed but missing on disk
+// is left out. Both are added to Props, so a result says what it rests on.
+procedure AddProjectSheetStatus(Project: IProject; Props: TStringList);
+var
+    I : Integer;
+    Doc : IDocument;
+    SheetPath : String;
+    SheetDoc : IServerDocument;
+    Unsaved, Missing : TStringList;
+begin
+    Unsaved := TStringList.Create;
+    Missing := TStringList.Create;
+    try
+        for I := 0 to Project.DM_LogicalDocumentCount - 1 do
+        begin
+            Doc := Project.DM_LogicalDocuments(I);
+            if Doc.DM_DocumentKind = 'SCH' then
+            begin
+                SheetPath := Doc.DM_FullPath;
+                if not FileExists(SheetPath) then
+                    Missing.Add('"' + JSONEscapeString(SheetPath) + '"')
+                else
+                begin
+                    SheetDoc := Client.GetDocumentByPath(SheetPath);
+                    if DocumentModified(SheetDoc) then
+                        Unsaved.Add('"' + JSONEscapeString(SheetPath) + '"');
+                end;
+            end;
+        end;
+        if Unsaved.Count > 0 then Props.Add(BuildJSONArray(Unsaved, 'unsaved_in_altium'))
+        else Props.Add('"unsaved_in_altium": []');
+        if Missing.Count > 0 then Props.Add(BuildJSONArray(Missing, 'missing_on_disk'))
+        else Props.Add('"missing_on_disk": []');
+    finally
+        Unsaved.Free;
+        Missing.Free;
+    end;
+end;
+
+function GetERCViolations(ROOT_DIR: String; DoCompile: Boolean; ProjectPath: String): String;
+var
+    Project     : IProject;
+    Violation   : IViolation;
+    I, Level    : Integer;
+    NFatal, NError, NWarning : Integer;
+    ResultProps : TStringList;
+    ViolArray   : TStringList;
+    ItemProps   : TStringList;
+    OutputLines : TStringList;
+    Err         : String;
+begin
+    Project := TargetProject(ProjectPath, Err);
+    if Project = Nil then
+    begin
+        Result := 'ERROR: ' + Err;
+        Exit;
+    end;
+
+    if DoCompile then
+        Project.DM_Compile;
+
+    NFatal := 0; NError := 0; NWarning := 0;
+
+    ResultProps := TStringList.Create;
+    ViolArray := TStringList.Create;
+    try
+        for I := 0 to Project.DM_ViolationCount - 1 do
+        begin
+            Violation := Project.DM_Violations(I);
+            Level := Violation.DM_ErrorLevel;
+            if Level = 3 then Inc(NFatal);
+            if Level = 2 then Inc(NError);
+            if Level = 1 then Inc(NWarning);
+            ItemProps := TStringList.Create;
+            try
+                AddJSONProperty(ItemProps, 'level', ErrorLevelName(Level));
+                AddJSONProperty(ItemProps, 'type', Violation.DM_DescriptorString);
+                AddJSONProperty(ItemProps, 'detail', Violation.DM_DetailString);
+                ViolArray.Add(BuildJSONObject(ItemProps, 1));
+            finally
+                ItemProps.Free;
+            end;
+        end;
+
+        AddJSONProperty(ResultProps, 'project_path', Project.DM_ProjectFullPath);
+        AddJSONBoolean(ResultProps, 'compiled', DoCompile);
+        AddProjectSheetStatus(Project, ResultProps);
+        AddJSONInteger(ResultProps, 'total', ViolArray.Count);
+        AddJSONInteger(ResultProps, 'fatal', NFatal);
+        AddJSONInteger(ResultProps, 'errors', NError);
+        AddJSONInteger(ResultProps, 'warnings', NWarning);
+        ResultProps.Add(BuildJSONArray(ViolArray, 'violations'));
+
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := WriteJSONToFile(OutputLines, ROOT_DIR + 'temp_erc.json');
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        ResultProps.Free;
+        ViolArray.Free;
+    end;
+end;
+
+// Every component of the compiled (flattened) project with its comment,
+// footprint, library reference, sheet and parameters. Compiles first.
+function GetProjectComponents(ROOT_DIR: String; IncludeParameters: Boolean; ProjectPath: String): String;
+var
+    Project     : IProject;
+    Flat        : IDocument;
+    Comp        : IComponent;
+    I, J        : Integer;
+    CompArray   : TStringList;
+    CompProps   : TStringList;
+    ParamArray  : TStringList;
+    ResultProps : TStringList;
+    OutputLines : TStringList;
+    Err         : String;
+begin
+    Project := TargetProject(ProjectPath, Err);
+    if Project = Nil then
+    begin
+        Result := 'ERROR: ' + Err;
+        Exit;
+    end;
+    Project.DM_Compile;
+    Flat := Project.DM_DocumentFlattened;
+    if Flat = Nil then
+    begin
+        Result := 'ERROR: Project could not be compiled (no flattened document)';
+        Exit;
+    end;
+
+    CompArray := TStringList.Create;
+    ResultProps := TStringList.Create;
+    try
+        for I := 0 to Flat.DM_ComponentCount - 1 do
+        begin
+            Comp := Flat.DM_Components(I);
+            CompProps := TStringList.Create;
+            ParamArray := TStringList.Create;
+            try
+                if IncludeParameters then
+                    for J := 0 to Comp.DM_ParameterCount - 1 do
+                        ParamArray.Add('{"name": "' + JSONEscapeString(Comp.DM_Parameters(J).DM_Name) +
+                            '", "value": "' + JSONEscapeString(Comp.DM_Parameters(J).DM_Value) + '"}');
+                AddJSONProperty(CompProps, 'designator', Comp.DM_PhysicalDesignator);
+                AddJSONProperty(CompProps, 'comment', Comp.DM_Comment);
+                AddJSONProperty(CompProps, 'footprint', Comp.DM_Footprint);
+                AddJSONProperty(CompProps, 'library_reference', Comp.DM_LibraryReference);
+                AddJSONProperty(CompProps, 'sheet', ExtractFileName(Comp.DM_OwnerDocumentFullPath));
+                if IncludeParameters then
+                    CompProps.Add(BuildJSONArray(ParamArray, 'parameters', 1));
+                CompArray.Add(BuildJSONObject(CompProps, 1));
+            finally
+                CompProps.Free;
+                ParamArray.Free;
+            end;
+        end;
+
+        AddJSONProperty(ResultProps, 'project_path', Project.DM_ProjectFullPath);
+        AddJSONInteger(ResultProps, 'component_count', CompArray.Count);
+        ResultProps.Add(BuildJSONArray(CompArray, 'components'));
+        OutputLines := TStringList.Create;
+        try
+            OutputLines.Text := BuildJSONObject(ResultProps);
+            Result := WriteJSONToFile(OutputLines, ROOT_DIR + 'temp_project_components.json');
+        finally
+            OutputLines.Free;
+        end;
+    finally
+        CompArray.Free;
+        ResultProps.Free;
+    end;
+end;
+
+// ---------------------------------------------------------------- ECO preview
+//
+// What Design > Update PCB would compare, read without running it: the
+// compiled project on one side, the board on the other. Each item is one
+// '|'-separated string; the server compares them (eco_preview.py).
+
+function EcoQuote(S: String): String;
+begin
+    Result := '"' + JSONEscapeString(S) + '"';
+end;
+
+// Schematic side: components (unique id|designator|footprint|comment), their
+// pins (designator|pin|net), component classes (name|sheet|members joined by
+// ','), rooms (name|descriptor) and net classes (name|nets).
+function GetEcoSource(ProjectPath: String): String;
+var
+    Project : IProject;
+    Flat    : IDocument;
+    Comp    : IComponent;
+    I, J    : Integer;
+    Id, Err, Members : String;
+    Comps, Pins, Classes, Rooms, NetClasses, Props : TStringList;
+begin
+    Project := TargetProject(ProjectPath, Err);
+    if Project = nil then
+    begin
+        Result := 'ERROR: ' + Err;
+        Exit;
+    end;
+    Project.DM_Compile;
+    Flat := Project.DM_DocumentFlattened;
+    if Flat = nil then
+    begin
+        Result := 'ERROR: the project did not compile';
+        Exit;
+    end;
+    Comps := TStringList.Create;
+    Pins := TStringList.Create;
+    Classes := TStringList.Create;
+    Rooms := TStringList.Create;
+    NetClasses := TStringList.Create;
+    Props := TStringList.Create;
+    try
+        // An alternate part is listed a second time, under its original's
+        // id with '@<variant>' added; it is sent under that id (the board
+        // keeps it so when its footprint differs) and eco_preview decides
+        // how it matches. Its pins are the original's, so they are not sent
+        // twice
+        for I := 0 to Flat.DM_ComponentCount - 1 do
+        begin
+            Comp := Flat.DM_Components(I);
+            Id := Comp.DM_UniqueId;
+            Comps.Add(EcoQuote(Id + '|' + Comp.DM_PhysicalDesignator + '|' + Comp.DM_Footprint + '|' +
+                               Comp.DM_Comment));
+            if Pos('@', Id) > 0 then Continue;
+            for J := 0 to Comp.DM_PinCount - 1 do
+                Pins.Add(EcoQuote(Comp.DM_PhysicalDesignator + '|' + Comp.DM_Pins(J).DM_PinNumber + '|' +
+                                  Comp.DM_Pins(J).DM_FlattenedNetName));
+        end;
+        for I := 0 to Flat.DM_ComponentClassCount - 1 do
+        begin
+            Members := '';
+            for J := 0 to Flat.DM_ComponentClasses(I).DM_MemberCount - 1 do
+            begin
+                if J > 0 then Members := Members + ',';
+                Members := Members + Flat.DM_ComponentClasses(I).DM_Members(J);
+            end;
+            Classes.Add(EcoQuote(Flat.DM_ComponentClasses(I).DM_Name + '|' +
+                                 Flat.DM_ComponentClasses(I).DM_OwnerDocumentName + '|' + Members));
+        end;
+        for I := 0 to Flat.DM_RoomCount - 1 do
+            Rooms.Add(EcoQuote(Flat.DM_Rooms(I).DM_RoomName + '|' + Flat.DM_Rooms(I).DM_LongDescriptorString));
+        for I := 0 to Flat.DM_NetClassCount - 1 do
+        begin
+            Members := '';
+            for J := 0 to Flat.DM_NetClasses(I).DM_MemberCount - 1 do
+            begin
+                if J > 0 then Members := Members + ',';
+                Members := Members + Flat.DM_NetClasses(I).DM_Members(J);
+            end;
+            NetClasses.Add(EcoQuote(Flat.DM_NetClasses(I).DM_Name + '|' + Members));
+        end;
+        AddJSONProperty(Props, 'project_path', Project.DM_ProjectFullPath);
+        if Project.DM_PrimaryImplementationDocument <> nil then
+            AddJSONProperty(Props, 'pcb_path', Project.DM_PrimaryImplementationDocument.DM_FullPath)
+        else
+            AddJSONProperty(Props, 'pcb_path', '');
+        AddProjectSheetStatus(Project, Props);
+        Props.Add(BuildJSONArray(Comps, 'components'));
+        Props.Add(BuildJSONArray(Pins, 'pins'));
+        Props.Add(BuildJSONArray(Classes, 'component_classes'));
+        Props.Add(BuildJSONArray(Rooms, 'rooms'));
+        Props.Add(BuildJSONArray(NetClasses, 'net_classes'));
+        Result := BuildJSONObject(Props);
+    finally
+        Comps.Free;
+        Pins.Free;
+        Classes.Free;
+        Rooms.Free;
+        NetClasses.Free;
+        Props.Free;
+    end;
+end;
+
+// Board side, read without bringing the board to the front: components
+// (source unique id|designator|footprint|comment), pads (designator|pad|net),
+// component and net classes (name|members joined by ','; the built-in
+// classes such as All Components are left out) and rooms (name|scope).
+function GetEcoTarget(BoardPath: String): String;
+var
+    Board   : IPCB_Board;
+    It      : IPCB_BoardIterator;
+    Obj     : IPCB_Primitive;
+    Comp    : IPCB_Component;
+    Pad     : IPCB_Pad;
+    Cls     : IPCB_ObjectClass;
+    Rule    : IPCB_Rule;
+    I       : Integer;
+    NetName, Members : String;
+    Opened  : IServerDocument;
+    BoardDoc : IServerDocument;
+    AllComps, AllNets : TInterfaceList;
+    Comps, Pads, CompClasses, NetClasses, Rooms, Props : TStringList;
+begin
+    // A board this opened is closed again at the end, so a preview leaves
+    // the workspace as it found it. An open board is found by its path
+    // compared normalised (case, separators, '..'), as FindOpenDocument
+    // does, and is never closed: an exact lookup could miss a board whose
+    // path is written differently, and the user's board would be closed
+    Opened := nil;
+    Board := nil;
+    BoardDoc := FindOpenDocument(NormalizePath(BoardPath));
+    if BoardDoc = nil then
+    begin
+        if not FileExists(BoardPath) then
+        begin
+            Result := 'ERROR: Board not found: ' + BoardPath;
+            Exit;
+        end;
+        Opened := Client.OpenDocument('PCB', NormalizePath(BoardPath));
+        BoardDoc := Opened;
+    end;
+    // PCBServer is nil until a board has been opened this session
+    if (BoardDoc <> nil) and (PCBServer <> nil) then
+        Board := PCBServer.GetPCBBoardByPath(BoardDoc.FileName);
+    if Board = nil then
+    begin
+        if Opened <> nil then
+        begin
+            Client.CloseDocument(Opened);
+            Result := 'ERROR: Could not open the board ' + BoardPath;
+        end
+        else if BoardDoc <> nil then
+            Result := 'ERROR: The board ' + BoardPath + ' is open but could not be read; bring it to the front once'
+        else
+            Result := 'ERROR: Could not open the board ' + BoardPath;
+        Exit;
+    end;
+    AllComps := TInterfaceList.Create;
+    AllNets := TInterfaceList.Create;
+    Comps := TStringList.Create;
+    Pads := TStringList.Create;
+    CompClasses := TStringList.Create;
+    NetClasses := TStringList.Create;
+    Rooms := TStringList.Create;
+    Props := TStringList.Create;
+    try
+        It := Board.BoardIterator_Create;
+        It.AddFilter_ObjectSet(MkSet(eComponentObject, ePadObject, eNetObject, eClassObject, eRuleObject));
+        It.AddFilter_LayerSet(AllLayers);
+        It.AddFilter_Method(eProcessAll);
+        Obj := It.FirstPCBObject;
+        while Obj <> nil do
+        begin
+            if Obj.ObjectId = eComponentObject then
+            begin
+                Comp := Obj;
+                AllComps.Add(Comp);
+                Comps.Add(EcoQuote(Comp.SourceUniqueId + '|' + Comp.Name.Text + '|' + Comp.Pattern + '|' +
+                                   Comp.Comment.Text));
+            end
+            else if Obj.ObjectId = eNetObject then
+                AllNets.Add(Obj)
+            else if Obj.ObjectId = ePadObject then
+            begin
+                Pad := Obj;
+                if Pad.Component <> nil then
+                begin
+                    NetName := '';
+                    if Pad.Net <> nil then NetName := Pad.Net.Name;
+                    Pads.Add(EcoQuote(Pad.Component.Name.Text + '|' + Pad.Name + '|' + NetName));
+                end;
+            end
+            else if Obj.ObjectId = eRuleObject then
+            begin
+                Rule := Obj;
+                if Rule.RuleKind = eRule_ConfinementConstraint then
+                    Rooms.Add(EcoQuote(Rule.Name + '|' + Rule.Scope1Expression));
+            end;
+            Obj := It.NextPCBObject;
+        end;
+        Board.BoardIterator_Destroy(It);
+
+        It := Board.BoardIterator_Create;
+        It.AddFilter_ObjectSet(MkSet(eClassObject));
+        It.AddFilter_LayerSet(AllLayers);
+        It.AddFilter_Method(eProcessAll);
+        Cls := It.FirstPCBObject;
+        while Cls <> nil do
+        begin
+            if not Cls.SuperClass then
+            begin
+                Members := '';
+                if Cls.MemberKind = eClassMemberKind_Component then
+                begin
+                    for I := 0 to AllComps.Count - 1 do
+                        if Cls.IsMember(AllComps[I]) then
+                        begin
+                            if Members <> '' then Members := Members + ',';
+                            Comp := AllComps[I];
+                            Members := Members + Comp.Name.Text;
+                        end;
+                    CompClasses.Add(EcoQuote(Cls.Name + '|' + Members));
+                end
+                else if Cls.MemberKind = eClassMemberKind_Net then
+                begin
+                    for I := 0 to AllNets.Count - 1 do
+                        if Cls.IsMember(AllNets[I]) then
+                        begin
+                            if Members <> '' then Members := Members + ',';
+                            Obj := AllNets[I];
+                            Members := Members + Obj.Name;
+                        end;
+                    NetClasses.Add(EcoQuote(Cls.Name + '|' + Members));
+                end;
+            end;
+            Cls := It.NextPCBObject;
+        end;
+        Board.BoardIterator_Destroy(It);
+
+        AddJSONProperty(Props, 'board_path', Board.FileName);
+        Props.Add(BuildJSONArray(Comps, 'components'));
+        Props.Add(BuildJSONArray(Pads, 'pads'));
+        Props.Add(BuildJSONArray(CompClasses, 'component_classes'));
+        Props.Add(BuildJSONArray(NetClasses, 'net_classes'));
+        Props.Add(BuildJSONArray(Rooms, 'rooms'));
+        Result := BuildJSONObject(Props);
+    finally
+        // Only the document this call opened; a board that was open stays
+        if Opened <> nil then
+            Client.CloseDocument(Opened);
+        AllComps.Free;
+        AllNets.Free;
+        Comps.Free;
+        Pads.Free;
+        CompClasses.Free;
+        NetClasses.Free;
+        Rooms.Free;
+        Props.Free;
     end;
 end;

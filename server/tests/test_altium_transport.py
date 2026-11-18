@@ -218,6 +218,19 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
                 complete.set()
             self.assertTrue((await following)["success"])
 
+    async def test_waits_for_transient_hung_state_before_rejecting_a_command(self):
+        bridge = main.AltiumBridge()
+
+        async def launch():
+            self.reply(self.claim())
+            return True
+
+        with (
+            patch.object(main.sandbox, "altium_hung", side_effect=[True, False]),
+            patch.object(bridge, "run_altium_script", side_effect=launch),
+        ):
+            self.assertTrue((await bridge.execute_command("read", {}, timeout=1))["success"])
+
     async def test_drc_refuses_existing_dialog_before_publishing_request(self):
         import drc
 

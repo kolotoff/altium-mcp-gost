@@ -12427,14 +12427,14 @@ end;
 procedure CountKeepoutEndpoint(Endpoints: TStringList; X, Y: TCoord);
 var
     Key: String;
-    Index: Integer;
+    EndpointIndex: Integer;
 begin
     Key := IntToStr(X) + '|' + IntToStr(Y);
-    Index := Endpoints.IndexOfName(Key);
-    if Index < 0 then
+    EndpointIndex := Endpoints.IndexOfName(Key);
+    if EndpointIndex < 0 then
         Endpoints.Add(Key + '=1')
     else
-        Endpoints[Index] := Key + '=' + IntToStr(StrToInt(Endpoints.ValueFromIndex[Index]) + 1);
+        Endpoints[EndpointIndex] := Key + '=' + IntToStr(StrToInt(Endpoints.ValueFromIndex[EndpointIndex]) + 1);
 end;
 
 procedure AddKeepoutChord(Chords: TList; X1, Y1, X2, Y2: TCoord);

@@ -220,6 +220,18 @@ ALTIUM_HUNG_ERROR = (
     "stays frozen, only ending X2.EXE frees it, and unsaved work is then lost.")
 
 
+async def _altium_remains_hung():
+    # The bridge writes its response before Altium finishes leaving the
+    # script. Give the next serialized command a chance to see the idle UI.
+    deadline = time.monotonic() + 3.0
+    while await asyncio.to_thread(sandbox.altium_hung):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return True
+        await asyncio.sleep(min(0.2, remaining))
+    return False
+
+
 def _lift_failed_result(response: Dict[str, Any]) -> Dict[str, Any]:
     """Make a command's own failure the response's failure.
 
@@ -676,7 +688,7 @@ class AltiumBridge:
                 return
             try:
                 problem = self._reconcile_pending_command()
-                if problem is None and bridge_script and await asyncio.to_thread(sandbox.altium_hung):
+                if problem is None and bridge_script and await _altium_remains_hung():
                     problem = {"success": False, "error": ALTIUM_HUNG_ERROR}
                 yield problem
             finally:
@@ -2046,7 +2058,7 @@ async def run_altium_script(ctx: Context, script: str, timeout_seconds: int = 12
     if problem:
         return json.dumps({"success": False, "error": problem, "executor_wedged": False}, indent=2)
 
-    if await asyncio.to_thread(sandbox.altium_hung):
+    if await _altium_remains_hung():
         return json.dumps({"success": False, "error": ALTIUM_HUNG_ERROR, "executor_wedged": False}, indent=2)
 
     sb = _sandbox()
@@ -2371,7 +2383,7 @@ async def rollback_altium_script(ctx: Context, run_id: str, discard_unsaved: boo
     problem = altium_limit_problem() or await altium_bridge.ensure_paths(need_script=False)
     if problem:
         return json.dumps({"success": False, "error": problem})
-    if await asyncio.to_thread(sandbox.altium_hung):
+    if await _altium_remains_hung():
         return json.dumps({"success": False, "error": ALTIUM_HUNG_ERROR})
     if any(d.is_script_error for d in sandbox.altium_dialogs(sb.altium_exe)):
         return json.dumps({"success": False, "error": "not run: Altium is showing a script error "

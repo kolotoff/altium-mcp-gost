@@ -193,6 +193,8 @@ class PcbUtilsSourceTest(unittest.TestCase):
         self.assertIn("'add_tented_vias_around_keepout_contour':", api_source)
         self.assertIn("function AddTentedViasAroundKeepoutContour(ViaDiameterMM, ViaHoleMM, EdgeClearanceMM, PitchMM: Double; NetName: String): String", utils_source)
         self.assertIn("PCBPrimitiveIsKeepout", utils_source)
+        endpoint_counter = utils_source.split("procedure CountKeepoutEndpoint(", 1)[1].split("\nend;", 1)[0]
+        self.assertNotRegex(endpoint_counter, r"(?im)^\s*Index\s*:")
         self.assertIn("MinDistance := MMsToCoord(EdgeClearanceMM) + ViaDiameter / 2.0", utils_source)
         self.assertIn("TargetNet := FindBoardNet(Board, NetName)", utils_source)
         self.assertIn("KeepoutCenterIsClear(Chords, PX, PY, MinDistance)", utils_source)

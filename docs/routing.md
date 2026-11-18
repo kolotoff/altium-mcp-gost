@@ -13,10 +13,12 @@ all clients using the old file transport before using concurrent clients.
 
 | Tool | Behavior |
 | --- | --- |
-| `export_pcb_routing_snapshot` | Read the exact open PCB into a new versioned snapshot. |
+| `export_pcb_routing_snapshot` | Read the exact current PCB into a new versioned snapshot. |
 | `compare_pcb_snapshots` | Compare exact geometry, duplicates, placement, rules, layer stack and polygon definitions. |
-| `summarize_pcb_drc` | Parse an existing native text report into full ledgers and category totals. |
+| `export_pcb_drc_report` | Run native batch DRC on the exact active PCB and export compact text with a capture receipt. |
+| `summarize_pcb_drc` | Parse classic or compact native text into full ledgers and category totals. |
 | `compare_pcb_drc` | Compare full occurrences, processed-rule coverage and waived counts. |
+| `validate_altium_project` | Review compiled schematic, PCB inventory, designator and native DRC evidence in one read-only report. |
 | `get_effective_routing_rules` | Query width/impedance and differential-gap values for exact existing objects. |
 | `select_pcb_routing` | Select nets, connections, pads or exact routing objects; optionally zoom. |
 | `apply_pcb_routing_batch` | Plan or apply track/via addition, edits, width changes and removal. |
@@ -37,12 +39,50 @@ Omit `output_directory` for a unique task directory, or supply a new absolute
 directory beneath `generated/`. Existing output directories are refused. Large
 ledgers stay in artifacts; MCP responses contain counts and small samples.
 
+## Read-only project validation
+
+`validate_altium_project` requires the full Windows `expected_board` path.
+Supply `project_path` for an open `.PrjPcb` with a current compiled schematic.
+Altium checks that the PCB belongs to that project before reading the schematic.
+Supply `snapshot_directory` to review a sealed snapshot, or activate the exact
+PCB for a fresh capture. Supply `drc_report_path` for an English native classic
+or compact text DRC report. The optional `baseline_drc_report_path` compares
+same-format reports for exact new occurrences, processed rules and waiver counts.
+
+```json
+{
+  "expected_board": "D:\\Boards\\Example.PcbDoc",
+  "project_path": "D:\\Boards\\Example.PrjPcb",
+  "drc_report_path": "D:\\Boards\\Example.drc"
+}
+```
+
+The tool writes `validation.json`, `VALIDATION.md` and the applicable evidence
+under `generated/project-validation/`. The MCP response includes the verdict,
+stage counts, next actions and report paths. A missing prerequisite skips only
+the checks that depend on it. A source error, reported violation or failed DRC
+baseline comparison produces a `fail` verdict. Skipped checks or designator
+differences produce `incomplete` when there are no failures. The designator check
+flags footprinted schematic components missing from the PCB, PCB-only components,
+and duplicate or blank designators. Review intentional board-only components and
+variant differences in Altium.
+
+The tool reads the current compiled state without compiling, and never runs
+ERC or DRC, edits, saves, selects, or repours. Omit `project_path` and provide
+`snapshot_directory` for an artifact-only run that does not contact Altium.
+A `pass` applies to the supplied evidence. A matching path cannot establish that
+DRC reflects the captured revision or covers every applicable rule. Snapshot
+connectivity counts are observations from Altium's cache.
+
+The staged checks and report structure are adapted from
+[CopperPilot CLI validation](https://github.com/CopperPilot/copper-pilot-cli/blob/1.0.1/docs/validate.md).
+
 ## Coordinates and snapshots
 
-`expected_board` is a full Windows `.PcbDoc` path. The board must already be
-open. Routing operations never choose the first PCB in a project. Mutations,
-selection and repour also require that exact PCB to be active in the focused
-document view. Batches recheck this before every row. Successful routing selection
+`expected_board` is a full Windows `.PcbDoc` path. Activate that exact PCB before
+live routing queries. The bridge checks the path of Altium's current PCB.
+Mutations, selection and repour also check the focused document view.
+Batches recheck this before every row. Successful routing selection
 replaces the previous selection, including selected components and other objects.
 
 Coordinates and dimensions with `_raw` suffix are **absolute Altium integer
@@ -158,6 +198,24 @@ stacks and scoped native clearance rules. Even zero modeled conflicts requires
 native DRC; the response never claims electrical acceptance.
 
 ## DRC and offline command line
+
+Activate the exact PCB and call `export_pcb_drc_report` with its full
+`expected_board` path. The tool runs the PCB's configured batch rules on its
+current polygon state and writes `native-drc.txt` and `native-drc.txt.capture.json`
+under `generated/native-drc/` by default. It records the PCB editor's modified
+state before and after the run. On the English polygon warning the tool chooses
+**Run DRC**. If the dialog stays open, choose that option in Altium. Keep the two
+export files together so subsequent validation can verify the report hash and
+board identity. Batch checks can take several minutes. Inspect
+`get_altium_command_status` after a client timeout before retrying.
+
+Pass the exported `.txt` path directly to `validate_altium_project` or
+`summarize_pcb_drc`. A standalone compact report uses the caller's PCB
+association. Validation marks an otherwise clean standalone report for review.
+Native warnings are kept in the report and require review. The compact format
+omits waiver counts. Compact baseline comparisons require both capture receipts
+and return an inconclusive result when the other comparisons pass and the waiver
+counts remain unavailable.
 
 The parser supports the donor's English native `.drc` text format. It validates
 each rule subtotal and final totals, preserves duplicate occurrences, and checks

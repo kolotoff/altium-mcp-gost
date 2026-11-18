@@ -329,6 +329,7 @@ class AltiumConfig:
 # Keep package imports available when launched as server/main.py.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from server.altium_transport import FileCommandTransport
+from server.project_validation import validate_project
 from server.routing_mcp import register_routing_tools
 
 
@@ -341,7 +342,7 @@ class AltiumBridge:
         self.config = AltiumConfig()
         self.config.verify_paths()
         self._transport = FileCommandTransport(
-            EXCHANGE_DIR, self.run_altium_script, mutation_timeout=600
+            EXCHANGE_DIR, self.run_altium_script, mutation_timeout=600, native_drc_timeout=900
         )
     
     async def execute_command(self, command: str, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -2534,6 +2535,40 @@ async def add_tented_vias_around_keepout_contour(
     result = response.get("result", {})
     logger.info("Tented contour vias added successfully")
     return json_dumps(result, indent=2)
+
+@mcp.tool()
+async def validate_altium_project(
+    ctx: Context,
+    expected_board: str,
+    project_path: str = "",
+    snapshot_directory: str = "",
+    drc_report_path: str = "",
+    baseline_drc_report_path: str = "",
+    output_directory: str = "",
+) -> str:
+    """Run read-only project, PCB inventory, designator and native DRC checks.
+
+    expected_board is the full Windows .PcbDoc path. Optionally supply the full
+    open .PrjPcb path to read its already compiled schematic and check designators.
+    Supply a sealed snapshot or activate the exact PCB for capture. DRC accepts
+    Altium's classic or compact text report, with an optional same-format baseline.
+    This tool does not compile, edit, save, select, repour, or run ERC/DRC.
+    Returns compact stage results and links to JSON and Markdown under generated/.
+    """
+    return json_dumps(
+        await validate_project(
+            altium_bridge.execute_command,
+            expected_board,
+            project_path,
+            snapshot_directory,
+            drc_report_path,
+            baseline_drc_report_path,
+            output_directory,
+        ),
+        indent=2,
+        allow_nan=False,
+    )
+
 
 @mcp.tool()
 async def get_server_status(ctx: Context) -> str:

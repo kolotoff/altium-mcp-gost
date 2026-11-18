@@ -5,6 +5,7 @@ import json
 
 from mcp.server.fastmcp import Context
 
+from .native_drc import continue_polygon_warning
 from .pcb_routing import (
     RoutingService,
     compare_snapshot_artifacts,
@@ -16,7 +17,8 @@ from .pcb_routing import (
 
 def register_routing_tools(mcp, bridge):
     service = RoutingService(
-        lambda command, params: bridge.execute_command(command, params)
+        lambda command, params: bridge.execute_command(command, params),
+        lambda directory: continue_polygon_warning(directory, bridge.config.altium_exe_path),
     )
     exported = {}
 
@@ -31,7 +33,7 @@ def register_routing_tools(mcp, bridge):
     async def export_pcb_routing_snapshot(
         ctx: Context, expected_board: str, output_directory: str = ""
     ) -> str:
-        """Read an exact open .PcbDoc into a versioned snapshot under generated/.
+        """Read the exact current .PcbDoc into a versioned snapshot under generated/.
 
         Includes raw-unit pads, tracks, vias, connections, rules, components,
         copper stack, arcs and polygon boundaries. No save, repour or selection.
@@ -71,6 +73,19 @@ def register_routing_tools(mcp, bridge):
         )
 
     @tool
+    async def export_pcb_drc_report(
+        ctx: Context, expected_board: str, output_directory: str = ""
+    ) -> str:
+        """Run Altium batch DRC on the exact active PCB and export its compact text.
+
+        Uses the board's configured batch rules and its current polygon state.
+        Continues the English polygon warning with Run DRC. If the dialog stays
+        open, choose Run DRC in Altium. Never repours, changes rules or saves.
+        Keep the .txt and adjacent .capture.json together for board verification.
+        """
+        return encode(await service.export_drc(expected_board, output_directory))
+
+    @tool
     async def summarize_pcb_drc(
         ctx: Context,
         report_path: str,
@@ -78,7 +93,7 @@ def register_routing_tools(mcp, bridge):
         baseline_report_path: str = "",
         output_directory: str = "",
     ) -> str:
-        """Parse existing English native DRC text with subtotal/board checks.
+        """Parse classic or compact English native DRC text and verify its totals.
 
         Writes full ledgers plus timing/coupling observations. Optional baseline
         comparison rejects every new occurrence, coverage or waiver change.

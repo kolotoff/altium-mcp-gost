@@ -64,9 +64,10 @@ end;
 
 function RoutingBoard(ExpectedPath : String) : IPCB_Board;
 begin
-    Result := PCBServer.GetPCBBoardByPath(ExpectedPath);
-    if Result = nil then begin RoutingFail('The exact requested PCB is not open.'); Exit; end;
-    if UpperCase(Result.FileName) <> UpperCase(ExpectedPath) then begin RoutingFail('PCB full-path mismatch.'); Exit; end;
+    Result := PCBServer.GetCurrentPCBBoard;
+    if Result = nil then begin RoutingFail('Activate the exact requested PCB first.'); Exit; end;
+    if UpperCase(Result.FileName) <> UpperCase(ExpectedPath) then
+        RoutingFail('Activate the exact requested PCB first. PCB full-path mismatch.');
 end;
 
 procedure RoutingRequireActive(Board : IPCB_Board);
@@ -812,6 +813,28 @@ begin
     finally Rows.Free; end;
 end;
 
+procedure RoutingNativeDRC(Board : IPCB_Board; Directory, RequestID : String; var ResponseText : String);
+var Doc : IServerDocument; ReportBase : String; BeforeModified, AfterModified : Boolean;
+begin
+    RoutingRequireActive(Board); if RoutingFailure<>'' then Exit;
+    Doc:=Client.GetDocumentByPath(Board.FileName);
+    if Doc=nil then begin RoutingFail('Cannot verify the PCB editor state.'); Exit; end;
+    ReportBase:=Directory+'\native-drc';
+    if FileExists(ReportBase+'.txt') or FileExists(ReportBase+'.drc') then
+    begin RoutingFail('The native DRC output already exists.'); Exit; end;
+
+    BeforeModified:=Doc.GetModified;
+    RoutingStatus(Directory,RequestID,'native_drc_running',0,0);
+    { Altium writes the compact report with a .txt extension for this call. }
+    Board.RunBatchDesignRuleCheck(ReportBase+'.drc',eDRC_Text,False,False);
+    AfterModified:=Doc.GetModified;
+    if not FileExists(ReportBase+'.txt') then
+    begin RoutingFail('Native DRC returned without a compact report.'); Exit; end;
+    ResponseText:='{"board_file":'+RoutingQuote(Board.FileName)+
+        ',"pcb_modified_before":'+RoutingBool(BeforeModified)+
+        ',"pcb_modified_after":'+RoutingBool(AfterModified)+',"saved":false}';
+end;
+
 procedure RoutingExecute(Operation, Directory, SnapshotID, RequestID : String; var Completed : Integer; var DispatchText : String);
 var Board : IPCB_Board; Steps, UndoIndex, PolygonCount, BeforeChildren, AfterChildren, BeforeRegions, AfterRegions : Integer; WantZoom : Boolean;
 begin
@@ -824,6 +847,7 @@ begin
         RoutingExport(Board,Directory,SnapshotID); if RoutingFailure<>'' then Exit;
         DispatchText:='{"exported":true,"snapshot_id":'+RoutingQuote(SnapshotID)+'}';
     end
+    else if Operation='native_drc' then RoutingNativeDRC(Board,Directory,RequestID,DispatchText)
     else if Operation='rules' then
     begin
         RoutingCheckBaseline(Board,Directory); if RoutingFailure<>'' then Exit;
@@ -897,7 +921,7 @@ begin
         RoutingStatus(Directory,RequestID,'failed_inspect_artifacts_before_retry',0,Completed);
         ResponseText:='ERROR: '+RoutingFailure;
     end
-    else if (Operation='snapshot') or (Operation='rules') or (Operation='select') then
+    else if (Operation='snapshot') or (Operation='native_drc') or (Operation='rules') or (Operation='select') then
         RoutingStatus(Directory,RequestID,'complete',0,Completed);
     ReplyText:=ResponseText;
 end;

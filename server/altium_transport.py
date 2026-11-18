@@ -34,12 +34,14 @@ class FileCommandTransport:
         timeout: float = 120,
         poll: float = 0.1,
         mutation_timeout: float | None = None,
+        native_drc_timeout: float | None = None,
     ):
         self.directory = Path(directory)
         self.launch = launch
         self.timeout = timeout
         self.poll = poll
         self.mutation_timeout = mutation_timeout
+        self.native_drc_timeout = native_drc_timeout
         self._lock = asyncio.Lock()
         self._tasks = set()
 
@@ -175,6 +177,12 @@ class FileCommandTransport:
             and self.mutation_timeout is not None
         ):
             timeout = max(timeout, self.mutation_timeout)
+        if (
+            command == "pcb_routing"
+            and params.get("operation") == "native_drc"
+            and self.native_drc_timeout is not None
+        ):
+            timeout = max(timeout, self.native_drc_timeout)
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             response = self._response(request_id)

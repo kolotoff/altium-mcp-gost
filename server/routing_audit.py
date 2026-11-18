@@ -11,6 +11,8 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
 
+from .drc_compact import COMPACT_HEADER, read_compact_drc
+
 
 HEADERS = {
     "board": "field value",
@@ -289,6 +291,8 @@ def compare_inventories(before, after, allowed_nets=None):
 def read_drc(path, encoding="utf-8-sig"):
     """Parse complete native DRC findings and validate every reported subtotal."""
     text, source = read_source(path, encoding)
+    if text.lstrip().startswith(COMPACT_HEADER):
+        return read_compact_drc(path, text, source)
     findings = Counter()
     sections, metadata = [], {}
     rule, rule_count, total, waived = None, 0, None, None
@@ -402,7 +406,7 @@ def read_snapshot(directory: Path) -> dict:
     manifest_path = directory / "manifest.json"
     manifest_text, identity = read_source(manifest_path, "utf-8-sig")
     manifest = json.loads(manifest_text)
-    if manifest.get("schema") != SNAPSHOT_SCHEMA:
+    if not isinstance(manifest, dict) or manifest.get("schema") != SNAPSHOT_SCHEMA:
         raise ValueError("Unsupported or missing snapshot schema")
     expected_files = {f"{name}.tsv" for name in {*HEADERS, *EXTRA_HEADERS}} | {
         "inventory-status.txt",
@@ -421,6 +425,13 @@ def read_snapshot(directory: Path) -> dict:
         ):
             raise ValueError(f"Snapshot file was changed: {name}")
     inventory = read_inventory(directory)
+    sources = inventory["sources"]
+    if {Path(source["path"]).name for source in sources} != expected_files - {"board-signature.txt"}:
+        raise ValueError("Snapshot file coverage changed while reading")
+    for source in sources:
+        name = Path(source["path"]).name
+        if source["sha256"] != manifest["files"][name]["sha256"]:
+            raise ValueError(f"Snapshot file changed while reading: {name}")
     if inventory["board"].get("snapshot_id") != manifest[
         "snapshot_id"
     ] or not same_board(inventory["board"]["board_file"], manifest["board_file"]):
@@ -518,11 +529,23 @@ def compare_snapshots(
 def compare_drc_reports(
     baseline: Path, current: Path, expected_board: str = "", reject_categories=None
 ) -> dict:
-    before, after = read_drc(Path(baseline)), read_drc(Path(current))
-    if not same_board(before["metadata"]["PCB File"], after["metadata"]["PCB File"]):
+    return compare_drc_data(
+        read_drc(Path(baseline)), read_drc(Path(current)), expected_board, reject_categories
+    )
+
+
+def compare_drc_data(before, after, expected_board="", reject_categories=None):
+    """Compare the same parsed report data that supplies the finding ledgers."""
+    before_board = before["metadata"].get("PCB File")
+    after_board = after["metadata"].get("PCB File")
+    if not before_board or not after_board:
+        raise ValueError("A compact DRC baseline comparison requires board capture receipts")
+    if not same_board(before_board, after_board):
         raise ValueError("DRC reports describe different PCB paths")
-    if expected_board and not same_board(expected_board, after["metadata"]["PCB File"]):
+    if expected_board and not same_board(expected_board, after_board):
         raise ValueError("DRC report does not identify the expected PCB")
+    if before.get("format") != after.get("format"):
+        raise ValueError("Exact DRC baseline comparison requires reports in the same format")
     changes = delta(before["findings"], after["findings"])
     coverage = delta(
         records(before["sections"], fields=("rule",)),
@@ -533,17 +556,17 @@ def compare_drc_reports(
     for entry in changes["added"]:
         if rejected is None or category(entry["record"]["rule"]) in rejected:
             regressions.append({"category": category(entry["record"]["rule"]), **entry})
+    waiver_counts_available = before["waived"] is not None and after["waived"] is not None
+    waiver_count_changed = before["waived"] != after["waived"] if waiver_counts_available else None
+    changed = bool(regressions or coverage["added_count"] or coverage["removed_count"] or waiver_count_changed)
     return {
         "baseline": {k: v for k, v in before.items() if k != "findings"},
         "current": {k: v for k, v in after.items() if k != "findings"},
         "changes": changes,
         "processed_rule_changes": coverage,
-        "waiver_count_changed": before["waived"] != after["waived"],
+        "waiver_count_changed": waiver_count_changed,
         "rejected_added_findings": regressions,
-        "passed": not regressions
-        and not coverage["added_count"]
-        and not coverage["removed_count"]
-        and before["waived"] == after["waived"],
+        "passed": False if changed else True if waiver_counts_available else None,
         "limits": [
             "Exact report occurrences are not independently verified physical defect changes.",
             "An absent finding does not prove a category was checked or passed.",

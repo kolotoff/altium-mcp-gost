@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import hashlib
 import json
@@ -11,6 +12,7 @@ from collections import Counter
 from pathlib import Path, PureWindowsPath
 
 from . import routing_audit as audit
+from .drc_compact import CAPTURE_SCHEMA, capture_path
 from .routing_geometry import (
     audit_layer_usage,
     electrical_findings,
@@ -47,7 +49,7 @@ def write_json(path, value):
         stream.write("\n")
 
 
-def _board(value):
+def validate_board_path(value):
     field_text(value, "expected_board")
     if (
         not PureWindowsPath(value).is_absolute()
@@ -68,15 +70,17 @@ def _baseline(snapshot, directory):
 
 
 class RoutingService:
-    def __init__(self, execute):
+    def __init__(self, execute, continue_drc_warning=None):
         self.execute = execute
+        self.continue_drc_warning = continue_drc_warning
+        self._drc_tasks = set()
 
     async def _native(self, operation, board, directory, snapshot_id="", **params):
         response = await self.execute(
             "pcb_routing",
             {
                 "operation": operation,
-                "expected_board": _board(board),
+                "expected_board": validate_board_path(board),
                 "operation_directory": str(directory),
                 "snapshot_id": snapshot_id,
                 **params,
@@ -102,7 +106,7 @@ class RoutingService:
         }
 
     async def snapshot(self, expected_board, output=""):
-        _board(expected_board)
+        validate_board_path(expected_board)
         directory = output_directory(output, "routing-snapshots")
         snapshot_id = uuid.uuid4().hex
         response = await self._native(
@@ -119,6 +123,67 @@ class RoutingService:
             "fingerprint": manifest["fingerprint"],
             "counts": manifest["counts"],
             "limits": manifest["limits"],
+        }
+
+    async def export_drc(self, expected_board, output=""):
+        board = str(PureWindowsPath(validate_board_path(expected_board)))
+        directory = output_directory(output, "native-drc")
+        task = asyncio.create_task(self._export_drc(board, directory))
+        self._drc_tasks.add(task)
+        task.add_done_callback(self._drc_tasks.discard)
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # The native command and its warning handler must finish together.
+            task.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+            raise
+
+    async def _export_drc(self, board, directory):
+        watcher = None
+        if self.continue_drc_warning is not None:
+            watcher = asyncio.create_task(self.continue_drc_warning(directory))
+        try:
+            response = await self._native("native_drc", board, directory)
+        finally:
+            if watcher is not None:
+                watcher.cancel()
+                await asyncio.gather(watcher, return_exceptions=True)
+        if not response["success"]:
+            return {
+                **response,
+                "recovery": "Check the command receipt and DRC operation status before retrying.",
+            }
+        report_path = directory / "native-drc.txt"
+        report = await asyncio.to_thread(audit.read_drc, report_path)
+        request_id = response["request_id"]
+        if (
+            report.get("format") != "compact"
+            or not audit.same_board(board, response["board_file"])
+            or response.get("saved") is not False
+            or not isinstance(response.get("pcb_modified_before"), bool)
+            or not isinstance(response.get("pcb_modified_after"), bool)
+            or not isinstance(request_id, str)
+            or len(request_id) != 32
+        ):
+            raise ValueError("Native DRC did not confirm the board, report, and editor state")
+        receipt = capture_path(report_path)
+        write_json(receipt, {
+            "schema": CAPTURE_SCHEMA,
+            "board_file": response["board_file"],
+            "request_id": request_id,
+            "report_sha256": report["source"]["sha256"],
+            "pcb_modified_before": response["pcb_modified_before"],
+            "pcb_modified_after": response["pcb_modified_after"],
+            "saved": False,
+        })
+        return {
+            **response,
+            "report_path": str(report_path),
+            "capture_path": str(receipt),
+            "violations": report["total"],
+            "waived": report["waived"],
+            "warning_count": sum(report["warnings"].values()),
+            "rule_sections": len(report["sections"]),
         }
 
     async def selectors(
@@ -468,24 +533,36 @@ def summarize_drc_artifacts(
     if PureWindowsPath(expected_board).suffix.lower() != ".pcbdoc":
         raise ValueError("Expected DRC board identity must end in .PcbDoc")
     report = audit.read_drc(Path(report_path))
-    if not audit.same_board(expected_board, report["metadata"]["PCB File"]):
+    reported_board = report["metadata"].get("PCB File")
+    if reported_board and not audit.same_board(expected_board, reported_board):
         raise ValueError("Native DRC does not identify the expected board")
+    if not reported_board and not PureWindowsPath(expected_board).is_absolute():
+        raise ValueError("A standalone compact DRC report requires an absolute expected PCB path")
     baseline = audit.read_drc(Path(baseline_path)) if baseline_path else None
     comparison = (
-        audit.compare_drc_reports(
-            Path(baseline_path), Path(report_path), expected_board, reject_categories
-        )
+        audit.compare_drc_data(baseline, report, expected_board, reject_categories)
         if baseline
         else None
     )
     directory = output_directory(output, "routing-drc")
     ledger = audit.drc_ledger(report, baseline)
     totals = Counter(row["category"] for row in ledger)
+    warnings = report.get("warnings", {})
+    identity_source = "capture" if report.get("capture") else "report" if reported_board else "caller"
+    format_info = {
+        "format": report.get("format", "classic"),
+        "expected_board": expected_board,
+        "board_identity_source": identity_source,
+        "warning_count": sum(warnings.values()),
+    }
     summary = {
+        **format_info,
         "metadata": report["metadata"],
         "source": report["source"],
         "total": report["total"],
         "waived": report["waived"],
+        "warnings": warnings,
+        "capture": report.get("capture"),
         "categories": dict(totals),
         "sections": report["sections"],
         "comparison": comparison,
@@ -504,13 +581,17 @@ def summarize_drc_artifacts(
         )
         writer.writeheader()
         writer.writerows(ledger)
+    waived = report["waived"] if report["waived"] is not None else "unavailable"
     lines = [
         "# Native DRC occurrences",
         "",
-        f"Total: {report['total']}; waived: {report['waived']}",
+        f"Violations **{report['total']}** · Waived **{waived}**",
         "",
         "Exact textual occurrence changes do not independently establish physical defect changes.",
     ]
+    if warnings:
+        lines.extend(["", "## Native warnings", ""])
+        lines.extend(f"- {message} ({count})" for message, count in warnings.items())
     for row in ledger:
         lines.extend(
             [
@@ -524,6 +605,7 @@ def summarize_drc_artifacts(
         )
     (directory / "DRC_APPENDIX.md").write_text("\n".join(lines), encoding="utf-8")
     return {
+        **format_info,
         "success": True,
         "total": report["total"],
         "waived": report["waived"],

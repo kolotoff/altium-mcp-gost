@@ -92,6 +92,8 @@ def main(argv=None):
                 clearance_mm=args.clearance_mm,
             )
         print(json.dumps(result, ensure_ascii=False, indent=2))
+        if args.command == "drc" and args.baseline and result["passed_comparison_policy"] is None:
+            return 2
         return (
             1
             if result.get("passed_policy") is False

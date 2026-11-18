@@ -102,12 +102,13 @@ begin
     if Count <> 1 then Result := nil;
 end;
 
-function InspectVariantComponents(ProjectSelector: String): String;
+function InspectVariantComponents(ProjectSelector, ExpectedBoard: String): String;
 var
     Project: IProject;
-    Flat: IDocument;
+    Flat, Doc: IDocument;
     Component: IComponent;
     i: Integer;
+    BoardFound: Boolean;
     Props, Items: TStringList;
 begin
     Project := FindVariantProject(ProjectSelector);
@@ -116,7 +117,28 @@ begin
         Result := '{"success": false, "error": "Project selector must match exactly one open project."}';
         Exit;
     end;
-    if not Project.DM_Compile then
+    if ExpectedBoard <> '' then
+    begin
+        BoardFound := False;
+        for i := 0 to Project.DM_LogicalDocumentCount - 1 do
+        begin
+            Doc := Project.DM_LogicalDocuments(i);
+            if Doc <> nil then
+                if UpperCase(Doc.DM_FullPath) = UpperCase(ExpectedBoard) then
+                    BoardFound := True;
+        end;
+        if not BoardFound then
+        begin
+            Result := '{"success": false, "error": "The requested PCB is not a document of this project."}';
+            Exit;
+        end;
+        if Project.DM_NeedsCompile then
+        begin
+            Result := '{"success": false, "code": "schematic_not_validated", "error": "Validate the project in Altium to refresh its compiled schematic."}';
+            Exit;
+        end;
+    end
+    else if not Project.DM_Compile then
     begin
         Result := '{"success": false, "error": "Project compilation failed."}';
         Exit;
@@ -125,6 +147,8 @@ begin
     if Flat = nil then
     begin
         Result := '{"success": false, "error": "No compiled flattened schematic."}';
+        if ExpectedBoard <> '' then
+            Result := '{"success": false, "code": "schematic_not_validated", "error": "Validate the project in Altium to generate its compiled schematic."}';
         Exit;
     end;
     Props := TStringList.Create;
@@ -145,6 +169,7 @@ begin
         Props.Clear;
         AddJSONBoolean(Props, 'success', True);
         AddJSONProperty(Props, 'path', Project.DM_ProjectFullPath);
+        if ExpectedBoard <> '' then AddJSONProperty(Props, 'board_file', ExpectedBoard);
         Props.Add(BuildJSONArray(Items, 'components'));
         Result := BuildJSONObject(Props, 0);
     finally
@@ -715,7 +740,9 @@ begin
         end;
         if Fields[0] = 'PROJECT_VARIANT_COMPONENTS' then
         begin
-            if Fields.Count = 2 then Result := InspectVariantComponents(Fields[1]);
+            if Fields.Count = 2 then Result := InspectVariantComponents(Fields[1], '');
+            if Fields.Count = 3 then
+                if Fields[2] <> '' then Result := InspectVariantComponents(Fields[1], Fields[2]);
         end;
         if Fields[0] = 'PROJECT_VARIANT_EFFECTIVE_MATERIALS' then
         begin

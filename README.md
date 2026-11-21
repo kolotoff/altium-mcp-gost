@@ -865,6 +865,14 @@ nearby power domains use visibly distinct hues. Inspect the rendered overlays
 against the actual connector housings before embedding the maps in the DOCX.
 The SVG rasterizer requires the `sharp` Node.js package. Its PNGs are mandatory
 fallbacks for Word clients that do not render the embedded SVG part directly.
+Connector pinout layout is geometry-driven. In `auto` mode, native USB-C A/B
+rows and multi-column `dip-switch`, `tactile-switch`, and `buzzer` bodies are
+split across both sides. The lower-x physical contact column is labeled on the
+left and the higher-x column on the right, so labels follow the nearest row and
+do not form X-crossings even when both rows sit on one half of the housing.
+`dip-switch` bodies retain native orientation to match the board view; explicit
+layout, rotation, and side-swap fields are reserved for incomplete metadata or
+an installation that differs from the native export.
 Write generated manuals, maps, pin-to-net exports, renders, reports, and
 temporary work beneath the repository-root `generated/` directory. That
 directory is intentionally ignored by Git; only generators, tests, skills,

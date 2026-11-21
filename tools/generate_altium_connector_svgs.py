@@ -27,6 +27,9 @@ DOMAIN_COLORS = {
     "other": "#475467",
 }
 
+AUTO_SPLIT_BODY_STYLES = {"usb-c", "dip-switch", "tactile-switch", "buzzer"}
+PRESERVE_NATIVE_ROTATION_STYLES = {"dip-switch"}
+
 
 def qname(name: str) -> str:
     return f"{{{SVG}}}{name}"
@@ -161,8 +164,12 @@ def shape_transform(view_x: float, view_y: float, width: float, height: float, a
     return normalize
 
 
-def choose_rotation(pad_centers: dict[str, tuple[float, float]], pins: list[dict]) -> int:
+def choose_rotation(
+    pad_centers: dict[str, tuple[float, float]], pins: list[dict], *, body_style: str = ""
+) -> int:
     """Put the dominant contact row vertically so leader lines spread cleanly."""
+    if body_style in PRESERVE_NATIVE_ROTATION_STYLES:
+        return 0
     points = [pad_centers[str(pin["pin"])] for pin in pins if str(pin["pin"]) in pad_centers]
     if len(points) < 2:
         return 0
@@ -171,6 +178,39 @@ def choose_rotation(pad_centers: dict[str, tuple[float, float]], pins: list[dict
     x_span = max(xs) - min(xs)
     y_span = max(ys) - min(ys)
     return 90 if x_span > y_span * 1.08 else 0
+
+
+def split_physical_columns(
+    pin_records: list[dict], body_w: float
+) -> tuple[list[dict], list[dict]] | None:
+    """Split callouts by the nearest physical contact column.
+
+    USB-C A/B rows are kept intact, then assigned to the left or right by the
+    rendered row position. Other dual-column parts use the largest physical
+    x-gap. This prevents the sequence fallback from routing each label column
+    to the farther contact row and producing X-crossings.
+    """
+    if len(pin_records) < 2:
+        return None
+
+    a_rows = [pin for pin in pin_records if re.fullmatch(r"A\d+", str(pin["pin"]), re.I)]
+    b_rows = [pin for pin in pin_records if re.fullmatch(r"B\d+", str(pin["pin"]), re.I)]
+    if a_rows and b_rows and len(a_rows) + len(b_rows) == len(pin_records):
+        a_x = sum(pin["anchor_x"] for pin in a_rows) / len(a_rows)
+        b_x = sum(pin["anchor_x"] for pin in b_rows) / len(b_rows)
+        return (a_rows, b_rows) if a_x <= b_x else (b_rows, a_rows)
+
+    ordered = sorted(pin_records, key=lambda pin: pin["anchor_x"])
+    gaps = [
+        (ordered[index + 1]["anchor_x"] - ordered[index]["anchor_x"], index)
+        for index in range(len(ordered) - 1)
+    ]
+    gap, index = max(gaps, default=(0.0, -1))
+    if index < 0 or gap < max(0.5, body_w * 0.04):
+        return None
+    left = ordered[: index + 1]
+    right = ordered[index + 1 :]
+    return (left, right) if left and right else None
 
 
 def distribute(pins: list[dict], height: float, top: float) -> list[tuple[dict, float]]:
@@ -184,6 +224,7 @@ def distribute(pins: list[dict], height: float, top: float) -> list[tuple[dict, 
 
 def generate_one(item: dict, source: Path, output: Path, board_paths: list[Path]) -> None:
     pins = item["pins"]
+    body_style = str(item.get("body_style", "")).lower()
     domain = str(item.get("processor_domain", "other")).lower()
     color = DOMAIN_COLORS.get(domain, DOMAIN_COLORS["other"])
     domain_label = {"stm32": "STM32", "rk3588": "RK3588", "shared": "STM32 + RK3588"}.get(domain, "BOARD")
@@ -231,7 +272,20 @@ def generate_one(item: dict, source: Path, output: Path, board_paths: list[Path]
     if missing:
         raise ValueError(f"{item['designator']}: SVG lacks pad metadata for {', '.join(missing)}")
 
-    rotation = choose_rotation(pad_centers, pins)
+    rotation_value = item.get("pinout_rotation")
+    if rotation_value is None:
+        rotation = choose_rotation(pad_centers, pins, body_style=body_style)
+    else:
+        try:
+            rotation = int(rotation_value) % 360
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{item['designator']}: invalid pinout_rotation {rotation_value!r}"
+            ) from exc
+        if rotation not in {0, 90, 180, 270}:
+            raise ValueError(
+                f"{item['designator']}: pinout_rotation must be 0, 90, 180, or 270"
+            )
     rotated_w, rotated_h = rotated_size(source_w, source_h, rotation)
     if rotation:
         pad_centers = {
@@ -249,9 +303,16 @@ def generate_one(item: dict, source: Path, output: Path, board_paths: list[Path]
     label_layout = requested_layout
     if label_layout == "auto":
         # Dense dual-row connectors already benefit from two-sided callouts.
-        # Single-row connectors are drawn with callouts on the left so their
-        # leaders leave the contact face without crossing the connector body.
-        label_layout = "split" if len(pins) > 8 else "left"
+        # Physical multi-column controls are split even at low pin counts.
+        # Single-row connectors are drawn with callouts on the left.
+        has_usb_ab_rows = all(
+            re.fullmatch(r"[AB]\d+", str(pin["pin"]), re.I) for pin in pins
+        )
+        label_layout = (
+            "split"
+            if len(pins) > 8 or body_style in AUTO_SPLIT_BODY_STYLES or has_usb_ab_rows
+            else "left"
+        )
     use_two_sides = label_layout == "split"
     left_w = label_w if label_layout in {"left", "split"} else 3.0
     right_w = label_w if label_layout in {"right", "split"} else 3.0
@@ -303,12 +364,18 @@ def generate_one(item: dict, source: Path, output: Path, board_paths: list[Path]
         })
 
     if use_two_sides:
-        center_x = body_x + body_w / 2.0
-        left = [pin for pin in pin_records if pin["anchor_x"] <= center_x]
-        right = [pin for pin in pin_records if pin["anchor_x"] > center_x]
+        physical_columns = split_physical_columns(pin_records, body_w)
+        if physical_columns is not None:
+            left, right = physical_columns
+        else:
+            center_x = body_x + body_w / 2.0
+            left = [pin for pin in pin_records if pin["anchor_x"] <= center_x]
+            right = [pin for pin in pin_records if pin["anchor_x"] > center_x]
         if not left or not right or abs(len(left) - len(right)) > max(4, len(pin_records) // 2):
             split = math.ceil(len(pin_records) / 2)
             left, right = pin_records[:split], pin_records[split:]
+        if item.get("pinout_split_swap"):
+            left, right = right, left
         left.sort(key=lambda pin: (pin["anchor_y"], pin["anchor_x"], str(pin["pin"])))
         right.sort(key=lambda pin: (pin["anchor_y"], pin["anchor_x"], str(pin["pin"])))
     elif label_layout == "left":

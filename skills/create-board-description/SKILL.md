@@ -136,12 +136,17 @@ behavior in the function text when it differs from the source name. Never expose
 generated segment names such as `NetR147_2`, `NetXP8_1`, or `NetLB11_1`.
 
 Rotate the exported connector body in 90-degree increments when that makes the
-dominant contact row vertical and reduces leader-line crossings. Preserve pad
-number association after rotation. Sort one-sided labels by physical pad
-position rather than schematic pin order. Put single-row connector labels on
-the contact side, normally the left after rotation; keep established dual-row
-layouts split across both sides. Use an explicit split-side override for
-multi-column controls such as DIP switches and buzzers. Connector 3D crops
+dominant contact row vertical and reduces leader-line crossings. Preserve the
+native orientation for `dip-switch` bodies so the control matches its installed
+board orientation; use `pinout_rotation` only when the native export differs
+from the installation. Preserve pad-number association after rotation. Sort
+one-sided labels by physical pad position rather than schematic pin order. Put
+single-row connector labels on the contact side, normally the left after
+rotation. Automatically split `usb-c`, `dip-switch`, `tactile-switch`, and
+`buzzer` bodies across both sides. Assign the lower-x physical contact column
+to left labels and the higher-x column to right labels, even when both contact
+rows lie on the same half of the housing. Keep USB-C A/B rows intact and swap
+the complete row groups automatically when that removes X-crossings. Connector 3D crops
 should use the same requested solder-mask color as the whole-board renders.
 When a locator is requested, use a compact vertical semi-transparent red shaft
 with a distinct triangular arrowhead centered on the component. Support an

@@ -175,12 +175,27 @@ design or manufacturing description.
   overlap or intersections; rotate pad anchor coordinates with the body so the
   `data-pad-number` correspondence remains exact.
 - `pinout_label_layout` may be `auto`, `left`, `right`, or `split`. In `auto`,
-  keep dual-row connectors split across both sides and route a single-row
-  connector to the left after rotation. Sort one-sided callouts by physical pad
-  position, not schematic pin order, so reversed numbering cannot cross.
-- Use `split` for low-pin-count components whose contacts occupy multiple
-  columns, such as a DIP switch or buzzer. Verify the resulting leader geometry
-  rather than assuming every low-pin-count component is single-row.
+  keep dual-row connectors split across both sides, automatically split
+  `usb-c`, `dip-switch`, `tactile-switch`, and `buzzer` bodies, and route a
+  single-row connector to the left after rotation. Sort one-sided callouts by
+  physical pad position, not schematic pin order, so reversed numbering cannot
+  cross.
+- Split layouts use physical pad columns before pin-list order. The lower-x
+  column is labeled on the left and the higher-x column on the right. USB-C A/B
+  rows remain intact and are assigned to the nearest side, including when both
+  rows lie on the same half of the housing. This is the default X-crossing
+  prevention; do not add a board-specific swap when geometry resolves it.
+- `pinout_rotation` may explicitly select `0`, `90`, `180`, or `270` degrees
+  when the native footprint orientation must match the installed board
+  orientation. `dip-switch` bodies preserve their native orientation by
+  default; omit the field when that matches the board.
+- Set `pinout_split_swap` to `true` when a split connector has both contact
+  rows on the same half of the housing and damaged or incomplete pad metadata
+  prevents automatic physical-column assignment. This is an exceptional
+  override; it swaps complete groups while preserving pad order.
+- Classify low-pin-count multi-column controls with `body_style`; automatic
+  layout then splits their labels left/right. Verify the resulting leader
+  geometry rather than assuming every low-pin-count component is single-row.
 - `map_label_layout` may be `perimeter` or `local`. Reserve `local` for an
   internal component whose outside placement would create a long leader.
 - `map_label_bias` may be `nearest`, `left`, `right`, `top`, or `bottom` and

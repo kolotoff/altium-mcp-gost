@@ -79,11 +79,23 @@ For end-user mode, use
 [references/end-user-description-data.md](references/end-user-description-data.md)
 instead. Do not reuse or adapt a legacy block diagram for this mode.
 
+When revising an existing manual, render both the current and revised documents
+and inspect every page. Record placement, pagination and readability defects
+before editing the shared generators. Fix recurring defects in the generators
+and keep board-specific conclusions in the task-local specification.
+
 Before generation, reconcile every row against:
 
 1. the original/reference document;
 2. the open design;
-3. the user's corrections and omissions.
+3. the user's corrections and omissions;
+4. the exact current application firmware target and its referenced files,
+   following the port-map skill when firmware is in scope.
+
+Freeze the reviewed specification and export its pin records before the
+independent source-data check. Give the verifier live Altium and current
+firmware access plus the native SVG, specification and CSV/JSON. Resolve and
+recheck discrepancies before final DOCX generation.
 
 Remove duplicate facts and unsupported fields. Unless the user asks otherwise,
 the finished document must not contain:
@@ -120,14 +132,11 @@ Altium document.
 
 Generate connector pinouts from the exported component SVGs. Use the
 `data-pad-number` attributes in the source `<g id="Pads">` group to associate
-each physical contact with the ordered `pins` records, but do not copy or render
-the Pads group in the visible connector illustration. The visible body comes
-from the real Altium assembly geometry. A native Altium SVG is mandatory for
-every pinout: use the component export when available, otherwise extract the
-component's assembly and numbered-pad groups from the PCB assembly SVG. For a
-pad-only contact or solder bridge, show its actual pad paths. Never substitute
-a generic connector outline, guessed pad positions, or a generated silhouette;
-stop with a designator-specific error when no usable native SVG geometry exists.
+each physical contact with the ordered `pins` records. Use the native Altium
+assembly body when present. If the assembly body is missing, show the native
+paths of the documented numbered pads in the pinout and interface map. The
+[end-user data reference](references/end-user-description-data.md) describes
+how to handle repeated instances and how to verify the rendered layout.
 
 For the displayed net name, trace through connector-side ESD arrays, filters,
 common-mode chokes, selectors, and series parts to the named source net at the
@@ -191,18 +200,21 @@ python tools\generate_end_user_board_description_docx.py `
 ```
 
 The dedicated generator rejects common PCB-fabrication fields and excluded
-non-signal contact identifiers. Its last column groups consecutive rows by
-interface while preserving one physical contact per row.
+non-signal contact identifiers. Its four-column table groups consecutive
+interface rows while preserving a separate row per physical contact. Use
+landscape board views and interface maps, then let the overview and complete
+connector sections flow through portrait pages. Use short figure captions
+that identify the board crop and the numbered contacts on the installed side.
 Do not expose compiler-generated PCB net names such as `NetR42_2` in end-user
 tables or diagrams. Resolve them to their named source/destination signal, power
 rail, or a concise functional alias verified from the connected circuit.
 
 When processor-domain marking is requested, use a consistent legend throughout
-the pinout drawings and the 1:1 maps: STM32/flight-controller interfaces in
-blue, RK3588 interfaces in orange, shared interfaces in purple, and unrelated
-interfaces in neutral gray. Mark the processor packages themselves on the
-applicable board side. Keep full-board map geometry at the physical SVG size so
-the PCB outline prints at 1:1 scale. Preserve the `BoardShape` mounting-hole
+the pinout drawings and the interface maps. Use blue for STM32 interfaces,
+orange for RK3588, purple for shared interfaces, and neutral gray for other
+interfaces. Mark the processor packages on the applicable board side. Print
+both sides at the same scale. Put the processor legend in a horizontal row
+and the power legend in a vertical column in the lower-right corner. Preserve the `BoardShape` mounting-hole
 circles from the Altium assembly SVG even when the separate copper `Pads` group
 is hidden, but exclude any hole whose full circle lies outside the PCB outline.
 For connector power-source marking, color only bodies sharing a power domain
@@ -237,10 +249,6 @@ make room for lower-priority items; reserve those projected perimeter positions
 first. Support explicit local-label overrides for internal items whose perimeter
 placement would create a long leader, and keep those local leaders short.
 
-For a solder bridge without Mechanical-2 body artwork, copy the real pad paths
-and `data-pad-number` metadata from the full-board assembly SVG into the pinout.
-Do not replace the bridge with a generated rounded rectangle.
-
 Describe every `SB*` item explicitly. For each solder bridge, state the default
 open/closed condition and the exact electrical effect of changing it. If an
 `SB*` designator is a mechanical switch rather than a solder bridge, say so and
@@ -253,17 +261,24 @@ render-and-verify workflow. At minimum:
 
 - reopen the output and verify the title, section/table count, and PAGE field;
 - audit section geometry, table widths, and accessibility;
-- render every page and inspect it for clipping, overflow, broken rows, orphaned
-  headings, incorrect footer text, and unexpected blank pages;
+- render every page, create contact sheets, and inspect page images for
+  clipping, overflow, broken rows, orphaned headings, incorrect footer text,
+  unexpected blank pages, and unnecessary connector table continuations;
+- inspect dense connectors and multi-row controls at page size. Check native
+  body proportions, horizontal labels and exact pad endpoints against the
+  source SVG. Compare the SVG labels, DOCX table rows and machine-readable
+  records and rerun a targeted comparison against the current firmware;
 - search extracted document text for required values and forbidden names or
   positional designators;
 - confirm the source Altium document was not saved or modified.
 
-If the standard renderer cannot find LibreOffice on Windows, use installed
-Microsoft Word to export a temporary PDF, rasterize every page with the bundled
-document runtime, and inspect all page images. Treat a renderer failure as a
-verification-path failure, not as evidence that the DOCX is valid.
+For end-user manuals, the generator exports a PDF from the finished DOCX by
+default. It uses Microsoft Word on Windows or LibreOffice on PATH. Rasterize
+that PDF and inspect all pages before delivery. Check the fine lines against
+the source diagrams and verify that the maps and pinouts remain vector. The
+PDF workflow uses the `manual-pdf` extra to trace SVG strokes at their actual
+widths. Use `--docx-only` for an editable file alone.
 
-Deliver the final DOCX and summarize the decisive characteristics added. Mention
-uncertainties or omitted requested data, but do not include internal research
-provenance unless the user asks for it.
+Deliver the final DOCX. Include the matching PDF for end-user manuals by
+default. Summarize the decisive characteristics added and mention uncertainties
+or omitted requested data. Include internal research provenance when requested.

@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 from collections import defaultdict
 from pathlib import Path
 
@@ -18,7 +19,24 @@ FIELDS = (
     "function", "interface_group", "ardupilot_port", "mcu_peripheral",
     "mcu_pin", "power_source_net", "power_voltage", "power_path",
     "power_domain", "trace_status", "trace_note",
+    "firmware_target", "mcu_ball", "mcu_signal", "mcu_af", "signal_direction",
 )
+GENERATED_NET = re.compile(r"\bNet[A-Z][A-Z0-9]*\d+_[A-Z0-9_]+\b", re.IGNORECASE)
+
+
+def verify_firmware_identity(spec: dict) -> str:
+    """Require the selected application target when exporting ArduPilot mappings."""
+    source = str(spec.get("firmware_source", "")).strip()
+    target = str(spec.get("firmware_target", "")).strip()
+    firmware_pins = any(
+        pin.get("ardupilot_port")
+        for group in spec["connector_groups"] for item in group["items"] for pin in item["pins"]
+    )
+    if source or target or firmware_pins:
+        suffix = source.replace("\\", "/").rstrip("/").split("/")[-2:]
+        if not target or suffix != [target, "hwdef.dat"]:
+            raise ValueError("declare firmware_target and its matching application firmware_source (hwdef.dat)")
+    return target
 
 
 def pin_sort_key(pin: str) -> tuple[str, int]:
@@ -46,7 +64,7 @@ def flatten(spec: dict) -> list[dict[str, str]]:
                     raise ValueError(f"missing physical PCB net: {connector}/{number}")
                 source_net = str(pin["net"])
                 connector_net = str(pin["connector_net"])
-                if source_net.startswith("Net"):
+                if GENERATED_NET.search(source_net):
                     raise ValueError(f"unresolved source net: {connector}/{number} {source_net}")
                 if not connector_net:
                     trace_status = "unconnected"
@@ -73,6 +91,11 @@ def flatten(spec: dict) -> list[dict[str, str]]:
                     "power_domain": str(pin.get("power_domain", "")),
                     "trace_status": trace_status,
                     "trace_note": str(pin.get("trace_note", "")),
+                    "firmware_target": str(spec.get("firmware_target", "")),
+                    "mcu_ball": str(pin.get("mcu_ball", "")),
+                    "mcu_signal": str(pin.get("mcu_signal", "")),
+                    "mcu_af": str(pin.get("mcu_af", "")),
+                    "signal_direction": str(pin.get("signal_direction", "")),
                 })
     return sorted(records, key=lambda record: (record["connector"], pin_sort_key(record["pin"])))
 
@@ -93,7 +116,7 @@ def interface_mappings(records: list[dict[str, str]], prefix: str) -> list[dict]
                 {"connector": row["connector"], "pin": row["pin"],
                  "connector_net": row["connector_net"],
                  "source_net": row["source_net"], "mcu_pin": row["mcu_pin"],
-                 "mcu_signal": row["mcu_peripheral"]}
+                 "mcu_signal": row.get("mcu_signal") or row["mcu_peripheral"]}
                 for row in pins
             ],
         })
@@ -101,10 +124,12 @@ def interface_mappings(records: list[dict[str, str]], prefix: str) -> list[dict]
 
 
 def export(spec: dict, csv_path: Path, json_path: Path) -> dict:
+    target = verify_firmware_identity(spec)
     records = flatten(spec)
     payload = {
         "schema_version": 1,
         "board": spec["board_id"],
+        "firmware_target": target,
         "firmware_source": spec.get("firmware_source", ""),
         "records": records,
         "uart_mappings": interface_mappings(records, "SERIAL"),

@@ -21,7 +21,7 @@ class BoardPortMapTests(unittest.TestCase):
                      "power_voltage": "5 V", "power_path": "L1", "power_domain": "main_5v"},
                     {"pin": "2", "connector_net": "TX_C", "net": "MCU_TX",
                      "function": "TX", "group": "UART", "ardupilot_port": "SERIAL3",
-                     "mcu_peripheral": "USART3_TX", "mcu_pin": "PC10"},
+                     "mcu_peripheral": "USART3", "mcu_signal": "USART3_TX", "mcu_pin": "PC10"},
                 ],
             }]}],
         }
@@ -32,6 +32,7 @@ class BoardPortMapTests(unittest.TestCase):
         mapping = interface_mappings(rows, "SERIAL")
         self.assertEqual("USART3", mapping[0]["mcu_peripheral"])
         self.assertEqual("PC10", mapping[0]["connector_pins"][0]["mcu_pin"])
+        self.assertEqual("USART3_TX", mapping[0]["connector_pins"][0]["mcu_signal"])
 
     def test_rejects_generated_source_name(self):
         spec = {"board_id": "Example", "connector_groups": [{"items": [{

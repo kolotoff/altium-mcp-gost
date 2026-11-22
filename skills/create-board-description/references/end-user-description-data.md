@@ -7,7 +7,9 @@ design or manufacturing description.
 ```json
 {
   "board_id": "ExampleBoard_v1",
-  "firmware_source": "path/to/firmware/hwdef.dat",
+  "firmware_target": "EXAMPLE-743",
+  "firmware_source": "path/to/hwdef/EXAMPLE-743/hwdef.dat",
+  "language": "en-US",
   "title": "USER MANUAL",
   "subtitle": "ExampleBoard",
   "footer_label": "ExampleBoard",
@@ -32,6 +34,13 @@ design or manufacturing description.
   ],
   "interface_maps_title": "Board interface maps",
   "interface_maps_intro": "Vector views are shown at 1:1 scale. STM32 interfaces are blue, RK3588 interfaces are orange, and shared interfaces are purple.",
+  "interface_map_scale": 1,
+  "component_overrides": {
+    "flight_controller": {
+      "overview": "STM32H743 flight controller with a Cortex-M7 core.",
+      "map_label": "STM32H743"
+    }
+  },
   "interface_map_legend": {
     "stm32": "STM32 / ArduPilot",
     "rk3588": "RK3588",
@@ -41,7 +50,7 @@ design or manufacturing description.
   "interface_map_processors": [
     {
       "designator": "U1",
-      "label": "STM32H743",
+      "component_override": "flight_controller",
       "processor_domain": "stm32",
       "side": "bottom"
     }
@@ -64,7 +73,7 @@ design or manufacturing description.
     {
       "title": "Flight controller",
       "rows": [
-        ["Controller", "STM32H743"],
+        ["Controller", {"component_override": "flight_controller"}],
         ["Firmware target", "EXAMPLE-743"]
       ]
     }
@@ -83,7 +92,7 @@ design or manufacturing description.
           "pinout_fallback_image": "C:/absolute/path/pinout_X1.png",
           "processor_domain": "stm32",
           "power_domain": "main_5v",
-          "interface_label": "GNSS SERIAL3",
+          "interface_label": "GNSS · USART3/SERIAL3",
           "pinout_label_layout": "auto",
           "map_label_layout": "perimeter",
           "map_label_bias": "nearest",
@@ -105,8 +114,11 @@ design or manufacturing description.
               "net": "GNSS_TX",
               "function": "STM32 PC10; ArduPilot SERIAL3 TX",
               "ardupilot_port": "SERIAL3",
-              "mcu_peripheral": "USART3_TX",
+              "mcu_peripheral": "USART3",
+              "mcu_signal": "USART3_TX",
               "mcu_pin": "PC10",
+              "mcu_ball": "example package contact",
+              "signal_direction": "output",
               "group": "UART / SERIAL3"
             }
           ]
@@ -125,9 +137,15 @@ design or manufacturing description.
   cover and before the functional overview. Use one page per side when needed
   to keep connector labels and component placement legible.
 - When requested, add `interface_maps` after the board renders. Preserve the
-  physical millimetre dimensions of each SVG so the internal PCB outline prints
-  at 1:1 scale. Remove the visible Pads group from these maps while retaining
-  component-body assembly geometry and connector labels.
+  physical millimetre dimensions of each SVG. Set `interface_map_scale` once
+  for both sides, defaulting to `1` for 1:1. Increase the scale when both sides
+  fit with their full callouts and legend. Update the scale captions to match.
+  Retain the assembly geometry, exposed contact paths, and connector labels.
+- Use `component_overrides` for reader-facing model names, population notes,
+  or generic module descriptions. An overview row can refer to an override
+  key to display its `overview` sentence. A processor-map record can refer to
+  the same key to display `map_label`. The native designator, pad geometry,
+  and electrical and firmware records retain their original identity.
 - Do not include stackup, design-rule, trace-width, clearance, fabrication, or
   other PCB-production details unless the user explicitly requests them.
 - Create one `items` entry, one orthographic 3D image, one connector-side
@@ -137,12 +155,21 @@ design or manufacturing description.
   repeated contacts into one row.
 - Exclude mechanical, mounting, shell, and hold-down contacts from the end-user
   pinout unless the user explicitly asks for chassis or shield bonding details.
+  Confirm mating-contact counts against the connector drawing when auxiliary
+  solder pads use ordinary numbers. Retain their exclusions in the verification
+  report, with the footprint and reason.
 - `group` is mandatory. Consecutive equal values are merged visually in the
   last table column while each physical contact retains its own row.
 - Keep the exact PCB pad `connector_net` separate from `net`, the traced and
   user-facing source signal. If CSV/JSON exports are requested, follow
   `skills/create-board-port-map/SKILL.md`; populate firmware ports, MCU pins,
   power-source nets, voltages, paths, and `power_domain` from verified sources.
+- Set `firmware_target` to the exact target directory name of each ArduPilot
+  variant and `firmware_source` to its application `hwdef.dat`. Follow the
+  port-map skill to derive the current effective mapping from disk, track
+  includes and overrides, and verify both the numbered peripheral and its
+  logical port against the physical MCU contact. Record the target and source
+  hashes in the verification report.
 - Put an ArduPilot mapping in `function` when the signal is defined by the
   selected hardware target. Include the firmware name and MCU pin when known;
   state that a line is unassigned when verified as such.
@@ -150,7 +177,7 @@ design or manufacturing description.
 - Use `body_style` to classify the contact geometry, never to select a
   substitute housing. Supported styles are `jst-gh`, `picoblade-ra`, `xt60`,
   `mr60`, `board-to-board`, `usb-c`, `microcoax`, `keystone`, `dip-switch`,
-  `solder-bridge`, `tactile-switch`, `buzzer`, and `coin-cell`.
+  `solder-bridge`, `pad-contact`, `tactile-switch`, `buzzer`, and `coin-cell`.
 - Never expose an automatically generated PCB name such as `NetR42_2`. Replace
   it with the traced source/destination signal or power rail. When the segment
   is intentionally unnamed, use a concise functional alias and explain the
@@ -162,24 +189,30 @@ design or manufacturing description.
 - Images must be exported from the open PCB through the Altium MCP, with the
   projection verified as orthographic. Prefer direct 3D and assembly exports to
   screen capture.
-- Pinout diagrams must be generated from the same ordered `pins` records used
-  by the table. A native Altium SVG is mandatory: use the component assembly
-  body, keying, and pin-1 orientation, or extract the assembly and numbered-pad
-  groups from the PCB assembly SVG if the separate component export is absent.
-  Read `data-pad-number` to place each net label; omit copper pads from the
-  visible drawing except where the actual pad is the only physical body, such
-  as a solder bridge or pad-only contact. Stop if native geometry or pin
-  metadata is unavailable; never generate a substitute silhouette. These are
-  connector illustrations, not board block diagrams.
-- Rotate the real connector SVG body by 90 degrees when it reduces label-line
-  overlap or intersections; rotate pad anchor coordinates with the body so the
-  `data-pad-number` correspondence remains exact.
+- Pinout diagrams use the same `pins` records as the table. Prefer the
+  installed-side assembly and pad groups from the current PCB SVG. The
+  component assembly export is also valid when its contact view matches the
+  installed part. Use the native body, keying and pin-1 orientation.
+  For repeated designators, match the Altium pad coordinates before assigning
+  `native_svg_instance`. Pinouts, interface maps and 3D crops use the same
+  verified instance.
+  Read `data-pad-number` to place each net label. When the assembly body is
+  absent, render the exact native paths for the documented numbered pads in
+  both the pinout and interface map. Keep their installed transforms and omit
+  unrelated pads. Stop if usable native geometry or pin metadata is absent.
+- Apply the same native transform and uniform scale to artwork and pad anchors.
+  Use the available label-row height for the housing and reserve side space
+  for the longest complete label. If physical order benefits from reorientation,
+  rotate the artwork and anchors together by 90 degrees. For an obliquely
+  installed board-to-board part, use the native footprint frame on the same
+  installed side if this makes the two contact rows legible. Keep text horizontal.
 - `pinout_label_layout` may be `auto`, `left`, `right`, or `split`. In `auto`,
   keep dual-row connectors split across both sides, automatically split
   `usb-c`, `dip-switch`, `tactile-switch`, and `buzzer` bodies, and route a
-  single-row connector to the left after rotation. Sort one-sided callouts by
-  physical pad position, not schematic pin order, so reversed numbering cannot
-  cross.
+  single-row connector toward the closer housing edge. Sort callouts by their
+  physical pad positions. Fan leaders outside the housing where practical.
+  When a uniformly spaced pad row needs more label room, spread its leaders
+  symmetrically above and below the row midpoint.
 - Split layouts use physical pad columns before pin-list order. The lower-x
   column is labeled on the left and the higher-x column on the right. USB-C A/B
   rows remain intact and are assigned to the nearest side, including when both
@@ -230,11 +263,14 @@ design or manufacturing description.
   `power_path` for machine-readable CSV/JSON exports.
 - `interface_map_legend` may override the four domain captions without changing
   their colors. Declare processor callouts in `interface_map_processors`; each
-  record supplies the real designator, displayed label, domain, and `top`,
-  `bottom`, or `both` side. Do not hard-code board-specific processor locations
-  in the generator.
+  record supplies the real designator, domain, `top`, `bottom`, or `both` side,
+  and either `label` or `component_override` for the displayed text. Arrange
+  processor colors in one horizontal row and power colors in one vertical
+  column in the lower-right corner, clear of the drawing and its leaders.
 - For top-side interface maps, place perimeter-connector labels outside the PCB
   first. Keep left/right labels horizontal and rotate top/bottom labels by 90°.
+  Center the visible Arial text within each colored badge on both axes,
+  including multiline and rotated badges. Verify this in Word's page render.
   Preserve `BoardShape/StandaloneMountingPads` from the current Altium assembly
   export when hiding the copper `Pads` group so drilled mounting holes inside
   the PCB outline remain visible on both top- and bottom-side maps. Exclude
@@ -251,9 +287,11 @@ design or manufacturing description.
 - Keep the projected edge position fixed for components closest to the outline;
   lower-priority labels must move around them. When a local override is used,
   place the label beside the component with a short direct leader.
-- If an `SB*` solder bridge has no Mechanical-2 body, copy its real pad paths
-  from the board assembly SVG and use `data-pad-number` for pin mapping. Never
-  replace the bridge with a generated rounded rectangle.
+- Center the full-board artwork on each landscape page and place the caption
+  below it. Align the connector crop and pinout on one horizontal centerline.
+  Align the midpoint of each net label's capital letters with the horizontal
+  end of its leader. Leave a clear gap between a connector's pin table and the
+  next heading on the same page.
 - If connector crops use a locator arrow, draw a short vertical translucent red
   shaft with a clear triangular head. Provide a per-designator vertical-flip
   override for bottom-side crops whose exported local orientation is reversed.
@@ -270,3 +308,10 @@ design or manufacturing description.
 - No blocked production-detail phrase or excluded non-signal contact identifier
   occurs in the finished document text.
 - The document contains no legacy block diagram.
+- The native SVG instance, installed side, pad number and conductor trace agree
+  with the fresh Altium readback. The specification, port-map CSV and JSON
+  agree for every pin and an independent review has cleared the technical data.
+- Check the full-width connector tables and aligned figure captions in the
+  portrait connector pages. Use rendered page images to check dense tables,
+  body size and legibility. Confirm that both landscape maps print at the same
+  labeled scale and both legend groups are clear of the callouts.

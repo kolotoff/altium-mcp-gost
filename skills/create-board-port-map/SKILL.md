@@ -26,13 +26,22 @@ firmware port from a connector's label alone.
    cell, and a source-dependent input. A nominal voltage is allowed only when
    verified by the schematic or regulator connection. Use a descriptive value
    such as `input-dependent` or `1.8/3.3 V selectable` when appropriate.
-4. If firmware is in scope, read its actual board definition. Record the
-   software port number separately from the hardware peripheral and MCU pin.
-   For ArduPilot, `SERIAL_ORDER` maps `SERIAL0`, `SERIAL1`, … in order and
-   `I2C_ORDER` maps bus 0, bus 1, … in order. Do not confuse hardware `UART5`
-   with `SERIAL5`. Record TX/RX or SCL/SDA per contact. Keep bootloader and
-   main-firmware mappings distinct if they differ.
-5. When this map feeds an end-user board manual, put both the numbered hardware
+4. Declare the exact ArduPilot target directory for each board variant in
+   `firmware_target` and its application `hwdef.dat` in `firmware_source`.
+   Reread this file and every referenced file from disk for each verification.
+   Expand includes in place and apply `undef`, reassignment, and alternate
+   settings in the firmware parser's effective order. Record the exact target,
+   source paths and hashes in the verification report. Treat previous exports
+   and manuals as comparison inputs.
+5. Match each traced function to its physical MCU pin and effective assignment.
+   Keep the numbered peripheral, signal direction, and ArduPilot logical port
+   distinct. Derive serial and I²C numbers from `SERIAL_ORDER` and
+   `I2C_ORDER`, retaining empty serial slots. Check CAN order, SPI devices and
+   chip selects, timer channels and servo indices, GPIO, ADC, USB, safety and
+   alarm assignments. Record declared but disabled or unassigned functions
+   explicitly. Check target defaults separately from the application and
+   bootloader pin maps.
+6. When this map feeds an end-user board manual, put both the numbered hardware
    peripheral and ArduPilot port on applicable connector-map labels. Retain
    the audited power path in CSV/JSON, but show only the upstream source rail
    and verified voltage in end-user pin tables.
@@ -43,8 +52,11 @@ Use the board-description JSON's `connector_groups[].items[].pins[]` structure
 when available. Every pin needs `pin`, `connector_net`, `net` (the named
 source-side net), `function` and `group`. Add `ardupilot_port`,
 `mcu_peripheral`, `mcu_pin`, `power_source_net`, `power_voltage`, `power_path`
-and `power_domain` when applicable. Set top-level `board_id` and
-`firmware_source`. The CSV and JSON share one flattened record set.
+and `power_domain` when applicable. Keep the component/pin trace in
+`trace_note`, including any branch or selection state needed to explain
+multiple endpoints. Set top-level `board_id`, `firmware_target` and
+`firmware_source` for an ArduPilot board. The CSV and JSON share one flattened
+record set.
 
 ```powershell
 python tools/export_board_port_maps.py `
@@ -60,12 +72,15 @@ definition filename for auditability.
 
 ## Verification
 
-- Compare every exported `connector_net` with a fresh Altium pin readback;
-  zero mismatches is the release criterion. Check duplicate and missing pins.
-- Cross-check every UART and I2C group against the firmware order and MCU pin
-  declarations, including signal direction.
-- Independently check one contact in each power-domain class against the
-  upstream component pins. Never collapse independent regulated banks merely
-  because they share the same nominal voltage.
+- Compare each export row to a fresh Altium pad readback and match each
+  physical number to the native SVG metadata. Require complete coverage of
+  documented contacts with zero duplicates, mechanical callouts, or mismatches.
+- Compare each firmware record against the effective MCU pin, peripheral,
+  direction, and logical port. Verify every power contact against the upstream
+  component path. Preserve independent supply banks with equal voltages.
+- For independent verification, give a fresh verifier the exact board paths,
+  target paths, specification, and exports. Have it reread the sources and
+  report record counts and discrepancies by board, designator, and physical
+  pin. Recheck every correction before generating the final DOCX.
 - Report any `trace_exceptions` explicitly. Do not call unverified nets
   resolved, and do not save the Altium design unless the user asks.

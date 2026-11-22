@@ -814,15 +814,23 @@ manual rather than a PCB manufacturing description. Its JSON schema is
 documented in
 `skills/create-board-description/references/end-user-description-data.md`.
 The workflow produces physical connector pinouts from Altium assembly SVGs,
-1:1 top/bottom interface maps, and a DOCX with one pin per table row:
+top and bottom interface maps at one shared scale, and a DOCX with one pin per table row:
+
+For each ArduPilot variant, enter its exact `firmware_target` and application
+`firmware_source` in the board specification. Reread that target and its
+referenced files, resolve the current mapping, and export the reviewed
+specification with `tools/export_board_port_maps.py`. The
+`skills/create-board-port-map/SKILL.md` workflow covers the source checks
+and independent verification before DOCX generation.
 
 ```powershell
 python tools\crop_native_pcb_3d_export.py `
   --top "D:\path\pcb-3d-top.png" `
   --bottom "D:\path\pcb-3d-bottom.png" `
   --components "D:\path\component-records.json" `
-  --board-width-mm 100 --board-height-mm 50 `
-  --board-origin-x-mil 0 --board-origin-y-mil 0 `
+  --top-svg "D:\path\pcb-assembly-top.svg" `
+  --bottom-svg "D:\path\pcb-assembly-bottom.svg" `
+  --registration "D:\path\pcb-3d-registration.json" `
   --output-dir "D:\path\connector-images"
 
 python tools\generate_altium_connector_svgs.py `
@@ -865,14 +873,20 @@ nearby power domains use visibly distinct hues. Inspect the rendered overlays
 against the actual connector housings before embedding the maps in the DOCX.
 The SVG rasterizer requires the `sharp` Node.js package. Its PNGs are mandatory
 fallbacks for Word clients that do not render the embedded SVG part directly.
-Connector pinout layout is geometry-driven. In `auto` mode, native USB-C A/B
-rows and multi-column `dip-switch`, `tactile-switch`, and `buzzer` bodies are
-split across both sides. The lower-x physical contact column is labeled on the
-left and the higher-x column on the right, so labels follow the nearest row and
-do not form X-crossings even when both rows sit on one half of the housing.
-`dip-switch` bodies retain native orientation to match the board view; explicit
-layout, rotation, and side-swap fields are reserved for incomplete metadata or
-an installation that differs from the native export.
+Connector pinouts use the installed Altium assembly artwork, with a common
+transform for the housing and numbered pad anchors. Housing size follows the
+diagram's label rows. Pin labels remain horizontal, and the geometry routes
+multi-column contacts to both sides while keeping USB-C A/B rows intact.
+Match repeated designators to their physical positions and pass the verified
+`native_svg_instance` to the pinout, map, and crop generators. Reserve layout,
+rotation, and side-swap overrides for incomplete metadata or a different
+installed orientation. The manual uses landscape maps with a horizontal processor legend and a vertical power legend in the lower-right corner
+and portrait pages for connector figures and four-column tables. Render the
+PDF to check table pagination, figure captions, and legibility at page size.
+The generator writes a matching PDF alongside the DOCX by default. It uses
+Microsoft Word on Windows or LibreOffice on PATH. Install the `manual-pdf`
+extra with `uv sync --extra manual-pdf` to keep interface maps and pinouts
+vector at their SVG line weights. Use `--docx-only` for an editable file alone.
 Write generated manuals, maps, pin-to-net exports, renders, reports, and
 temporary work beneath the repository-root `generated/` directory. That
 directory is intentionally ignored by Git; only generators, tests, skills,

@@ -12,11 +12,11 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 if __package__:
     from .board_test_localization import LANGUAGE_MODES, ui_text
     from .pcb_3d_registration import CameraRegistration, load_registration
-    from .pcb_svg_geometry import component_transform, exported_designator_aliases, parse_numbers
+    from .pcb_svg_geometry import assembly_path_vertices, component_transform, exported_designator_aliases, parse_numbers
 else:
     from board_test_localization import LANGUAGE_MODES, ui_text
     from pcb_3d_registration import CameraRegistration, load_registration
-    from pcb_svg_geometry import component_transform, exported_designator_aliases, parse_numbers
+    from pcb_svg_geometry import assembly_path_vertices, component_transform, exported_designator_aliases, parse_numbers
 
 
 MM_PER_MIL = 0.0254
@@ -57,12 +57,12 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+def load_label_font(size: int, *, chinese: bool) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     windows = Path("C:/Windows/Fonts")
     candidates = (
-        windows / ("msyhbd.ttc" if bold else "msyh.ttc"),
-        windows / ("arialbd.ttf" if bold else "arial.ttf"),
-        windows / ("segoeuib.ttf" if bold else "segoeui.ttf"),
+        windows / ("msyhbd.ttc" if chinese else "arialbd.ttf"),
+        windows / "arialbd.ttf",
+        windows / "segoeuib.ttf",
     )
     for candidate in candidates:
         if candidate.exists():
@@ -127,12 +127,24 @@ def svg_component_pixels(
         for element in root.iter():
             identifier = element.get("id", "")
             aliases = exported_designator_aliases(element)
+            if instance := element.get("data-instance"):
+                aliases.append(f"instance:{instance}")
             if not aliases or not identifier.endswith(suffix) or all(alias in positions for alias in aliases):
                 continue
             transform = component_transform(element)
             if transform is None:
                 continue
-            x, y = transform.x, transform.y
+            vertices = [
+                transform.to_board(*point) for child in element.iter()
+                if child.tag.endswith("}path")
+                for point in assembly_path_vertices(child.get("d", ""))
+            ]
+            if vertices:
+                xs, ys = zip(*vertices)
+                x = (min(xs) + max(xs)) / 2
+                y = (min(ys) + max(ys)) / 2
+            else:
+                x, y = transform.x, transform.y
             if registration is not None:
                 registration.validate_image_size(image_size)
                 center = registration.pixel_for_physical(x, y)
@@ -152,13 +164,14 @@ def svg_component_pixels(
 
 def add_label(image: Image.Image, designator: str, side: str, language_mode: str = "source") -> None:
     draw = ImageDraw.Draw(image, "RGBA")
-    font = load_font(28, bold=True)
     text = f"{designator}  |  {ui_text(side, language_mode, separator=' / ')}"
+    font = load_label_font(28, chinese=any("\u4e00" <= char <= "\u9fff" for char in text))
     box = draw.textbbox((0, 0), text, font=font)
     width = box[2] - box[0] + 28
-    height = box[3] - box[1] + 20
+    height = max(44, box[3] - box[1] + 12)
     draw.rounded_rectangle((14, 14, 14 + width, 14 + height), radius=8, fill=(255, 255, 255, 225), outline=(33, 72, 94, 210), width=2)
-    draw.text((28, 22), text, font=font, fill=(24, 50, 74, 255))
+    draw.text((28 - box[0], 14 + (height - box[1] - box[3]) // 2), text,
+              font=font, fill=(24, 50, 74, 255))
 
 
 def add_locator_arrow(image: Image.Image) -> None:
@@ -239,9 +252,11 @@ def main() -> int:
         source = bottom if side == "bottom" else top
         if use_svg_positions:
             positions = bottom_positions if side == "bottom" else top_positions
-            if component["designator"] not in positions:
+            instance = component.get("native_svg_instance")
+            key = f"instance:{instance}" if instance else component["designator"]
+            if key not in positions:
                 raise SystemExit(f"component {component['designator']} is missing from the {side} assembly SVG")
-            center = positions[component["designator"]]
+            center = positions[key]
         else:
             center = point_for_component(
                 component,

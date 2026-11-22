@@ -17,3 +17,4 @@ capture = [
     "imageio-ffmpeg>=0.6.0",
 ]
 capture-tests = ["numpy>=2.0"]
+manual-pdf = ["skia-python>=144.1"]

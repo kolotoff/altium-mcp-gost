@@ -1,10 +1,10 @@
-"""Generate millimetre-scale annotated PCB assembly SVG pages.
+"""Generate annotated PCB assembly SVG pages with a shared physical scale.
 
-The board is kept at 1:1 scale inside an A4-landscape content area.  Connector
+The board is drawn at the selected scale inside an A4-landscape content area. Connector
 labels are placed outside the nearest board edge and color-coded by processor
 domain.  Perimeter connectors are assigned first; internal items then use the
 remaining collision-free perimeter slots.  Copper pads are removed from the
-visible assembly artwork.
+visible assembly artwork unless they are the documented contact geometry.
 """
 
 from __future__ import annotations
@@ -19,9 +19,13 @@ from collections import Counter
 from pathlib import Path
 
 if __package__:
-    from .pcb_svg_geometry import component_transform, parse_numbers
+    from .board_description_options import component_override, interface_map_scale
+    from .pcb_svg_geometry import assembly_path_vertices, component_transform, parse_numbers
+    from .svg_label_text import add_label_ink
 else:
-    from pcb_svg_geometry import component_transform, parse_numbers
+    from board_description_options import component_override, interface_map_scale
+    from pcb_svg_geometry import assembly_path_vertices, component_transform, parse_numbers
+    from svg_label_text import add_label_ink
 
 
 SVG = "http://www.w3.org/2000/svg"
@@ -46,47 +50,44 @@ POWER_COLORS = {
     "backup": "#AF4545",
 }
 POWER_FILL_OPACITY = "0.30"
+PAGE_WIDTH_MM = 266.0
+PAGE_HEIGHT_MM = 155.0
+LEGEND_WIDTH_MM = 36.0
+LEGEND_ROW_MM = 4.5
+POWER_LEGEND_HEADING_MM = 4.0
+POWER_LEGEND_BOTTOM_MM = 3.5
+INTERFACE_LEGEND_CELL_MM = 29.0
 
 
 def qname(name: str) -> str:
     return f"{{{SVG}}}{name}"
 
 
-def assembly_path_vertices(path_data: str) -> list[tuple[float, float]]:
-    """Read geometry coordinates, excluding SVG arc radii and control flags."""
-    tokens = re.findall(
-        r"[A-Za-z]|[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?",
-        path_data,
-    )
-    vertices: list[tuple[float, float]] = []
-    index = 0
-    while index < len(tokens):
-        command = tokens[index]
-        index += 1
-        if command in ("M", "L"):
-            if index + 1 >= len(tokens):
-                raise ValueError(f"incomplete assembly SVG {command} command")
-            vertices.append((float(tokens[index]), float(tokens[index + 1])))
-            index += 2
-        elif command == "A":
-            if index + 6 >= len(tokens):
-                raise ValueError("incomplete assembly SVG arc command")
-            vertices.append((float(tokens[index + 5]), float(tokens[index + 6])))
-            index += 7
-        elif command == "Z":
-            continue
-        else:
-            raise ValueError(f"unsupported assembly SVG path command: {command}")
-    return vertices
-
-
-def remove_pads(element: ET.Element) -> None:
-    """Hide copper pad bodies while retaining BoardShape mounting-hole circles."""
-    for child in list(element):
-        if child.get("id") == "Pads" or child.get("data-layer") == "pads":
-            element.remove(child)
-        else:
-            remove_pads(child)
+def remove_pads(root: ET.Element, *, exposed: dict[str, set[str]] | None = None) -> None:
+    """Remove copper artwork except documented native contacts in exposed footprints."""
+    for parent in list(root.iter()):
+        for layer in list(parent):
+            if layer.get("id") != "Pads" and layer.get("data-layer") != "pads":
+                continue
+            if not exposed:
+                parent.remove(layer)
+                continue
+            for footprint in list(layer):
+                instance = footprint.get("data-instance")
+                key = f"instance:{instance}" if f"instance:{instance}" in exposed else footprint.get("data-component", "")
+                pins = exposed.get(key, set())
+                for geometry in list(footprint):
+                    if geometry.tag != qname("path") or geometry.get("data-pad-number") not in pins:
+                        footprint.remove(geometry)
+                if not list(footprint):
+                    layer.remove(footprint)
+            if not list(layer):
+                parent.remove(layer)
+                continue
+            layer.attrib.update({
+                "id": "ExposedConnectorPads", "data-layer": "exposed-connector-pads",
+                "fill": "#D7A84D", "fill-opacity": "1", "stroke": "#263746", "stroke-width": "0.12",
+            })
 
 
 def circle_inside_outline(points: list[tuple[float, float]], cx: float, cy: float, radius: float) -> bool:
@@ -148,7 +149,7 @@ def component_positions(
         for element in root.iter():
             identifier = element.get("id", "")
             designator = element.get("data-component")
-            if not designator or not identifier.endswith(suffix) or designator in positions:
+            if not designator or not identifier.endswith(suffix):
                 continue
             transform = component_transform(element)
             if transform is None:
@@ -159,13 +160,16 @@ def component_positions(
                 # centre. Derive that axis from the SVG rather than assuming a
                 # board-specific coordinate system.
                 x = 2.0 * view_x + view_width - x
-            positions[designator] = (x - view_x, -y - view_y)
+            point = (x - view_x, -y - view_y)
+            positions.setdefault(designator, point)
+            if instance := element.get("data-instance"):
+                positions.setdefault(f"instance:{instance}", point)
     return positions
 
 
 def component_body_polygons(
     root: ET.Element, *, bottom: bool, view_x: float, view_y: float,
-    view_width: float, board_x: float, board_y: float,
+    view_width: float, board_x: float, board_y: float, scale: float = 1.0,
 ) -> dict[str, list[tuple[float, float]]]:
     """Map unpadded assembly-body extents onto the printed board."""
     polygons: dict[str, list[tuple[float, float]]] = {}
@@ -190,15 +194,17 @@ def component_body_polygons(
             global_x, global_y = transform.to_board(local_x, local_y)
             if bottom:
                 global_x = 2.0 * view_x + view_width - global_x
-            points.append((board_x + global_x - view_x, board_y - global_y - view_y))
-        polygons[designator] = points
+            points.append((board_x + (global_x - view_x) * scale, board_y - (global_y + view_y) * scale))
+        polygons.setdefault(designator, points)
+        if instance := element.get("data-instance"):
+            polygons[f"instance:{instance}"] = points
     return polygons
 
 
 def text(parent: ET.Element, x: float, y: float, value: str, **attrs: str) -> ET.Element:
     settings = {
         "x": f"{x:.3f}", "y": f"{y:.3f}",
-        "font-family": "Aptos, Arial, sans-serif", "fill": "#263746",
+        "font-family": "Arial", "fill": "#263746",
     }
     settings.update(attrs)
     node = ET.SubElement(parent, qname("text"), settings)
@@ -213,8 +219,25 @@ def line(parent: ET.Element, x1: float, y1: float, x2: float, y2: float, color: 
     })
 
 
-def label_width(value: str) -> float:
-    return max(12.0, min(28.0, 4.0 + max(len(line) for line in value.split("|")) * 0.88))
+def label_width(value: str, *, perimeter: bool = False) -> float:
+    minimum = 5.0 + max(len(line) for line in value.split("|")) * 0.90
+    if perimeter:
+        # Leave extra room for text in rotated Office SVG callouts.
+        return max(13.0, minimum + 5.0)
+    return max(12.0, min(30.0, minimum))
+
+
+def centered_label_ink(
+    parent: ET.Element, box: tuple[float, float, float, float], value: str, *, size: float, pitch: float,
+) -> None:
+    """Place the measured Arial ink at the exact badge center in all SVG viewers."""
+    x, y, box_width, box_height = box
+    add_label_ink(parent, value, x + box_width / 2, y + box_height / 2, size=size,
+                  fill="white", pitch=pitch, max_size=(box_width - 1.4, box_height - 1.0))
+
+
+def local_label_height(value: str) -> float:
+    return 4.2 + 2.8 * value.count("|")
 
 
 def boxes_overlap(a: tuple[float, float, float, float], b: tuple[float, float, float, float], pad: float = 0.75) -> bool:
@@ -317,17 +340,24 @@ def place_edge_centers_preserving_priority(
             (-record[tie_axis] if reverse_tie else record[tie_axis]) if tie_axis else 0.0,
         ),
     )
-    occupied: list[float] = []
+    occupied: list[tuple[float, float]] = []
+
+    def free(center: float, extra: float) -> bool:
+        return all(abs(center - other) >= spacing + extra + other_extra - 1e-6
+                   for other, other_extra in occupied)
+
     for record in [item for item in ordered if item["priority"]]:
-        center = max(minimum, min(maximum, record[axis]))
-        if any(abs(center - value) < spacing - 1e-6 for value in occupied):
+        extra = (record.get("badge_height", 4.2) - 4.2) / 2
+        center = max(minimum + extra, min(maximum - extra, record[axis]))
+        if not free(center, extra):
             raise ValueError(f"high-priority labels collide at {record['label']}")
         record["slot_center"] = center
-        occupied.append(center)
+        occupied.append((center, extra))
 
     step = 0.4
     for record in [item for item in ordered if not item["priority"]]:
-        preferred = max(minimum, min(maximum, record[axis]))
+        extra = (record.get("badge_height", 4.2) - 4.2) / 2
+        preferred = max(minimum + extra, min(maximum - extra, record[axis]))
         count = int((maximum - minimum) / step) + 2
         negative_offsets = [-index * step for index in range(1, count)]
         positive_offsets = [index * step for index in range(1, count)]
@@ -343,15 +373,15 @@ def place_edge_centers_preserving_priority(
             (
                 preferred + offset
                 for offset in offsets
-                if minimum <= preferred + offset <= maximum
-                and all(abs(preferred + offset - value) >= spacing - 1e-6 for value in occupied)
+                if minimum + extra <= preferred + offset <= maximum - extra
+                and free(preferred + offset, extra)
             ),
             None,
         )
         if center is None:
             raise ValueError(f"no perimeter slot remains for {record['label']}")
         record["slot_center"] = center
-        occupied.append(center)
+        occupied.append((center, extra))
 
 
 def assign_perimeter_edges(records: list[dict], board_box: tuple[float, float, float, float]) -> None:
@@ -405,6 +435,7 @@ def arrange_perimeter_labels(records: list[dict], board_box: tuple[float, float,
     height = 4.2
     for record in records:
         record["edge_attempt"] = 0
+        record["badge_height"] = height + 2.0 * record["label"].count("|")
 
     for _attempt in range(80):
         assign_perimeter_edges(records, board_box)
@@ -445,7 +476,8 @@ def arrange_perimeter_labels(records: list[dict], board_box: tuple[float, float,
 
             if edge in ("top", "bottom"):
                 for record in edge_records:
-                    width = label_width(record["label"])
+                    width = label_width(record["label"], perimeter=True)
+                    badge_height = record["badge_height"]
                     cx = record["slot_center"]
                     if edge == "top":
                         cy = by - gap - width / 2.0
@@ -456,11 +488,12 @@ def arrange_perimeter_labels(records: list[dict], board_box: tuple[float, float,
                         endpoint = (cx, by + bh + gap)
                         angle = 90
                     record.update(label_cx=cx, label_cy=cy, label_w=width, label_angle=angle)
-                    record["label_box"] = (cx - height / 2.0, cy - width / 2.0, height, width)
+                    record["label_box"] = (cx - badge_height / 2.0, cy - width / 2.0, badge_height, width)
                     record["leader"] = [(record["anchor_x"], record["anchor_y"]), endpoint]
             else:
                 for record in edge_records:
-                    width = label_width(record["label"])
+                    width = label_width(record["label"], perimeter=True)
+                    badge_height = record["badge_height"]
                     cy = record["slot_center"]
                     if edge == "left":
                         x = bx - gap - width
@@ -468,9 +501,9 @@ def arrange_perimeter_labels(records: list[dict], board_box: tuple[float, float,
                     else:
                         x = bx + bw + gap
                         endpoint = (bx + bw + gap, cy)
-                    y = cy - height / 2.0
+                    y = cy - badge_height / 2.0
                     record.update(label_x=x, label_y=y, label_w=width)
-                    record["label_box"] = (x, y, width, height)
+                    record["label_box"] = (x, y, width, badge_height)
                     record["leader"] = [(record["anchor_x"], record["anchor_y"]), endpoint]
 
         if placement_failed:
@@ -517,7 +550,7 @@ def arrange_perimeter_labels(records: list[dict], board_box: tuple[float, float,
 def render_perimeter_label(root: ET.Element, record: dict) -> None:
     """Render one outside label with a single angled leader."""
     color = COLORS.get(record["domain"], COLORS["other"])
-    height = 4.2
+    height = record["badge_height"]
     start, end = record["leader"]
     line(root, start[0], start[1], end[0], end[1], color)
     if record["edge"] in ("top", "bottom"):
@@ -531,16 +564,15 @@ def render_perimeter_label(root: ET.Element, record: dict) -> None:
             "x": f"{x:.3f}", "y": f"{y:.3f}", "width": f"{width:.3f}", "height": f"{height:.3f}",
             "rx": "1.0", "fill": color,
         })
-        text(group, cx, cy + 0.72, record["label"],
-             **{"font-size": "1.78", "font-weight": "700", "text-anchor": "middle", "fill": "#FFFFFF"})
     else:
         x, y, width = record["label_x"], record["label_y"], record["label_w"]
+        cx, cy = x + width / 2.0, y + height / 2.0
+        group = root
         ET.SubElement(root, qname("rect"), {
             "x": f"{x:.3f}", "y": f"{y:.3f}", "width": f"{width:.3f}", "height": f"{height:.3f}",
             "rx": "1.0", "fill": color,
         })
-        text(root, x + width / 2.0, y + 2.82, record["label"],
-             **{"font-size": "1.78", "font-weight": "700", "text-anchor": "middle", "fill": "#FFFFFF"})
+    centered_label_ink(group, (x, y, width, height), record["label"], size=1.78, pitch=2.0)
     ET.SubElement(root, qname("circle"), {
         "cx": f"{record['anchor_x']:.3f}", "cy": f"{record['anchor_y']:.3f}", "r": "0.58",
         "fill": "#FFFFFF", "stroke": color, "stroke-width": "0.45",
@@ -604,7 +636,7 @@ def arrange_local_labels(
     for record in records:
         ax, ay = record["anchor_x"], record["anchor_y"]
         width = label_width(record["label"])
-        height = 4.2 if "|" not in record["label"] else 7.0
+        height = local_label_height(record["label"])
         bias = record.get("bias")
         if bias in {"left", "right", "top", "bottom"}:
             # An explicit side is a hard layout requirement. Search along that
@@ -639,6 +671,9 @@ def arrange_local_labels(
                 if any(boxes_overlap(box, other_box, pad=0.35) for _item, other_box in component_boxes):
                     continue
                 leader = [(ax, ay), endpoint]
+                if any(other is not record and segment_intersects_box((leader[0], leader[1]), body)
+                       for other, body in component_boxes):
+                    continue
                 if candidate_conflicts(box, leader, fixed_boxes, fixed_leaders):
                     continue
                 candidates.append((box, leader))
@@ -679,8 +714,7 @@ def arrange_local_labels(
 
 def render_local_label(root: ET.Element, record: dict) -> None:
     color = COLORS.get(record["domain"], COLORS["other"])
-    lines = record["label"].split("|")
-    height = 4.2 if len(lines) == 1 else 7.0
+    height = local_label_height(record["label"])
     start, end = record["leader"]
     line(root, start[0], start[1], end[0], end[1], color)
     x, y, width = record["label_x"], record["label_y"], record["label_w"]
@@ -688,10 +722,7 @@ def render_local_label(root: ET.Element, record: dict) -> None:
         "x": f"{x:.3f}", "y": f"{y:.3f}", "width": f"{width:.3f}", "height": f"{height:.3f}",
         "rx": "1.0", "fill": color,
     })
-    for index, value in enumerate(lines):
-        baseline = y + (2.82 if len(lines) == 1 else 2.7 + index * 2.8)
-        text(root, x + width / 2.0, baseline, value,
-             **{"font-size": "1.72", "font-weight": "700", "text-anchor": "middle", "fill": "#FFFFFF"})
+    centered_label_ink(root, (x, y, width, height), record["label"], size=1.72, pitch=2.8)
     ET.SubElement(root, qname("circle"), {
         "cx": f"{record['anchor_x']:.3f}", "cy": f"{record['anchor_y']:.3f}", "r": "0.58",
         "fill": "#FFFFFF", "stroke": color, "stroke-width": "0.45",
@@ -773,12 +804,9 @@ def arrange_horizontal_edge(records: list[dict], edge: str, board_box: tuple[flo
     for record in ordered:
         x, y, width = record["label_x"], record["label_y"], record["label_w"]
         cx = x + width / 2.0
-        if edge == "top":
-            rail_y = by - 1.0
-            record["leader"] = [(record["anchor_x"], record["anchor_y"]), (record["anchor_x"], rail_y), (cx, rail_y), (cx, y + height)]
-        else:
-            rail_y = by + bh + 1.0
-            record["leader"] = [(record["anchor_x"], record["anchor_y"]), (record["anchor_x"], rail_y), (cx, rail_y), (cx, y)]
+        record["label_box"] = (x, y, width, height)
+        record["leader"] = [(record["anchor_x"], record["anchor_y"]),
+                            (cx, y + height if edge == "top" else y)]
 
 
 def render_horizontal_label(root: ET.Element, record: dict, *, font_size: float = 1.75) -> None:
@@ -791,8 +819,7 @@ def render_horizontal_label(root: ET.Element, record: dict, *, font_size: float 
         "x": f"{x:.3f}", "y": f"{y:.3f}", "width": f"{width:.3f}", "height": f"{height:.3f}",
         "rx": "1.0", "fill": color,
     })
-    text(root, x + width / 2.0, y + 2.82, record["label"],
-         **{"font-size": f"{font_size:.2f}", "font-weight": "700", "text-anchor": "middle", "fill": "#FFFFFF"})
+    centered_label_ink(root, (x, y, width, height), record["label"], size=font_size, pitch=2.0)
     ET.SubElement(root, qname("circle"), {
         "cx": f"{record['anchor_x']:.3f}", "cy": f"{record['anchor_y']:.3f}", "r": "0.58",
         "fill": "#FFFFFF", "stroke": color, "stroke-width": "0.45",
@@ -906,7 +933,19 @@ def render_label(root: ET.Element, record: dict, board_box: tuple[float, float, 
     })
 
 
-def add_legend(root: ET.Element, page_width: float, spec: dict) -> None:
+def add_legend_entry(
+    root: ET.Element, x: float, y: float, label: str, color: str, *,
+    cell_width: float = LEGEND_WIDTH_MM, **attrs: str,
+) -> None:
+    ET.SubElement(root, qname("rect"), {
+        "x": f"{x:.3f}", "y": f"{y + 0.6:.3f}", "width": "3.6", "height": "3.3",
+        "rx": "0.6", "fill": color, **attrs,
+    })
+    add_label_ink(root, label, x + 5.0, y + 2.25, size=2.1, fill="#263746", anchor="start",
+                  max_size=(cell_width - 6.5, 3.6)).set("data-map-legend-label", "true")
+
+
+def add_legend(root: ET.Element, right: float, y: float, spec: dict) -> tuple[float, float, float, float]:
     default_labels = {
         "stm32": "STM32 / ArduPilot",
         "rk3588": "RK3588",
@@ -914,18 +953,15 @@ def add_legend(root: ET.Element, page_width: float, spec: dict) -> None:
         "other": "Power / board",
     }
     configured = spec.get("interface_map_legend", {})
-    entries = [
-        (domain, str(configured.get(domain, label)))
-        for domain, label in default_labels.items()
-    ]
-    x = page_width - 103.0
-    for domain, label in entries:
-        ET.SubElement(root, qname("rect"), {
-            "x": f"{x:.3f}", "y": "5.2", "width": "4.0", "height": "3.0", "rx": "0.7",
-            "fill": COLORS[domain],
-        })
-        text(root, x + 5.2, 7.6, label, **{"font-size": "2.15", "font-weight": "600"})
-        x += 24.5
+    if str(spec.get("language", "")).lower().startswith("ru"):
+        default_labels["other"] = "Питание и прочее"
+    width = INTERFACE_LEGEND_CELL_MM * len(default_labels)
+    x = right - width
+    for index, (domain, label) in enumerate(default_labels.items()):
+        add_legend_entry(root, x + index * INTERFACE_LEGEND_CELL_MM, y,
+                         str(configured.get(domain, label)), COLORS[domain],
+                         cell_width=INTERFACE_LEGEND_CELL_MM, **{"data-interface-legend": domain})
+    return x, y, width, LEGEND_ROW_MM
 
 
 def visible_power_domains(spec: dict) -> set[str]:
@@ -940,10 +976,19 @@ def visible_power_domains(spec: dict) -> set[str]:
     }
 
 
-def add_power_legend(root: ET.Element, visible_domains: set[str]) -> None:
+def add_power_legend(
+    root: ET.Element, visible_domains: set[str], spec: dict | None = None, *,
+    x: float = PAGE_WIDTH_MM - LEGEND_WIDTH_MM, y: float = 25.0,
+) -> float:
     if not visible_domains:
-        return
-    text(root, 8.0, 13.5, "Connector power source", **{"font-size": "2.2", "font-weight": "700"})
+        return y
+    spec = spec or {}
+    russian = str(spec.get("language", "")).lower().startswith("ru")
+    heading = "Питание разъёмов" if russian else "Connector power"
+    add_label_ink(root, heading, x, y + 1.5, size=2.35, fill="#263746", anchor="start").set(
+        "data-map-legend-label", "true"
+    )
+    y += POWER_LEGEND_HEADING_MM
     entries = [
         ("main_5v", "main 5 V"), ("pwm1_5v", "PWM bank 1"),
         ("pwm2_5v", "PWM bank 2"), ("can_5v", "CAN 5 V"),
@@ -951,18 +996,21 @@ def add_power_legend(root: ET.Element, visible_domains: set[str]) -> None:
         ("vin", "input rail"), ("sd_io", "SD I/O rail"),
         ("backup", "RTC backup"),
     ]
-    for index, (domain, label) in enumerate(
-        (entry for entry in entries if entry[0] in visible_domains)
-    ):
-        x = 8.0 + (index % 5) * 51.0
-        y = 16.0 + (index // 5) * 6.0
-        ET.SubElement(root, qname("rect"), {
-            "x": f"{x:.3f}", "y": f"{y:.3f}", "width": "3.6", "height": "3.6",
-            "rx": "0.5", "fill": POWER_COLORS[domain],
-            "fill-opacity": POWER_FILL_OPACITY,
-            "data-power-legend": domain,
-        })
-        text(root, x + 5.0, y + 2.8, label, **{"font-size": "2.05"})
+    if russian:
+        entries = [
+            ("main_5v", "Основные 5 В"), ("pwm1_5v", "ШИМ 1"),
+            ("pwm2_5v", "ШИМ 2"), ("can_5v", "CAN 5 В"),
+            ("usb_5v", "USB VBUS"), ("logic_3v3", "Логика 3,3 / 1,8 В"),
+            ("vin", "Входное питание"), ("sd_io", "Питание microSD"),
+            ("backup", "Резерв RTC"),
+        ]
+    labels = spec.get("power_domain_labels", {})
+    for domain, label in entries:
+        if domain in visible_domains:
+            add_legend_entry(root, x, y, str(labels.get(domain, label)), POWER_COLORS[domain],
+                           **{"fill-opacity": POWER_FILL_OPACITY, "data-power-legend": domain})
+            y += LEGEND_ROW_MM
+    return y
 
 
 def add_power_highlight(root: ET.Element, record: dict, visible_domains: set[str]) -> None:
@@ -980,103 +1028,141 @@ def add_power_highlight(root: ET.Element, record: dict, visible_domains: set[str
     })
 
 
-def add_processor_marker(root: ET.Element, designator: str, label: str, position: tuple[float, float], domain: str,
-                         body_polygon: list[tuple[float, float]]) -> None:
-    x, y = position
-    color = COLORS[domain]
+def add_processor_highlight(root: ET.Element, record: dict) -> None:
     ET.SubElement(root, qname("polygon"), {
-        "points": " ".join(f"{px:.3f},{py:.3f}" for px, py in body_polygon),
-        "fill": color, "fill-opacity": "0.16",
+        "points": " ".join(f"{px:.3f},{py:.3f}" for px, py in record["body_polygon"]),
+        "fill": COLORS[record["domain"]], "fill-opacity": "0.16",
     })
-    label_x = x + 8.0
-    label_y = y - 4.0
-    line(root, x + 4.0, y - 4.0, label_x, label_y + 2.0, color, 0.5)
-    ET.SubElement(root, qname("rect"), {
-        "x": f"{label_x:.3f}", "y": f"{label_y:.3f}", "width": "31", "height": "5.5", "rx": "1.2", "fill": color,
-    })
-    text(root, label_x + 15.5, label_y + 3.7, f"{designator}  {label}",
-         **{"font-size": "2.35", "font-weight": "700", "text-anchor": "middle", "fill": "#FFFFFF"})
 
 
 def build_page(spec: dict, source_path: Path, output_path: Path, *, side: str) -> None:
-    page_w, page_h = 266.0, 155.0
+    page_w, page_h = PAGE_WIDTH_MM, PAGE_HEIGHT_MM
+    scale = interface_map_scale(spec)
     source_root = ET.parse(source_path).getroot()
     view = parse_numbers(source_root.get("viewBox", ""))
     if len(view) != 4:
         raise ValueError(f"invalid board SVG viewBox: {source_path}")
-    view_x, view_y, board_w, board_h = view
+    view_x, view_y, view_w, view_h = view
+    board_w, board_h = view_w * scale, view_h * scale
     board_x = (page_w - board_w) / 2.0
-    board_y = 46.0
+    board_y = (page_h - board_h) / 2.0 + 4.0
     board_box = (board_x, board_y, board_w, board_h)
     positions = component_positions(
         source_root,
         bottom=side == "bottom",
         view_x=view_x,
         view_y=view_y,
-        view_width=board_w,
+        view_width=view_w,
     )
     body_polygons = component_body_polygons(
         source_root, bottom=side == "bottom", view_x=view_x, view_y=view_y,
-        view_width=board_w, board_x=board_x, board_y=board_y,
+        view_width=view_w, board_x=board_x, board_y=board_y, scale=scale,
     )
 
     root = ET.Element(qname("svg"), {
         "version": "1.2", "baseProfile": "tiny", "data-coordinate-units": "mm",
         "width": f"{page_w}mm", "height": f"{page_h}mm", "viewBox": f"0 0 {page_w} {page_h}",
+        "data-board-scale": str(scale),
     })
     ET.SubElement(root, qname("rect"), {"x": "0", "y": "0", "width": str(page_w), "height": str(page_h), "fill": "#FFFFFF"})
-    title = "TOP SIDE INTERFACE MAP 1:1" if side == "top" else "BOTTOM SIDE INTERFACE MAP 1:1"
-    text(root, 2.0, 8.0, title, **{"font-size": "4.0", "font-weight": "700", "fill": "#000000"})
-    add_legend(root, page_w, spec)
+    russian = str(spec.get("language", "")).lower().startswith("ru")
+    if russian:
+        title = "Верхняя сторона" if side == "top" else "Нижняя сторона"
+    else:
+        title = "Top side" if side == "top" else "Bottom side"
+    ratio = f"{scale:g}:1"
+    scale_note = f"Масштаб {ratio.replace('.', ',')}" if russian else f"Scale {ratio}"
+    add_label_ink(root, f"{title} · {scale_note}", 2.0, 6.2, size=3.6, fill="#263746", anchor="start")
+    interface_box = add_legend(root, page_w, 3.5, spec)
     power_domains = visible_power_domains(spec)
-    add_power_legend(root, power_domains)
-
-    clean = copy.deepcopy(source_root)
-    remove_pads(clean)
-    remove_outside_mounting_holes(clean)
-    nested = ET.SubElement(root, qname("svg"), {
-        "x": f"{board_x:.3f}", "y": f"{board_y:.3f}", "width": f"{board_w:.3f}", "height": f"{board_h:.3f}",
-        "viewBox": f"{view_x:.6f} {view_y:.6f} {board_w:.6f} {board_h:.6f}",
-    })
-    for child in list(clean):
-        nested.append(copy.deepcopy(child))
+    legend_boxes = [interface_box]
+    if power_domains:
+        power_x = page_w - LEGEND_WIDTH_MM
+        power_height = POWER_LEGEND_HEADING_MM + len(power_domains) * LEGEND_ROW_MM
+        power_y = page_h - POWER_LEGEND_BOTTOM_MM - power_height
+        power_end = add_power_legend(root, power_domains, spec, x=power_x, y=power_y)
+        legend_boxes.append((power_x, power_y, LEGEND_WIDTH_MM, power_end - power_y))
 
     records: list[dict] = []
+    exposed: dict[str, set[str]] = {}
     for group in spec["connector_groups"]:
         for item in group["items"]:
             designator = str(item["designator"])
-            if designator not in positions:
+            instance = item.get("native_svg_instance")
+            geometry_key = f"instance:{instance}" if instance else designator
+            if geometry_key not in positions:
                 continue
-            local_x, local_y = positions[designator]
-            anchor_x, anchor_y = board_x + local_x, board_y + local_y
+            polygon = body_polygons.get(geometry_key)
+            if not polygon:
+                exposed[geometry_key] = {str(pin["pin"]) for pin in item["pins"]}
+            local_x, local_y = positions[geometry_key]
+            anchor_x, anchor_y = board_x + local_x * scale, board_y + local_y * scale
             label = f"{designator} {item.get('interface_label', item['name'])}"
+            layout = str(item.get("map_label_layout", "perimeter")).lower()
+            if side == "top" and layout == "local":
+                label = label.replace(" · ", "|")
+            elif side == "top" and len(label) > 28 and " · " in label:
+                label = label.replace(" · ", "|")
+            else:
+                label = label.replace("|", " · ")
             records.append({
                 "designator": designator,
                 "label": label, "domain": str(item.get("processor_domain", "other")).lower(),
                 "power_domain": str(item.get("power_domain", "none")).lower(),
                 "anchor_x": anchor_x, "anchor_y": anchor_y,
-                "layout": str(item.get("map_label_layout", "perimeter")).lower(),
+                "layout": layout,
                 "bias": str(item.get("map_label_bias", "nearest")).lower(),
                 "edge_lock": str(item.get("map_label_edge", "auto")).lower(),
-                "component_w": float(item.get("map_component_size_mm", [0.0, 0.0])[0]),
-                "component_h": float(item.get("map_component_size_mm", [0.0, 0.0])[1]),
-                "body_polygon": body_polygons.get(designator),
+                "component_w": float(item.get("map_component_size_mm", [0.0, 0.0])[0]) * scale,
+                "component_h": float(item.get("map_component_size_mm", [0.0, 0.0])[1]) * scale,
+                "body_polygon": polygon,
             })
+
+    clean = copy.deepcopy(source_root)
+    remove_pads(clean, exposed=exposed)
+    remove_outside_mounting_holes(clean)
+    nested = ET.SubElement(root, qname("svg"), {
+        "x": f"{board_x:.3f}", "y": f"{board_y:.3f}", "width": f"{board_w:.3f}", "height": f"{board_h:.3f}",
+        "viewBox": f"{view_x:.6f} {view_y:.6f} {view_w:.6f} {view_h:.6f}",
+        "data-board-artwork": side,
+    })
+    nested.extend(list(clean))
     for record in records:
         add_power_highlight(root, record, power_domains)
+    processors = []
+    for processor in spec.get("interface_map_processors", []):
+        designator = str(processor["designator"])
+        marker_side = str(processor.get("side", "bottom")).lower()
+        if marker_side not in ("both", side) or designator not in positions:
+            continue
+        polygon = body_polygons.get(designator)
+        if not polygon:
+            raise ValueError(f"{designator}: missing native processor body geometry")
+        xs, ys = zip(*polygon)
+        override = processor.get("component_override")
+        model = component_override(spec, override, "map_label") if override else processor["label"]
+        marker = {
+            "designator": designator, "label": f"{designator} {model}",
+            "domain": str(processor.get("processor_domain", "other")).lower(),
+            "anchor_x": (min(xs) + max(xs)) / 2, "anchor_y": (min(ys) + max(ys)) / 2,
+            "component_w": max(xs) - min(xs), "component_h": max(ys) - min(ys),
+            "body_polygon": polygon,
+        }
+        add_processor_highlight(root, marker)
+        processors.append(marker)
     if side == "top":
         perimeter_records = [record for record in records if record["layout"] != "local"]
         local_records = [record for record in records if record["layout"] == "local"]
         arrange_perimeter_labels(perimeter_records, board_box)
         arrange_local_labels(
-            local_records,
+            local_records + processors,
             board_box,
-            records,
+            records + processors,
             perimeter_records,
         )
         for record in perimeter_records:
             render_perimeter_label(root, record)
-        for record in local_records:
+        for record in local_records + processors:
             render_local_label(root, record)
     else:
         top_records = [record for record in records if record["anchor_y"] <= board_y + board_h / 2.0]
@@ -1085,22 +1171,22 @@ def build_page(spec: dict, source_path: Path, output_path: Path, *, side: str) -
         arrange_horizontal_edge(bottom_records, "bottom", board_box, page_w)
         for record in top_records + bottom_records:
             render_horizontal_label(root, record)
+        arrange_local_labels(processors, board_box, records + processors, top_records + bottom_records)
+        for processor in processors:
+            render_local_label(root, processor)
 
-    for processor in spec.get("interface_map_processors", []):
-        marker_side = str(processor.get("side", "bottom")).lower()
-        if marker_side in ("both", side):
-            designator = str(processor["designator"])
-            label = str(processor["label"])
-            domain = str(processor.get("processor_domain", "other")).lower()
-            if designator in positions:
-                px, py = positions[designator]
-                if designator not in body_polygons:
-                    raise ValueError(f"{designator}: missing native processor body geometry")
-                add_processor_marker(root, designator, label, (board_x + px, board_y + py), domain,
-                                     body_polygons[designator])
+    if any(boxes_overlap(board_box, legend, pad=0.2) for legend in legend_boxes):
+        raise ValueError(f"{side}: board geometry overlaps the legend at {scale:g}:1")
+    for record in records + processors:
+        box = record["label_box"]
+        x, y, w, h = box
+        if x < 0 or y < 0 or x + w > page_w or y + h > page_h:
+            raise ValueError(f"{side}: {record['label']} is outside the map at {scale:g}:1")
+        segments = polyline_segments(record["leader"])
+        if any(boxes_overlap(box, legend, pad=0.2) or any(segment_intersects_box(segment, legend) for segment in segments)
+               for legend in legend_boxes):
+            raise ValueError(f"{side}: {record['label']} overlaps the legend at {scale:g}:1")
 
-    text(root, 2.0, page_h - 2.0, "Board artwork is shown at physical 1:1 scale. Pads are intentionally hidden.",
-         **{"font-size": "2.0", "fill": "#637785"})
     output_path.parent.mkdir(parents=True, exist_ok=True)
     ET.ElementTree(root).write(output_path, encoding="utf-8", xml_declaration=True)
 

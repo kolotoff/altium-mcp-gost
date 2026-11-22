@@ -62,3 +62,31 @@ def exported_designator_aliases(element: ET.Element) -> list[str]:
         elif instance:
             aliases.append(instance)
     return aliases
+
+
+def assembly_path_vertices(path_data: str) -> list[tuple[float, float]]:
+    """Read geometry coordinates, excluding SVG arc radii and control flags."""
+    tokens = re.findall(
+        r"[A-Za-z]|[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?",
+        path_data,
+    )
+    vertices: list[tuple[float, float]] = []
+    index = 0
+    while index < len(tokens):
+        command = tokens[index]
+        index += 1
+        if command in ("M", "L"):
+            if index + 1 >= len(tokens):
+                raise ValueError(f"incomplete assembly SVG {command} command")
+            vertices.append((float(tokens[index]), float(tokens[index + 1])))
+            index += 2
+        elif command == "A":
+            if index + 6 >= len(tokens):
+                raise ValueError("incomplete assembly SVG arc command")
+            vertices.append((float(tokens[index + 5]), float(tokens[index + 6])))
+            index += 7
+        elif command == "Z":
+            continue
+        else:
+            raise ValueError(f"unsupported assembly SVG path command: {command}")
+    return vertices

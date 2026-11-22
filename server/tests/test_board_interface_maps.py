@@ -4,6 +4,7 @@ import xml.etree.ElementTree as ET
 from tools.generate_board_interface_maps import (
     POWER_COLORS,
     POWER_FILL_OPACITY,
+    add_legend,
     add_power_highlight,
     add_power_legend,
     assembly_path_vertices,
@@ -11,6 +12,7 @@ from tools.generate_board_interface_maps import (
     component_body_polygons,
     qname,
     remove_outside_mounting_holes,
+    remove_pads,
     visible_power_domains,
 )
 
@@ -47,7 +49,46 @@ class MountingHoleFilterTests(unittest.TestCase):
         self.assertEqual(["inside"], [element.get("id") for element in circles])
 
 
+class ExposedPadTests(unittest.TestCase):
+    def test_retains_only_documented_pads_of_selected_instance_in_native_position(self):
+        root = ET.fromstring(
+            '<svg xmlns="http://www.w3.org/2000/svg"><g transform="scale(1,-1)">'
+            '<g id="Pads" data-layer="pads">'
+            '<g data-component="X5" data-instance="X5">'
+            '<path data-pad-number="A" d="M 0 0 L 1 0 L 1 1 Z"/></g>'
+            '<g data-component="X5" data-instance="X5-4" transform="translate(10 20) rotate(180)">'
+            '<path data-pad-number="A" d="M 2 0 L 3 0 L 3 1 Z"/>'
+            '<path data-pad-number="MP" d="M 4 0 L 5 0 L 5 1 Z"/></g>'
+            '</g></g></svg>'
+        )
+
+        remove_pads(root, exposed={"instance:X5-4": {"A"}})
+
+        frame = root[0]
+        layer = frame[0]
+        self.assertEqual("scale(1,-1)", frame.get("transform"))
+        self.assertEqual("ExposedConnectorPads", layer.get("id"))
+        self.assertEqual(1, len(layer))
+        self.assertEqual("translate(10 20) rotate(180)", layer[0].get("transform"))
+        self.assertEqual([("A", "M 2 0 L 3 0 L 3 1 Z")],
+                         [(path.get("data-pad-number"), path.get("d")) for path in layer[0]])
+
+
 class PowerHighlightTests(unittest.TestCase):
+    def test_interface_legend_is_a_row_and_power_legend_is_a_column(self):
+        root = ET.Element(qname("svg"))
+        _, y, _, height = add_legend(root, 266, 5, {})
+        add_power_legend(root, {"main_5v", "pwm1_5v"}, x=230, y=y + height + 2)
+        interface = root.findall(f"{qname('rect')}[@data-interface-legend]")
+        power = root.findall(f"{qname('rect')}[@data-power-legend]")
+        self.assertEqual(4, len(interface))
+        self.assertEqual(2, len(power))
+        self.assertEqual(4, len({swatch.get("x") for swatch in interface}))
+        self.assertEqual({"5.600"}, {swatch.get("y") for swatch in interface})
+        self.assertEqual({"230.000"}, {swatch.get("x") for swatch in power})
+        for previous, current in zip(power, power[1:]):
+            self.assertLess(float(previous.get("y")) + float(previous.get("height")), float(current.get("y")))
+
     def test_legend_matches_header_transparency(self):
         root = ET.Element(qname("svg"))
         add_power_legend(root, {"main_5v", "pwm1_5v"})
@@ -107,9 +148,9 @@ class PowerHighlightTests(unittest.TestCase):
         )
         polygons = component_body_polygons(
             root, bottom=False, view_x=0, view_y=-30,
-            view_width=30, board_x=0, board_y=0,
+            view_width=30, board_x=2, board_y=3, scale=1.5,
         )
-        self.assertEqual([(8, 11), (12, 11), (12, 9), (8, 9)], polygons["X1"])
+        self.assertEqual([(14, 19.5), (20, 19.5), (20, 16.5), (14, 16.5)], polygons["X1"])
 
 
 if __name__ == "__main__":

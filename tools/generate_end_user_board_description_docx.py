@@ -1,4 +1,4 @@
-"""Generate an end-user board manual as a DOCX and matching PDF.
+"""Generate an end-user board manual as an ODT or DOCX and matching PDF.
 
 This generator is intentionally separate from the manufacturing-oriented board
 description generator.  It produces a connector manual: one image and one
@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
+from collections import Counter
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,7 @@ from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.opc.packuri import PackURI
 from docx.opc.part import Part
 from docx.shared import Cm, Pt, RGBColor
+from lxml import etree
 
 if __package__:
     from .board_description_options import component_override, interface_map_scale
@@ -61,6 +63,17 @@ COLORS = {
 MANUAL_FONT = "Arial"
 FIGURE_CENTERS_CM = (3.50, 12.60)
 CONNECTOR_GAP_PT = 24
+OVERVIEW_HEADERS = ("Parameter", "Description")
+PIN_HEADERS = ("Pin", "Board net", "Function / ArduPilot mapping", "Interface / group")
+POWER_HEADERS = ("Supply", "Connector contacts", "Voltage", "Current", "Purpose")
+POWER_FIELDS = ("rail", "contacts", "voltage", "current", "description")
+TAGLINE = "CPU • flight controller • memory • onboard sensors • connector pinout"
+BOARD_VIEWS_TITLE = "Board views"
+BOARD_VIEWS_INTRO = "Orthographic views show the complete board and connector placement."
+INTERFACE_MAPS_TITLE = "Board interface maps"
+INTERFACE_MAPS_INTRO = "Processor-related interfaces are color-coded on 1:1 vector views."
+IMAGE_CAPTION = "Orthographic 3D view — {designator}"
+PINOUT_CAPTION = "Connector-side pinout — {designator}"
 
 FORBIDDEN_USER_CONTENT = (
     "минимальная ширина проводника",
@@ -226,7 +239,97 @@ def add_heading(document, text: str, level: int):
     return paragraph
 
 
-def parse_spec(path: Path) -> dict[str, Any]:
+def power_contact_labels(contacts: dict[str, list[str]]) -> str:
+    return " · ".join(f"{designator} ({', '.join(pins)})" for designator, pins in contacts.items())
+
+
+def power_output_rows(power: dict[str, Any]) -> list[list[str]]:
+    return [
+        [power_contact_labels(row[field]) if field == "contacts" else row[field] for field in POWER_FIELDS]
+        for row in power["rows"]
+    ]
+
+
+def validate_power_outputs(power: Any, supply_pins: set[tuple[str, str]]) -> list[str]:
+    if not isinstance(power, dict):
+        raise SpecError("power_outputs must be an object")
+    searchable = [require_text(power.get("title"), "power_outputs.title"), str(power.get("intro", ""))]
+    headers = power.get("headers", POWER_HEADERS)
+    if not isinstance(headers, (list, tuple)) or len(headers) != len(POWER_HEADERS):
+        raise SpecError("power_outputs.headers must contain five strings")
+    searchable.extend(require_text(header, "power_outputs.headers") for header in headers)
+    rows = power.get("rows")
+    if not isinstance(rows, list) or not rows:
+        raise SpecError("power_outputs.rows must be a non-empty array")
+    seen: set[tuple[str, str]] = set()
+    for index, row in enumerate(rows, start=1):
+        prefix = f"power_outputs.rows[{index}]"
+        if not isinstance(row, dict) or not isinstance(row.get("contacts"), dict) or not row["contacts"]:
+            raise SpecError(f"{prefix} must contain a non-empty contacts object")
+        for field in POWER_FIELDS:
+            if field != "contacts":
+                searchable.append(require_text(row.get(field), f"{prefix}.{field}"))
+        for designator, pins in row["contacts"].items():
+            if not isinstance(pins, list) or not pins:
+                raise SpecError(f"{prefix}.contacts.{designator} must be a non-empty array")
+            for pin in pins:
+                contact = designator, require_text(pin, f"{prefix}.contacts.{designator}")
+                if contact not in supply_pins:
+                    raise SpecError(f"{prefix}: {designator}.{pin} is not a documented supply contact")
+                if contact in seen:
+                    raise SpecError(f"duplicate power output contact: {designator}.{pin}")
+                seen.add(contact)
+    return searchable
+
+
+def asset_path(entry: dict, field: str, spec_path: Path, prefix: str) -> Path:
+    path = Path(require_text(entry.get(field), f"{prefix}.{field}"))
+    return (spec_path.parent / path).resolve()
+
+
+def load_pinout_artwork(item: dict[str, Any], path: Path, prefix: str) -> None:
+    designator = item["designator"]
+    image = asset_path(item, "image", path, prefix)
+    if not image.is_file():
+        raise SpecError(f"missing image for {designator}: {image}")
+    pinout = asset_path(item, "pinout_image", path, prefix)
+    if not pinout.is_file() or pinout.suffix.lower() != ".svg":
+        raise SpecError(f"{designator}: a native-geometry SVG pinout is required: {pinout}")
+    try:
+        root = ET.parse(pinout).getroot()
+    except ET.ParseError as error:
+        raise SpecError(f"{designator}: invalid pinout SVG: {pinout}") from error
+    if root.get("data-native-geometry") not in {
+        "altium-component-svg", "altium-component-pad-svg",
+        "altium-board-assembly-svg", "altium-board-pad-svg",
+    }:
+        raise SpecError(f"{designator}: pinout SVG has no verified Altium geometry source")
+    fallback = asset_path(item, "pinout_fallback_image", path, prefix)
+    if not fallback.is_file():
+        raise SpecError(f"missing SVG fallback image for {designator}: {fallback}")
+    item.update(_image_path=image, _pinout_path=pinout, _pinout_fallback_path=fallback)
+
+    if not root.get("data-pinout-view"):
+        return
+    namespace = {"svg": "http://www.w3.org/2000/svg"}
+    callouts = root.findall("svg:g[@data-pinout-pad]", namespace)
+    by_pin = {callout.attrib["data-pinout-pad"]: callout for callout in callouts}
+    if len(callouts) != len(item["pins"]) or by_pin.keys() != {pin["pin"] for pin in item["pins"]}:
+        raise SpecError(f"{designator}: pinout callouts do not match the physical pin list")
+    for pin in item["pins"]:
+        callout = by_pin[pin["pin"]]
+        label = callout.find("svg:image", namespace)
+        text_label = (
+            callout.findtext("svg:text", namespaces=namespace) if label is None else label.get("aria-label")
+        )
+        if text_label != f"{pin['pin']}: {pin['net']}":
+            raise SpecError(f"{designator}.{pin['pin']}: pinout net does not match the pin table")
+        for field in ("mcu_pin", "mcu_peripheral", "mcu_signal", "ardupilot_port"):
+            if callout.get(f"data-{field.replace('_', '-')}", "") != str(pin.get(field, "")):
+                raise SpecError(f"{designator}.{pin['pin']}: pinout {field} does not match the pin table")
+
+
+def parse_spec(path: Path, *, check_artwork: bool = True) -> dict[str, Any]:
     raw = json.loads(path.read_text(encoding="utf-8-sig"))
     if not isinstance(raw, dict):
         raise SpecError("the JSON root must be an object")
@@ -243,31 +346,30 @@ def parse_spec(path: Path) -> dict[str, Any]:
     if not isinstance(board_renders, list):
         raise SpecError("board_renders must be an array")
     for render_index, render in enumerate(board_renders, start=1):
+        prefix = f"board_renders[{render_index}]"
         if not isinstance(render, dict):
-            raise SpecError(f"board_renders[{render_index}] must be an object")
-        require_text(render.get("title"), f"board_renders[{render_index}].title")
-        image_path = Path(require_text(render.get("image"), f"board_renders[{render_index}].image"))
-        if not image_path.is_absolute():
-            image_path = (path.parent / image_path).resolve()
-        if not image_path.exists():
-            raise SpecError(f"missing board render: {image_path}")
-        render["_image_path"] = image_path
+            raise SpecError(f"{prefix} must be an object")
+        require_text(render.get("title"), f"{prefix}.title")
+        if check_artwork:
+            image_path = asset_path(render, "image", path, prefix)
+            if not image_path.is_file():
+                raise SpecError(f"missing board render: {image_path}")
+            render["_image_path"] = image_path
 
     interface_maps = raw.get("interface_maps", [])
     if not isinstance(interface_maps, list):
         raise SpecError("interface_maps must be an array")
     map_scale = interface_map_scale(raw)
     for map_index, interface_map in enumerate(interface_maps, start=1):
+        prefix = f"interface_maps[{map_index}]"
         if not isinstance(interface_map, dict):
-            raise SpecError(f"interface_maps[{map_index}] must be an object")
-        require_text(interface_map.get("title"), f"interface_maps[{map_index}].title")
-        image_path = Path(require_text(interface_map.get("image"), f"interface_maps[{map_index}].image"))
-        fallback_path = Path(require_text(interface_map.get("fallback_image"), f"interface_maps[{map_index}].fallback_image"))
-        if not image_path.is_absolute():
-            image_path = (path.parent / image_path).resolve()
-        if not fallback_path.is_absolute():
-            fallback_path = (path.parent / fallback_path).resolve()
-        if not image_path.exists() or image_path.suffix.lower() != ".svg":
+            raise SpecError(f"{prefix} must be an object")
+        require_text(interface_map.get("title"), f"{prefix}.title")
+        if not check_artwork:
+            continue
+        image_path = asset_path(interface_map, "image", path, prefix)
+        fallback_path = asset_path(interface_map, "fallback_image", path, prefix)
+        if not image_path.is_file() or image_path.suffix.lower() != ".svg":
             raise SpecError(f"missing SVG interface map: {image_path}")
         if not fallback_path.exists():
             raise SpecError(f"missing interface-map fallback image: {fallback_path}")
@@ -279,6 +381,7 @@ def parse_spec(path: Path) -> dict[str, Any]:
 
     searchable: list[str] = []
     seen: set[str] = set()
+    supply_pins: set[tuple[str, str]] = set()
     for section_index, section in enumerate(overview, start=1):
         if not isinstance(section, dict):
             raise SpecError(f"overview[{section_index}] must be an object")
@@ -306,36 +409,6 @@ def parse_spec(path: Path) -> dict[str, Any]:
                 raise SpecError(f"duplicate item designator: {designator}")
             seen.add(designator)
             require_text(item.get("name"), f"{prefix}.name")
-            image_path = Path(require_text(item.get("image"), f"{prefix}.image"))
-            if not image_path.is_absolute():
-                image_path = (path.parent / image_path).resolve()
-            if not image_path.exists():
-                raise SpecError(f"missing image for {designator}: {image_path}")
-            item["_image_path"] = image_path
-            pinout_path = Path(require_text(item.get("pinout_image"), f"{prefix}.pinout_image"))
-            if not pinout_path.is_absolute():
-                pinout_path = (path.parent / pinout_path).resolve()
-            if not pinout_path.exists():
-                raise SpecError(f"missing pinout image for {designator}: {pinout_path}")
-            if pinout_path.suffix.lower() != ".svg":
-                raise SpecError(f"{designator}: a native-geometry SVG pinout is required")
-            try:
-                pinout_root = ET.parse(pinout_path).getroot()
-                native_source = pinout_root.get("data-native-geometry", "")
-            except ET.ParseError as error:
-                raise SpecError(f"{designator}: invalid pinout SVG: {pinout_path}") from error
-            if native_source not in {
-                "altium-component-svg", "altium-component-pad-svg",
-                "altium-board-assembly-svg", "altium-board-pad-svg",
-            }:
-                raise SpecError(f"{designator}: pinout SVG has no verified Altium geometry source")
-            item["_pinout_path"] = pinout_path
-            fallback_path = Path(require_text(item.get("pinout_fallback_image"), f"{prefix}.pinout_fallback_image"))
-            if not fallback_path.is_absolute():
-                fallback_path = (path.parent / fallback_path).resolve()
-            if not fallback_path.exists():
-                raise SpecError(f"missing SVG fallback image for {designator}: {fallback_path}")
-            item["_pinout_fallback_path"] = fallback_path
             pins = item.get("pins")
             if not isinstance(pins, list) or not pins:
                 raise SpecError(f"{prefix}.pins must be non-empty")
@@ -350,26 +423,14 @@ def parse_spec(path: Path) -> dict[str, Any]:
                 for field in ("net", "function", "group"):
                     require_text(pin.get(field), f"{prefix}.pins[{pin_index}].{field}")
                 searchable.extend(str(pin[field]) for field in ("pin", "net", "function", "group"))
-            if pinout_root.get("data-pinout-view"):
-                namespace = {"svg": "http://www.w3.org/2000/svg"}
-                callouts = pinout_root.findall("svg:g[@data-pinout-pad]", namespace)
-                by_pin = {callout.attrib["data-pinout-pad"]: callout for callout in callouts}
-                if len(callouts) != len(pin_ids) or by_pin.keys() != pin_ids:
-                    raise SpecError(f"{designator}: pinout callouts do not match the physical pin list")
-                for pin in pins:
-                    callout = by_pin[pin["pin"]]
-                    label = callout.find("svg:image", namespace)
-                    if label is None:
-                        text_label = callout.findtext("svg:text", namespaces=namespace)
-                    else:
-                        text_label = label.get("aria-label")
-                    if text_label != f"{pin['pin']}: {pin['net']}":
-                        raise SpecError(f"{designator}.{pin['pin']}: pinout net does not match the pin table")
-                    for field in ("mcu_pin", "mcu_peripheral", "mcu_signal", "ardupilot_port"):
-                        if callout.get(f"data-{field.replace('_', '-')}", "") != str(pin.get(field, "")):
-                            raise SpecError(f"{designator}.{pin['pin']}: pinout {field} does not match the pin table")
+                if pin.get("power_source_net") and pin.get("power_voltage"):
+                    supply_pins.add((designator, pin_id))
+            if check_artwork:
+                load_pinout_artwork(item, path, prefix)
             searchable.extend((designator, str(item["name"]), str(item.get("description", ""))))
 
+    if "power_outputs" in raw:
+        searchable.extend(validate_power_outputs(raw["power_outputs"], supply_pins))
     verify_firmware_identity(raw)
     content = "\n".join(searchable).lower()
     if GENERATED_NET.search(content):
@@ -446,22 +507,26 @@ def add_cover(document: Document, spec: dict[str, Any]) -> None:
     paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
     add_text(
         paragraph,
-        str(spec.get("tagline", "CPU • flight controller • memory • onboard sensors • connector pinout")),
+        str(spec.get("tagline", TAGLINE)),
         size=10.5,
         color=COLORS["muted"],
     )
 
 
-def add_overview_table(document: Document, rows: list[list[str]], headers: list[str]) -> None:
-    table = document.add_table(rows=1, cols=2)
+def add_overview_table(document: Document, rows: list[list[str]], headers: list[str], *, body_size: float = 9) -> None:
+    if len(headers) != 2:
+        raise SpecError("overview_headers must contain two strings")
+    add_summary_table(document, rows, headers, (2640, 7690), body_size=body_size)
+
+
+def add_summary_table(document: Document, rows: list[list[str]], headers, widths: tuple[int, ...], *,
+                      body_size: float = 9) -> None:
+    table = document.add_table(rows=1, cols=len(widths))
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
     table.autofit = False
     set_table_borders(table)
-    widths = (2640, 7690)
     for column, width in zip(table.columns, widths):
         column.width = Pt(width / 20)
-    if len(headers) != 2:
-        raise SpecError("overview_headers must contain two strings")
     for cell, width, label in zip(table.rows[0].cells, widths, headers):
         set_cell_width(cell, width)
         set_cell_text(cell, str(label), bold=True, color=COLORS["white"], size=8.5, compact=True)
@@ -470,13 +535,28 @@ def add_overview_table(document: Document, rows: list[list[str]], headers: list[
     for index, row_data in enumerate(rows):
         row = table.add_row()
         set_cant_split(row)
-        for cell, width in zip(row.cells, widths):
+        for column, (cell, width, value) in enumerate(zip(row.cells, widths, row_data)):
             set_cell_width(cell, width)
-        set_cell_text(row.cells[0], str(row_data[0]), bold=True, color=COLORS["navy"], size=9, compact=True)
-        set_cell_text(row.cells[1], str(row_data[1]), size=9, compact=True)
-        if index % 2:
-            set_cell_fill(row.cells[0], COLORS["pale"])
-            set_cell_fill(row.cells[1], COLORS["pale"])
+            set_cell_text(
+                cell, str(value), bold=column == 0,
+                color=COLORS["navy"] if column == 0 else COLORS["text"], size=body_size, compact=True,
+            )
+            if index % 2:
+                set_cell_fill(cell, COLORS["pale"])
+
+
+def add_power_outputs(document: Document, power: dict[str, Any]) -> None:
+    heading = add_heading(document, power["title"], 1)
+    heading.paragraph_format.page_break_before = True
+    if intro := power.get("intro"):
+        paragraph = document.add_paragraph()
+        paragraph.paragraph_format.space_after = Pt(6)
+        set_keep_with_next(paragraph)
+        add_text(paragraph, intro, size=9, color=COLORS["muted"])
+    add_summary_table(
+        document, power_output_rows(power), power.get("headers", POWER_HEADERS),
+        (2070, 2100, 1300, 1700, 3160), body_size=8.5,
+    )
 
 
 def add_connector_table(document: Document, item: dict[str, Any], *, keep_together: bool) -> None:
@@ -489,7 +569,7 @@ def add_connector_table(document: Document, item: dict[str, Any], *, keep_togeth
         column.width = Pt(width / 20)
     headers = tuple(spec_header for spec_header in item.get("table_headers", ()))
     if not headers:
-        headers = ("Pin", "Board net", "Function / ArduPilot mapping", "Interface / group")
+        headers = PIN_HEADERS
     if len(headers) != 4:
         raise SpecError(f"{item['designator']}.table_headers must contain four strings")
     for cell, width, label in zip(table.rows[0].cells, widths, headers):
@@ -673,13 +753,13 @@ def add_board_renders(document: Document, spec: dict[str, Any]) -> None:
     renders = spec.get("board_renders", [])
     if not renders:
         return
-    heading = add_heading(document, str(spec.get("board_renders_title", "Board views")), 1)
+    heading = add_heading(document, str(spec.get("board_renders_title", BOARD_VIEWS_TITLE)), 1)
     heading.paragraph_format.page_break_before = True
     intro = document.add_paragraph()
     intro.paragraph_format.space_after = Pt(6)
     add_text(
         intro,
-        str(spec.get("board_renders_intro", "Orthographic views show the complete board and connector placement.")),
+        str(spec.get("board_renders_intro", BOARD_VIEWS_INTRO)),
         size=9.2,
         color=COLORS["muted"],
     )
@@ -712,13 +792,13 @@ def add_interface_maps(document: Document, spec: dict[str, Any]) -> None:
     maps = spec.get("interface_maps", [])
     if not maps:
         return
-    heading = add_heading(document, str(spec.get("interface_maps_title", "Board interface maps")), 1)
+    heading = add_heading(document, str(spec.get("interface_maps_title", INTERFACE_MAPS_TITLE)), 1)
     heading.paragraph_format.page_break_before = True
     intro = document.add_paragraph()
     intro.paragraph_format.space_after = Pt(0)
     add_text(
         intro,
-        str(spec.get("interface_maps_intro", "Processor-related interfaces are color-coded on 1:1 vector views.")),
+        str(spec.get("interface_maps_intro", INTERFACE_MAPS_INTRO)),
         size=8.8,
         color=COLORS["muted"],
     )
@@ -739,7 +819,49 @@ def add_interface_maps(document: Document, spec: dict[str, Any]) -> None:
         )
 
 
-def add_item(document: Document, item: dict[str, Any], *, follows_connector: bool) -> None:
+def figure_columns(document: Document):
+    """Use fixed cells so Writer keeps the crop and pinout on the same line."""
+    table = document.add_table(rows=1, cols=2)
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.autofit = False
+    set_table_borders(table)
+    for border in table._tbl.tblPr.find(qn("w:tblBorders")):
+        border.set(qn("w:val"), "nil")
+    row = table.rows[0]
+    set_cant_split(row)
+    figures, captions = [], []
+    for column, cell, width in zip(table.columns, row.cells, (7.0, 11.3), strict=True):
+        column.width = Cm(width)
+        set_cell_width(cell, Cm(width).twips)
+        set_cell_margins(cell, top=0, start=0, bottom=0, end=0)
+        margins = cell._tc.get_or_add_tcPr().find(qn("w:tcMar"))
+        for edge in ("left", "right"):
+            margin = OxmlElement(f"w:{edge}")
+            margin.set(qn("w:w"), "0")
+            margin.set(qn("w:type"), "dxa")
+            margins.append(margin)
+        cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+        figure = cell.paragraphs[0]
+        figure.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        figure.paragraph_format.space_before = Pt(2)
+        figure.paragraph_format.space_after = Pt(4)
+        set_keep_with_next(figure)
+        caption = cell.add_paragraph(style="Caption")
+        caption.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        caption.paragraph_format.space_before = Pt(0)
+        caption.paragraph_format.space_after = Pt(4)
+        set_keep_with_next(caption)
+        figures.append(figure)
+        captions.append(caption)
+    spacer = document.add_paragraph()
+    spacer.paragraph_format.space_before = Pt(0)
+    spacer.paragraph_format.space_after = Pt(0)
+    spacer.paragraph_format.line_spacing = Pt(1)
+    set_keep_with_next(spacer)
+    return figures, captions
+
+
+def add_item(document: Document, item: dict[str, Any], *, follows_connector: bool, writer_layout: bool = False) -> None:
     heading = add_heading(document, f"{item['designator']} — {item['name']}", 2)
     if follows_connector:
         heading.paragraph_format.space_before = Pt(CONNECTOR_GAP_PT)
@@ -750,52 +872,110 @@ def add_item(document: Document, item: dict[str, Any], *, follows_connector: boo
         set_keep_with_next(paragraph)
         add_text(paragraph, description, size=8.8, color=COLORS["muted"])
 
-    paragraph = document.add_paragraph()
-    paragraph.paragraph_format.space_before = Pt(2)
-    paragraph.paragraph_format.space_after = Pt(4)
-    set_keep_with_next(paragraph)
+    if writer_layout:
+        (crop_paragraph, pinout_paragraph), captions = figure_columns(document)
+    else:
+        paragraph = document.add_paragraph()
+        paragraph.paragraph_format.space_before = Pt(2)
+        paragraph.paragraph_format.space_after = Pt(4)
+        set_keep_with_next(paragraph)
+        for center in FIGURE_CENTERS_CM:
+            paragraph.paragraph_format.tab_stops.add_tab_stop(Cm(center), WD_TAB_ALIGNMENT.CENTER)
+        crop_paragraph = pinout_paragraph = paragraph
+        captions = []
     image_width, image_height = fit_image(item["_image_path"], max_width_cm=6.6, max_height_cm=4.8)
     pinout_width, pinout_height = fit_pinout(item)
-    for center in FIGURE_CENTERS_CM:
-        paragraph.paragraph_format.tab_stops.add_tab_stop(Cm(center), WD_TAB_ALIGNMENT.CENTER)
     row_height = max(image_height, pinout_height)
     crop, _ = centered_figure_png(item["_image_path"], image_height, row_height)
-    paragraph.add_run("\t")
-    shape = paragraph.add_run().add_picture(
+    if not writer_layout:
+        crop_paragraph.add_run("\t")
+    shape = crop_paragraph.add_run().add_picture(
         crop, width=Cm(image_width), height=Cm(row_height)
     )
     alt_template = str(item.get("image_alt_template", "Orthographic 3D PCB view of {designator}"))
     set_picture_alt(shape, alt_template.format(designator=item["designator"], name=item["name"]))
-    paragraph.add_run("\t")
+    if not writer_layout:
+        pinout_paragraph.add_run("\t")
     pinout_alt_template = str(item.get("pinout_alt_template", "Pinout diagram for {designator} — {name}"))
     pinout_alt = pinout_alt_template.format(designator=item["designator"], name=item["name"])
     fallback, center = centered_figure_png(item["_pinout_fallback_path"], pinout_height, row_height)
     svg = centered_figure_svg(item["_pinout_path"], pinout_height, row_height, center)
     add_svg_picture(
-        paragraph.add_run(),
+        pinout_paragraph.add_run(),
         svg,
         fallback,
         width=Cm(pinout_width),
         height=Cm(row_height),
         alt_text=pinout_alt,
     )
-    caption = document.add_paragraph(style="Caption")
-    for center in FIGURE_CENTERS_CM:
-        caption.paragraph_format.tab_stops.add_tab_stop(Cm(center), WD_TAB_ALIGNMENT.CENTER)
-    caption.paragraph_format.space_before = Pt(0)
-    caption.paragraph_format.space_after = Pt(4)
-    set_keep_with_next(caption)
-    caption_template = str(item.get("image_caption_template", "Orthographic 3D view — {designator}"))
-    pinout_caption_template = str(item.get("pinout_caption_template", "Connector-side pinout — {designator}"))
-    for template in (caption_template, pinout_caption_template):
+    if not writer_layout:
+        caption = document.add_paragraph(style="Caption")
+        for center in FIGURE_CENTERS_CM:
+            caption.paragraph_format.tab_stops.add_tab_stop(Cm(center), WD_TAB_ALIGNMENT.CENTER)
+        caption.paragraph_format.space_before = Pt(0)
+        caption.paragraph_format.space_after = Pt(4)
+        set_keep_with_next(caption)
+        captions = [caption, caption]
+    caption_template = str(item.get("image_caption_template", IMAGE_CAPTION))
+    pinout_caption_template = str(item.get("pinout_caption_template", PINOUT_CAPTION))
+    for caption, template in zip(captions, (caption_template, pinout_caption_template), strict=True):
         label = template.format(designator=item["designator"], name=item["name"])
-        add_text(caption, "\t" + label, size=8.0, color=COLORS["muted"])
+        add_text(caption, label if writer_layout else "\t" + label, size=8.0, color=COLORS["muted"])
     minimum_table_height = Pt((len(item["pins"]) + 1) * 10.6)
     available_height = Cm(27.0 - row_height) - Pt(80)
     add_connector_table(document, item, keep_together=minimum_table_height < available_height)
 
 
-def build_document(spec: dict[str, Any], output: Path) -> None:
+def review_markdown(spec: dict[str, Any]) -> str:
+    lines = [f"# {spec['title']}", "", f"## {spec['subtitle']}", "", str(spec.get("tagline", TAGLINE)), ""]
+
+    def add_table(headers, rows) -> None:
+        for row in (headers, ["---"] * len(headers), *rows):
+            cells = [str(value).replace("|", r"\|").replace("\n", "<br>") for value in row]
+            lines.append("| " + " | ".join(cells) + " |")
+        lines.append("")
+
+    if renders := spec.get("board_renders"):
+        lines.extend([
+            f"## {spec.get('board_renders_title', BOARD_VIEWS_TITLE)}", "",
+            str(spec.get("board_renders_intro", BOARD_VIEWS_INTRO)), "",
+        ])
+        for render in renders:
+            lines.extend([f"### {render['title']}", "", str(render.get("caption", render["title"])), ""])
+    if maps := spec.get("interface_maps"):
+        lines.extend([
+            f"## {spec.get('interface_maps_title', INTERFACE_MAPS_TITLE)}", "",
+            str(spec.get("interface_maps_intro", INTERFACE_MAPS_INTRO)), "",
+        ])
+        for interface_map in maps:
+            lines.extend([f"### {interface_map['title']}", ""])
+    for section in spec["overview"]:
+        lines.extend([f"## {section['title']}", ""])
+        add_table(spec.get("overview_headers", OVERVIEW_HEADERS), section["rows"])
+    if power := spec.get("power_outputs"):
+        lines.extend([f"## {power['title']}", ""])
+        if intro := power.get("intro"):
+            lines.extend([intro, ""])
+        add_table(power.get("headers", POWER_HEADERS), power_output_rows(power))
+    for group in spec["connector_groups"]:
+        lines.extend([f"## {group['title']}", ""])
+        for item in group["items"]:
+            designator, name = item["designator"], item["name"]
+            lines.extend([f"### {designator} — {name}", ""])
+            if description := item.get("description"):
+                lines.extend([description, ""])
+            for field, default in (("image_caption_template", IMAGE_CAPTION), ("pinout_caption_template", PINOUT_CAPTION)):
+                caption = item.get(field, spec.get(field, default)).format(designator=designator, name=name)
+                lines.extend([caption, ""])
+            headers = item.get("table_headers", spec.get("table_headers")) or PIN_HEADERS
+            add_table(headers, [
+                [pin[field] for field in ("pin", "net", "function", "group")]
+                for pin in item["pins"]
+            ])
+    return "\n".join(lines)
+
+
+def build_document(spec: dict[str, Any], output: Path, *, writer_layout: bool = False) -> None:
     document = Document()
     configure_document(document, spec)
     add_cover(document, spec)
@@ -809,12 +989,19 @@ def build_document(spec: dict[str, Any], output: Path) -> None:
     section.left_margin = Cm(1.35)
     section.right_margin = Cm(1.35)
     for overview_section in spec["overview"]:
-        add_heading(document, overview_section["title"], 1)
+        heading = add_heading(document, overview_section["title"], 1)
+        if writer_layout:
+            heading.paragraph_format.space_before = Pt(6)
+            heading.paragraph_format.space_after = Pt(3)
         add_overview_table(
             document,
             overview_section["rows"],
-            list(spec.get("overview_headers", ("Parameter", "Description"))),
+            list(spec.get("overview_headers", OVERVIEW_HEADERS)),
+            body_size=8.5 if writer_layout else 9,
         )
+
+    if power := spec.get("power_outputs"):
+        add_power_outputs(document, power)
 
     for index, group in enumerate(spec["connector_groups"]):
         heading = add_heading(document, group["title"], 1)
@@ -824,10 +1011,10 @@ def build_document(spec: dict[str, Any], output: Path) -> None:
         for item_index, item in enumerate(group["items"]):
             item.setdefault("table_headers", spec.get("table_headers", ()))
             item.setdefault("image_alt_template", spec.get("image_alt_template", "Orthographic 3D PCB view of {designator}"))
-            item.setdefault("image_caption_template", spec.get("image_caption_template", "Orthographic 3D view — {designator}"))
+            item.setdefault("image_caption_template", spec.get("image_caption_template", IMAGE_CAPTION))
             item.setdefault("pinout_alt_template", spec.get("pinout_alt_template", "Pinout diagram for {designator} — {name}"))
-            item.setdefault("pinout_caption_template", spec.get("pinout_caption_template", "Connector-side pinout — {designator}"))
-            add_item(document, item, follows_connector=bool(item_index))
+            item.setdefault("pinout_caption_template", spec.get("pinout_caption_template", PINOUT_CAPTION))
+            add_item(document, item, follows_connector=bool(item_index), writer_layout=writer_layout)
 
     # Reserve a compact final paragraph so Word's end marker does not spill
     # onto its own page when the last connector table fills the text area.
@@ -855,6 +1042,97 @@ def write_pdf_source(docx: Path, render_copy: Path) -> None:
             if member.filename.startswith("word/media/") and member.filename.endswith(".svg"):
                 data = vectorize_pdf_svg(data)
             output.writestr(member, data)
+
+
+def find_libreoffice() -> str | None:
+    for name in ("soffice.com", "soffice", "libreoffice"):
+        if executable := shutil.which(name):
+            return executable
+    if sys.platform == "win32":
+        for root in (os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)")):
+            if root:
+                executable = Path(root) / "LibreOffice" / "program" / "soffice.com"
+                if executable.is_file():
+                    return str(executable)
+    return None
+
+
+def writer_convert(soffice: str, source: Path, output: Path, conversion: str, profile: Path) -> None:
+    result = subprocess.run(
+        [soffice, f"-env:UserInstallation={profile.as_uri()}", "--headless", "--convert-to",
+         conversion, "--outdir", str(output.parent), str(source)],
+        capture_output=True, text=True, errors="replace", timeout=180,
+    )
+    if result.returncode or not output.is_file() or not output.stat().st_size:
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise SpecError(f"LibreOffice could not create {output.name}. {detail}")
+
+
+def verify_odt_artwork(docx: Path, odt: Path) -> None:
+    """Check that Writer kept each editable-document diagram as its primary SVG."""
+    drawing = "{urn:oasis:names:tc:opendocument:xmlns:drawing:1.0}"
+    href = "{http://www.w3.org/1999/xlink}href"
+    with ZipFile(docx) as source, ZipFile(odt) as target:
+        expected = Counter(source.read(name) for name in source.namelist() if name.endswith(".svg"))
+        content = ET.fromstring(target.read("content.xml"))
+        primary_images = [
+            image.get(href, "")
+            for frame in content.iter(drawing + "frame")
+            if (image := frame.find(drawing + "image")) is not None
+        ]
+        visible = Counter(target.read(name) for name in primary_images if name.endswith(".svg"))
+        if visible != expected:
+            raise SpecError("LibreOffice did not preserve all primary SVG maps and pinouts in the ODT.")
+
+
+def prepare_odt_layout(odt: Path, board_renders: list[dict]) -> None:
+    """Restore page anchors and keep each connector's figures with its pin table."""
+    drawing = "{urn:oasis:names:tc:opendocument:xmlns:drawing:1.0}"
+    text = "{urn:oasis:names:tc:opendocument:xmlns:text:1.0}"
+    style = "{urn:oasis:names:tc:opendocument:xmlns:style:1.0}"
+    table = "{urn:oasis:names:tc:opendocument:xmlns:table:1.0}"
+    fo = "{urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0}"
+    draft = odt.with_suffix(".layout.odt")
+    with ZipFile(odt) as source, ZipFile(draft, "w") as output:
+        content = etree.fromstring(source.read("content.xml"))
+        frames = list(content.iter(drawing + "frame"))
+        figures = [frame for frame in frames if frame.find(drawing + "image") is not None]
+        caption_frames = [frame for frame in frames if frame.find(drawing + "text-box") is not None]
+        for render, figure in zip(board_renders, figures, strict=False):
+            caption = str(render.get("caption", render["title"]))
+            matches = [frame for frame in caption_frames if "".join(frame.itertext()).strip() == caption]
+            if len(matches) != 1:
+                raise SpecError(f"Could not locate the matching ODT board-view caption: {caption}")
+            frame = matches[0]
+            frame.set(text + "anchor-type", "char")
+            figure.addnext(frame)
+        if len(figures) < len(board_renders):
+            raise SpecError("LibreOffice did not preserve all board-view figures.")
+        table_styles = {
+            node.get(style + "name"): properties
+            for node in content.iter(style + "style")
+            if (properties := node.find(style + "table-properties")) is not None
+        }
+        for figure_table in content.iter(table + "table"):
+            if next(figure_table.iter(drawing + "image"), None) is None:
+                continue
+            table_styles[figure_table.get(table + "style-name")].set(fo + "keep-with-next", "always")
+            contacts = next(figure_table.itersiblings(table + "table"))
+            table_styles[contacts.get(table + "style-name")].set(style + "may-break-between-rows", "false")
+        for member in source.infolist():
+            data = etree.tostring(content, encoding="utf-8", xml_declaration=True) if member.filename == "content.xml" else source.read(member)
+            output.writestr(member, data)
+    draft.replace(odt)
+
+
+def export_odt_pair(docx: Path, odt: Path, pdf: Path, profile: Path, board_renders: list[dict]) -> None:
+    soffice = find_libreoffice()
+    if not soffice:
+        raise SpecError("Install LibreOffice to generate an ODT and matching PDF.")
+    writer_convert(soffice, docx, odt, "odt:writer8", profile)
+    prepare_odt_layout(odt, board_renders)
+    verify_odt_artwork(docx, odt)
+    writer_convert(soffice, odt, pdf, "pdf:writer_pdf_Export", profile)
 
 
 def export_pdf(docx: Path, pdf: Path) -> None:
@@ -890,18 +1168,11 @@ try {
         except (OSError, subprocess.TimeoutExpired) as error:
             errors.append(str(error))
 
-    if soffice := shutil.which("soffice") or shutil.which("libreoffice"):
-        profile = (pdf.parent / "office-profile").as_uri()
+    if soffice := find_libreoffice():
         try:
-            result = subprocess.run(
-                [soffice, f"-env:UserInstallation={profile}", "--headless", "--convert-to",
-                 "pdf:writer_pdf_Export", "--outdir", str(pdf.parent), str(docx)],
-                capture_output=True, text=True, errors="replace", timeout=180,
-            )
-            if result.returncode == 0 and pdf.is_file():
-                return
-            errors.append(result.stderr.strip() or result.stdout.strip() or "LibreOffice did not create the PDF")
-        except (OSError, subprocess.TimeoutExpired) as error:
+            writer_convert(soffice, docx, pdf, "pdf:writer_pdf_Export", pdf.parent / "office-profile")
+            return
+        except (OSError, subprocess.TimeoutExpired, SpecError) as error:
             errors.append(str(error))
 
     detail = "\n".join(errors) or "Install Microsoft Word or put LibreOffice on PATH."
@@ -911,41 +1182,52 @@ try {
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True, help="Destination DOCX. The PDF uses the same base name.")
-    parser.add_argument("--docx-only", action="store_true", help="Create only the editable DOCX.")
+    parser.add_argument("--output", type=Path, required=True, help="Destination ODT or DOCX. The PDF uses the same base name.")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--docx-only", action="store_true", help="Create only the editable DOCX.")
+    mode.add_argument("--review-only", action="store_true", help="Write a Markdown text draft without opening artwork.")
     args = parser.parse_args()
     output = args.output.resolve()
     input_path = args.data.resolve()
     pdf = output.with_suffix(".pdf")
-    if input_path == output or (not args.docx_only and input_path == pdf):
+    if input_path == output or (not args.docx_only and not args.review_only and input_path == pdf):
         raise SystemExit("input and output paths must be different")
-    if output.suffix.lower() != ".docx":
-        raise SystemExit("--output must name a .docx file")
+    allowed_suffixes = (".md",) if args.review_only else (".docx",) if args.docx_only else (".odt", ".docx")
+    if output.suffix.lower() not in allowed_suffixes:
+        raise SystemExit("--output must name a " + " or ".join(allowed_suffixes) + " file")
     try:
-        spec = parse_spec(input_path)
-        if args.docx_only:
+        spec = parse_spec(input_path, check_artwork=not args.review_only)
+        if args.review_only:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(review_markdown(spec), encoding="utf-8")
+        elif args.docx_only:
             build_document(spec, output)
         else:
             output.parent.mkdir(parents=True, exist_ok=True)
             with tempfile.TemporaryDirectory(dir=output.parent, prefix=".manual-") as directory:
-                draft_docx = Path(directory) / output.name
+                folder = Path(directory)
+                editable = folder / output.name
+                draft_docx = editable.with_suffix(".docx")
                 draft_pdf = Path(directory) / pdf.name
-                build_document(spec, draft_docx)
-                # Filled outlines preserve the authored widths through Word's PDF conversion.
-                render_copy = Path(directory) / "render" / output.name
+                build_document(spec, draft_docx, writer_layout=output.suffix.lower() == ".odt")
+                # Filled SVG outlines preserve authored line widths through document conversion.
+                render_copy = folder / "render" / draft_docx.name
                 render_copy.parent.mkdir()
                 write_pdf_source(draft_docx, render_copy)
-                export_pdf(render_copy, draft_pdf)
+                if output.suffix.lower() == ".odt":
+                    export_odt_pair(render_copy, editable, draft_pdf, folder / "office-profile", spec.get("board_renders", []))
+                else:
+                    export_pdf(render_copy, draft_pdf)
                 with draft_pdf.open("rb") as stream:
                     if stream.read(5) != b"%PDF-":
                         raise SpecError("The renderer did not produce a valid PDF header.")
-                draft_docx.replace(output)
+                editable.replace(output)
                 draft_pdf.replace(pdf)
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     print(output)
-    if not args.docx_only:
+    if not args.docx_only and not args.review_only:
         print(pdf)
     return 0
 

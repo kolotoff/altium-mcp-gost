@@ -78,6 +78,20 @@ design or manufacturing description.
       ]
     }
   ],
+  "power_outputs": {
+    "title": "Power at the connectors",
+    "intro": "Current figures identify the applicable component or USB rating.",
+    "headers": ["Supply", "Connector contacts", "Voltage", "Current", "Purpose"],
+    "rows": [
+      {
+        "rail": "VCC_GNSS",
+        "contacts": {"X1": ["1"]},
+        "voltage": "5 V",
+        "current": "—",
+        "description": "Supply for the navigation receiver."
+      }
+    ]
+  },
   "connector_groups": [
     {
       "title": "Flight-control connectors",
@@ -133,6 +147,10 @@ design or manufacturing description.
 
 - Keep the overview functional: CPU, flight controller, memory, onboard
   sensors, and behavior visible to an integrator or operator.
+- Keep the same section and overview row order for related board variants.
+  Include the power connector, supported input, and board dimensions in the
+  overview when verified. Reuse approved prose for identical facts and fill in
+  verified variant values where they differ.
 - Place full-board orthographic top and bottom renders immediately after the
   cover and before the functional overview. Use one page per side when needed
   to keep connector labels and component placement legible.
@@ -246,6 +264,12 @@ design or manufacturing description.
   `AP CAN2`, not generic `UART` or `I²C` labels. Include the numbered STM32
   hardware peripheral alongside each applicable ArduPilot port, verified from
   `hwdef.dat` (for example `USART3/SERIAL3` or `I2C2/BUS1`).
+- Name the actual numbered `UART`/`USART` and `PWM` in connector prose and map
+  labels. Trace connector aliases to the hardware peripheral before assigning
+  the name. Keep the exact physical and traced nets in their existing fields.
+- Trace inter-processor links independently of debug connectors. Describe the
+  actual endpoints and any reset or boot controls. Describe a debug connector
+  by the interfaces it exposes and identify the numbered ports where known.
 - `power_domain` marks the connector body on the map independently of the
   processor-colored label. Highlight only domains shared by at least two
   connectors; omit single-connector and `mixed` domains from highlights and
@@ -261,6 +285,16 @@ design or manufacturing description.
 - Per-pin table power descriptions show the upstream source rail and voltage,
   not intervening component designators. Keep the verified component path in
   `power_path` for machine-readable CSV/JSON exports.
+- Use optional `power_outputs` for a summary before the pin tables. Each row
+  names a supply or branch and references its physical contacts by designator
+  and pin number. A contact can appear once and must have a verified source and
+  voltage in the pin records. Keep independent supplies and differently
+  protected branches in separate rows. State when a rail follows the input or
+  is switched. Identify each current figure as a verified connector load,
+  shared regulator rating, fuse rating, or USB setting as applicable. Use an em
+  dash for a current without a verified value. Keep the introduction short.
+  State the shared converter rating and what a branch rating represents when
+  that context is needed to read the table.
 - `interface_map_legend` may override the four domain captions without changing
   their colors. Declare processor callouts in `interface_map_processors`; each
   record supplies the real designator, domain, `top`, `bottom`, or `both` side,
@@ -270,7 +304,7 @@ design or manufacturing description.
 - For top-side interface maps, place perimeter-connector labels outside the PCB
   first. Keep left/right labels horizontal and rotate top/bottom labels by 90°.
   Center the visible Arial text within each colored badge on both axes,
-  including multiline and rotated badges. Verify this in Word's page render.
+  including multiline and rotated badges. Verify this in the rendered PDF.
   Preserve `BoardShape/StandaloneMountingPads` from the current Altium assembly
   export when hiding the copper `Pads` group so drilled mounting holes inside
   the PCB outline remain visible on both top- and bottom-side maps. Exclude
@@ -295,22 +329,26 @@ design or manufacturing description.
 - If connector crops use a locator arrow, draw a short vertical translucent red
   shaft with a clear triangular head. Provide a per-designator vertical-flip
   override for bottom-side crops whose exported local orientation is reversed.
-- Every `SB*` item needs a state description. State the default condition and
-  the effect of bridging or actuation; explicitly identify non-solder-bridge
-  controls that use an `SB*` designator.
+- Every control needs a state description. Use its physical name, such as
+  «кнопка» for a pushbutton. Give the released or default condition and the
+  effect of actuation. For USB and boot selectors, state the connector and
+  processor selected by each documented position and any startup condition.
 
 ## Pre-generation checks
 
 - Every in-scope designator appears exactly once.
-- Every table has exactly four columns: pin, board net, function/mapping, and
+- Every connector table has exactly four columns: pin, board net, function/mapping, and
   interface group.
 - Every item image exists and shows the stated designator from the correct side.
 - No blocked production-detail phrase or excluded non-signal contact identifier
   occurs in the finished document text.
 - The document contains no legacy block diagram.
 - The native SVG instance, installed side, pad number and conductor trace agree
-  with the fresh Altium readback. The specification, port-map CSV and JSON
-  agree for every pin and an independent review has cleared the technical data.
+  with the verified source. The specification, port-map CSV and JSON agree
+  for every pin. For new or changed technical data, use current read-only
+  Altium and the exact firmware variant and clear any independent-check
+  discrepancies before rendering. For prose and layout changes, verify
+  protected fields against the approved baseline.
 - Check the full-width connector tables and aligned figure captions in the
   portrait connector pages. Use rendered page images to check dense tables,
   body size and legibility. Confirm that both landscape maps print at the same

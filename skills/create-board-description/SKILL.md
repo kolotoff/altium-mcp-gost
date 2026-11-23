@@ -1,6 +1,6 @@
 ---
 name: create-board-description
-description: Inspect an open Altium PCB project and create or update a technical board-description DOCX from verified design data. Use for engineering characteristics documents and for final-user connector manuals with CPU, memory, sensors, controls, pin-by-pin nets, firmware mappings, and orthographic 3D connector images.
+description: Create or update engineering board descriptions and end-user connector manuals from verified Altium and firmware data. Covers variant wording, port maps, native board artwork, and paired editable manuals and PDFs.
 ---
 
 # Create Board Description
@@ -10,7 +10,7 @@ coloring, also follow `skills/create-board-port-map/SKILL.md`. Build the CSV and
 JSON from the same reviewed per-pin specification used for the manual, and
 verify exact connector pad nets against `mcp__altium__get_component_pins`.
 
-Produce a concise Russian technical-description DOCX whose claims are traceable
+Produce a concise Russian board description whose claims are traceable
 to the open Altium design, user-provided requirements, or explicitly requested
 external research. Do not edit or save the Altium design while preparing the
 description.
@@ -71,13 +71,21 @@ technical description.
 
 ## Prepare Document Data
 
+For end-user manuals, apply [Polden Humanify](../polden-humanify/SKILL.md)
+before drafting and again after reopening the saved text. Treat component
+names, signal names, contact numbers, firmware assignments and ratings as
+protected text.
+
 Create a task-local UTF-8 JSON file following
 [references/description-data.md](references/description-data.md). Keep
-board-specific values outside common scripts and skill instructions.
+board-specific values in task-local data and shared variant conventions in
+the applicable board-family reference.
 
 For end-user mode, use
 [references/end-user-description-data.md](references/end-user-description-data.md)
 instead. Do not reuse or adapt a legacy block diagram for this mode.
+For MainRK v1.6, read [the approved wording and variant data](references/mainrk-v1.6-manual.md)
+before drafting or refreshing either manual.
 
 When revising an existing manual, render both the current and revised documents
 and inspect every page. Record placement, pagination and readability defects
@@ -92,10 +100,44 @@ Before generation, reconcile every row against:
 4. the exact current application firmware target and its referenced files,
    following the port-map skill when firmware is in scope.
 
-Freeze the reviewed specification and export its pin records before the
-independent source-data check. Give the verifier live Altium and current
-firmware access plus the native SVG, specification and CSV/JSON. Resolve and
-recheck discrepancies before final DOCX generation.
+Export a text-only Markdown draft from the same JSON as the manual:
+
+```powershell
+python tools\generate_end_user_board_description_docx.py `
+  --data "<end-user-description.json>" `
+  --output "<manual-base>-review.md" --review-only
+```
+
+### Review wording changes
+
+Use the previous approved JSON/Markdown and any family wording reference as
+the baseline. Compare prose by section or connector designator. Carry forward
+approved wording when the underlying facts match. For related variants, apply
+each accepted wording change to every affected board and repeated instance.
+Confirm that variable fields, including dimensions, ports, and control states,
+still match their own variant. Verify fixed nets and repetitive table fields
+through structured comparisons.
+
+When the user requests pre-render approval, share one combined review of new
+or materially changed wording in both manuals. Keep fixed nets, standard
+captions, unchanged text, and routine table rows out of the review queue. Use
+a targeted excerpt for a material table change. Wait for the requested
+approval even if the comparison finds no new wording. Otherwise, continue to
+generation once the agent's checks pass.
+
+For interactive review, start the [local review app](../../README.md#reviewing-manual-text).
+When applying feedback, read the matching draft revision in the
+`review-state.json` file beside the generated page. Apply changes in the JSON,
+regenerate the text draft, and check the new Markdown against the notes.
+
+Freeze the final JSON before rendering. For a new specification or technical
+change, export its pin records and resolve discrepancies found by the independent
+source-data check. Give the verifier read-only Altium and current firmware
+access, native SVGs, and the specification and exports. For prose or layout
+revisions, check the source revisions and compare structured pin records against
+the verified baseline. Rerun affected source checks when a technical value or
+source revision changes. Regenerate CSV/JSON when an exported field changes,
+including `function`.
 
 Remove duplicate facts and unsupported fields. Unless the user asks otherwise,
 the finished document must not contain:
@@ -105,7 +147,7 @@ the finished document must not contain:
 - internal manufacturer stack codes;
 - component model names the user explicitly asked to suppress.
 
-## Generate the DOCX
+## Generate the manual
 
 Use the repository generator with explicit paths:
 
@@ -199,8 +241,10 @@ python tools\generate_end_user_board_description_docx.py `
   --output "<output.docx>"
 ```
 
-The dedicated generator rejects common PCB-fabrication fields and excluded
-non-signal contact identifiers. Its four-column table groups consecutive
+Use an `.odt` output path for MainRK v1.6 and other Writer deliverables. For an
+end-user manual with no format preference, use `.docx`. Both paths generate a
+matching PDF. The dedicated generator rejects common PCB-fabrication fields
+and excluded non-signal contact identifiers. Its four-column table groups consecutive
 interface rows while preserving a separate row per physical contact. Use
 landscape board views and interface maps, then let the overview and complete
 connector sections flow through portrait pages. Use short figure captions
@@ -249,36 +293,36 @@ make room for lower-priority items; reserve those projected perimeter positions
 first. Support explicit local-label overrides for internal items whose perimeter
 placement would create a long leader, and keep those local leaders short.
 
-Describe every `SB*` item explicitly. For each solder bridge, state the default
-open/closed condition and the exact electrical effect of changing it. If an
-`SB*` designator is a mechanical switch rather than a solder bridge, say so and
-describe its released and actuated states.
+Describe every `SB*` item by its physical type. For a solder bridge, state the
+default open/closed condition and the electrical effect of bridging it. For a
+pushbutton, use «кнопка» and describe its released and pressed states. For a
+multi-section selector, state the positions for each supported mode.
 
 ## Verify Before Delivery
 
-When the `documents` skill is available, load it and follow its complete DOCX
-render-and-verify workflow. At minimum:
+For DOCX, follow the `documents` skill's render-and-verify workflow when
+available. For ODT, use the Writer-rendered PDF for the same page checks. At
+minimum:
 
-- reopen the output and verify the title, section/table count, and PAGE field;
+- reopen the editable output and verify the title, section/table count, and
+  page numbering;
 - audit section geometry, table widths, and accessibility;
 - render every page, create contact sheets, and inspect page images for
   clipping, overflow, broken rows, orphaned headings, incorrect footer text,
   unexpected blank pages, and unnecessary connector table continuations;
 - inspect dense connectors and multi-row controls at page size. Check native
   body proportions, horizontal labels and exact pad endpoints against the
-  source SVG. Compare the SVG labels, DOCX table rows and machine-readable
+  source SVG. Compare the SVG labels, editable manual table rows and machine-readable
   records and rerun a targeted comparison against the current firmware;
 - search extracted document text for required values and forbidden names or
   positional designators;
 - confirm the source Altium document was not saved or modified.
 
-For end-user manuals, the generator exports a PDF from the finished DOCX by
-default. It uses Microsoft Word on Windows or LibreOffice on PATH. Rasterize
-that PDF and inspect all pages before delivery. Check the fine lines against
-the source diagrams and verify that the maps and pinouts remain vector. The
-PDF workflow uses the `manual-pdf` extra to trace SVG strokes at their actual
-widths. Use `--docx-only` for an editable file alone.
+The PDF workflow uses the `manual-pdf` extra to trace SVG strokes at their
+authored widths. Render all pages and verify vector maps, pinouts and labels.
+Check representative PDF stroke widths against the SVGs in the final editable
+file at their placed scale. Use `--docx-only` for DOCX alone.
 
-Deliver the final DOCX. Include the matching PDF for end-user manuals by
-default. Summarize the decisive characteristics added and mention uncertainties
-or omitted requested data. Include internal research provenance when requested.
+Deliver the editable manual and matching PDF in the same `generated/`
+subdirectory with the same base name. Summarize the substantive changes and
+mention any remaining uncertainties. Include internal provenance when requested.

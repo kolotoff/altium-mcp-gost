@@ -35,7 +35,9 @@ firmware port from a connector's label alone.
    and manuals as comparison inputs.
 5. Match each traced function to its physical MCU pin and effective assignment.
    Keep the numbered peripheral, signal direction, and ArduPilot logical port
-   distinct. Derive serial and I²C numbers from `SERIAL_ORDER` and
+   distinct. Resolve processor UART and PWM numbers at the terminating device.
+   A connector index or routing alias can use a different number. Derive
+   ArduPilot serial and I²C numbers from `SERIAL_ORDER` and
    `I2C_ORDER`, retaining empty serial slots. Check CAN order, SPI devices and
    chip selects, timer channels and servo indices, GPIO, ADC, USB, safety and
    alarm assignments. Record declared but disabled or unassigned functions
@@ -72,8 +74,14 @@ definition filename for auditability.
 
 ## Verification
 
-- Compare each export row to a fresh Altium pad readback and match each
-  physical number to the native SVG metadata. Require complete coverage of
+- For a revision limited to prose or layout, check the board and firmware
+  revisions and compare the structured contact records against the last
+  verified export. Rerun affected source checks when the design, firmware,
+  or technical fields change. Regenerate both exports whenever a serialized
+  field such as `function` changes.
+- For a new map, compare each export row to a fresh Altium pad readback and
+  match each physical number to the native SVG metadata. Use the same checks
+  on affected rows for a revision. Require complete coverage of
   documented contacts with zero duplicates, mechanical callouts, or mismatches.
 - Compare each firmware record against the effective MCU pin, peripheral,
   direction, and logical port. Verify every power contact against the upstream
@@ -81,6 +89,6 @@ definition filename for auditability.
 - For independent verification, give a fresh verifier the exact board paths,
   target paths, specification, and exports. Have it reread the sources and
   report record counts and discrepancies by board, designator, and physical
-  pin. Recheck every correction before generating the final DOCX.
+  pin. Recheck every technical correction before generating the final manual.
 - Report any `trace_exceptions` explicitly. Do not call unverified nets
   resolved, and do not save the Altium design unless the user asks.

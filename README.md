@@ -807,6 +807,63 @@ The generator uses the supplied template as its layout source and replaces the
 title, subtitle, section headings, table contents, footer label/page field, and
 core document metadata.
 
+### Reviewing manual text
+
+Keep the end-user JSON as the source and generate its Markdown draft with
+the `--review-only` option before rendering. Apply
+[Polden Humanify](skills/polden-humanify/SKILL.md) and the applicable board
+wording reference from the [board-description skill](skills/create-board-description/SKILL.md).
+Compare the draft with the last approved revision. Reuse approved sentences
+for matching facts and check variant values, fixed nets, and repetitive
+rows against the structured records.
+
+If the user requests a wording pass, offer one combined review for all related
+boards. Point to the new or materially changed passages and include a table
+excerpt only when it needs editorial input. For a first draft or a broader
+review, build one offline page from the Markdown drafts:
+
+```powershell
+python tools\generate_board_manual_review.py `
+  "generated\board-a\board-a-review.md" `
+  "generated\board-b\board-b-review.md" `
+  --output "generated\manual-review\index.html"
+```
+
+To save notes directly to the workspace, start the local app:
+
+```powershell
+python tools\serve_board_manual_review.py "generated\manual-review\index.html" --open
+```
+
+The app listens at `http://127.0.0.1:8765/` and saves notes and review progress
+to `review-state.json` beside the page, keyed by draft revision. Keep the
+server running while you review. Choose **Open autosave app** in the file-based
+review to transfer its browser-saved notes and progress once. If you use a
+different `--port`, generate the file page with the matching `--app-port`.
+
+**Wording review** is the default. It shows each
+distinct introduction, overview description, and connector description once
+and batches connector wording by group. Figure captions, pinouts, and power
+tables stay available in **Full drafts**. Use **Combined review** for the
+complete text and tables with identical passages and rows shown once, or
+compare the original sections side by side in **Full drafts**.
+
+Set a session length to see how many upcoming sections fit. The estimate
+uses 160 words per minute, with three seconds per table row in Combined
+review. The optional timer counts time while the page is in front and pauses
+after two minutes without interaction. **Next unreviewed** advances to the
+next section with text still to review.
+
+Select text before adding a note to attach a quotation and highlight the
+passage. Open the highlight to edit or delete its note. **Section notes**
+lists notes for that section, including notes without a text selection.
+**Review notes** can also copy or download a Markdown summary with the affected
+sections. The file-based review stores notes in the browser. The local app
+keeps previous revisions in the workspace state file. Read the notes for the
+reviewed revision directly from `review-state.json`. Apply them in the JSON
+specification, regenerate Markdown, and verify that each note is addressed
+across the affected variants before rendering.
+
 ### Generating an end-user connector manual
 
 Use the separate end-user workflow when the deliverable is a user-facing board
@@ -814,14 +871,17 @@ manual rather than a PCB manufacturing description. Its JSON schema is
 documented in
 `skills/create-board-description/references/end-user-description-data.md`.
 The workflow produces physical connector pinouts from Altium assembly SVGs,
-top and bottom interface maps at one shared scale, and a DOCX with one pin per table row:
+top and bottom interface maps at one shared scale, and one pin per table row.
+For MainRK v1.6, use the [approved wording and variant data](skills/create-board-description/references/mainrk-v1.6-manual.md).
+Deliver those manuals as ODT/PDF pairs. The default for other end-user boards
+is DOCX/PDF.
 
 For each ArduPilot variant, enter its exact `firmware_target` and application
 `firmware_source` in the board specification. Reread that target and its
 referenced files, resolve the current mapping, and export the reviewed
 specification with `tools/export_board_port_maps.py`. The
-`skills/create-board-port-map/SKILL.md` workflow covers the source checks
-and independent verification before DOCX generation.
+`skills/create-board-port-map/SKILL.md` workflow covers the technical source
+checks and independent verification before generating the manual.
 
 ```powershell
 python tools\crop_native_pcb_3d_export.py `
@@ -854,8 +914,13 @@ node tools\rasterize_svg_directory.cjs `
 
 python tools\generate_end_user_board_description_docx.py `
   --data "D:\path\end-user-board.json" `
-  --output "D:\path\board-user-manual.docx"
+  --output "D:\path\board-user-manual.odt"
 ```
+
+An `.odt` destination uses LibreOffice Writer with an isolated profile to
+build an editable ODT and export its PDF. The generator verifies that the
+ODT retains each SVG as its primary diagram. Use a `.docx` destination
+for the Word workflow.
 
 Generate the assembly SVGs through the read-only Altium MCP exports with the
 requested solder-mask color. The interface-map generator hides copper pads but
@@ -870,7 +935,7 @@ flags must not be treated as x/y coordinates when calculating that extent:
 doing so can make curved connector highlights several times too large. The
 power legend uses the same fill and opacity as the connector highlights, and
 nearby power domains use visibly distinct hues. Inspect the rendered overlays
-against the actual connector housings before embedding the maps in the DOCX.
+against the actual connector housings before embedding the maps in the manual.
 The SVG rasterizer requires the `sharp` Node.js package. Its PNGs are mandatory
 fallbacks for Word clients that do not render the embedded SVG part directly.
 Connector pinouts use the installed Altium assembly artwork, with a common
@@ -880,13 +945,14 @@ multi-column contacts to both sides while keeping USB-C A/B rows intact.
 Match repeated designators to their physical positions and pass the verified
 `native_svg_instance` to the pinout, map, and crop generators. Reserve layout,
 rotation, and side-swap overrides for incomplete metadata or a different
-installed orientation. The manual uses landscape maps with a horizontal processor legend and a vertical power legend in the lower-right corner
-and portrait pages for connector figures and four-column tables. Render the
-PDF to check table pagination, figure captions, and legibility at page size.
-The generator writes a matching PDF alongside the DOCX by default. It uses
-Microsoft Word on Windows or LibreOffice on PATH. Install the `manual-pdf`
-extra with `uv sync --extra manual-pdf` to keep interface maps and pinouts
-vector at their SVG line weights. Use `--docx-only` for an editable file alone.
+installed orientation. Keep the connector crop and vector pinout on a common
+horizontal centerline, with the contact table on the same page when it fits.
+Use landscape maps with a horizontal processor legend and a vertical power
+legend in the lower-right corner. Render the PDF to check table breaks,
+captions, clipping, and legibility at page size. Install the `manual-pdf`
+extra with `uv sync --extra manual-pdf` to preserve vector diagrams and labels.
+Compare PDF stroke widths with the editable manual's SVGs at their placed
+scale. Use `--docx-only` for DOCX alone.
 Write generated manuals, maps, pin-to-net exports, renders, reports, and
 temporary work beneath the repository-root `generated/` directory. That
 directory is intentionally ignored by Git; only generators, tests, skills,

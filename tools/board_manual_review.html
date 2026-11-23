@@ -1,0 +1,1727 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="review-autosave" content="off">
+  <meta name="review-app-port" content="__BOARD_REVIEW_PORT__">
+  <title>Manual text review</title>
+  <style>
+    :root {
+      font: 16px/1.5 Arial, sans-serif;
+      color-scheme: light dark;
+      --canvas: #f4f6f7;
+      --paper: #fff;
+      --ink: #172e38;
+      --muted: #50636d;
+      --line: #d6e0e3;
+      --soft: #edf4f5;
+      --accent: #075d65;
+      --on-accent: #fff;
+      --marked: #fff1a6;
+      --noted: #f7dfb1;
+      --note-underline: #91520e;
+      --danger: #943731;
+      --session-height: 0px;
+      background: var(--canvas);
+      color: var(--ink);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --canvas: #10191e;
+        --paper: #172429;
+        --ink: #e5f0f2;
+        --muted: #aec0c7;
+        --line: #354b53;
+        --soft: #23363d;
+        --accent: #91dce0;
+        --on-accent: #092e35;
+        --marked: #855e1f;
+        --noted: #674b2e;
+        --note-underline: #f3bf78;
+        --danger: #ffb0a7;
+      }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    h1, h2, h3, p { margin: 0; }
+    button, input, select, textarea { font: inherit; color: inherit; }
+    button, select { cursor: pointer; }
+    button, input, select, textarea {
+      border: 1px solid var(--line);
+      border-radius: .4rem;
+      background: var(--paper);
+    }
+    button, input, select { min-height: 2.5rem; padding: .35rem .65rem; }
+    button:hover:not(:disabled) { background: var(--soft); }
+    button:disabled { cursor: default; opacity: .46; }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    [hidden] { display: none !important; }
+    .primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+    .primary:hover:not(:disabled) { background: var(--accent); filter: brightness(.91); }
+    .danger { color: var(--danger); }
+    .muted { color: var(--muted); }
+    .small { font-size: .875rem; }
+    .line { display: flex; align-items: center; flex-wrap: wrap; gap: .6rem; }
+    .spaced { justify-content: space-between; }
+    .stack { display: grid; gap: .65rem; }
+    .masthead {
+      background: var(--paper);
+      border-bottom: 1px solid var(--line);
+      padding: clamp(1rem, 2.7vw, 1.65rem) clamp(1rem, 3.6vw, 3rem);
+    }
+    .masthead h1 { font-size: clamp(1.4rem, 2.7vw, 2rem); letter-spacing: -.035em; }
+    .masthead .line { gap: 1rem; }
+    .selectors { margin-top: .9rem; }
+    .selectors select { max-width: 100%; }
+    .check { display: inline-flex; align-items: center; gap: .45rem; cursor: pointer; }
+    input[type=checkbox] { accent-color: var(--accent); min-height: auto; width: 1.05rem; height: 1.05rem; margin: 0; }
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(13rem, 16rem) minmax(0, 1fr);
+      max-width: 105rem;
+      margin: 0 auto;
+      gap: clamp(1rem, 2.4vw, 2.5rem);
+      padding: 1.4rem clamp(1rem, 3.6vw, 3rem) 2.75rem;
+      align-items: start;
+    }
+    .sidebar { position: sticky; top: 1rem; }
+    .sidebar label { display: block; font-weight: 700; }
+    #search, #section-select { width: 100%; }
+    .compact-navigation { display: none; }
+    #section-list { max-height: calc(100dvh - 8.5rem); overflow-y: auto; padding: .25rem .35rem .35rem .15rem; }
+    .nav-group { margin: .8rem 0 .3rem; color: var(--muted); font-size: .78rem; font-weight: 700; }
+    .nav-item {
+      display: flex;
+      gap: .35rem;
+      align-items: start;
+      justify-content: space-between;
+      width: 100%;
+      text-align: left;
+      background: transparent;
+      border-color: transparent;
+      font-size: .875rem;
+      min-height: 0;
+    }
+    .nav-item[aria-current=true] { background: var(--soft); color: var(--accent); border-color: var(--line); font-weight: 700; }
+    .nav-item span { overflow-wrap: anywhere; }
+    .nav-status { color: var(--accent); font-size: .8rem; flex-shrink: 0; }
+    .reading { min-width: 0; }
+    .reading-bar { margin-bottom: .95rem; }
+    .reading-bar button { font-size: .875rem; }
+    .panels { display: grid; grid-template-columns: minmax(0, 1fr); gap: .9rem; }
+    .panels.comparing { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .panel { min-width: 0; background: var(--paper); border: 1px solid var(--line); border-radius: .6rem; }
+    .panel-head {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      display: grid;
+      gap: .5rem;
+      padding: 1rem clamp(.8rem, 2vw, 1.5rem);
+      border-bottom: 1px solid var(--line);
+      border-radius: .6rem .6rem 0 0;
+      background: var(--paper);
+    }
+    .panel-head h2 { font-size: clamp(1.15rem, 2.1vw, 1.5rem); line-height: 1.22; overflow-wrap: anywhere; }
+    .panel-head button { font-size: .875rem; min-height: 2.15rem; }
+    .content { padding: 1rem clamp(.8rem, 2vw, 1.5rem) 1.35rem; display: grid; gap: .9rem; min-width: 0; }
+    .content h3 { font-size: 1rem; }
+    .content p { overflow-wrap: anywhere; }
+    .table-wrap { max-width: 100%; overflow-x: auto; container-type: inline-size; }
+    table { width: 100%; border-collapse: collapse; font-size: .925rem; font-variant-numeric: tabular-nums; }
+    th, td {
+      border-bottom: 1px solid var(--line);
+      padding: .5rem .55rem;
+      text-align: left;
+      vertical-align: top;
+      white-space: pre-line;
+      overflow-wrap: break-word;
+    }
+    th { background: var(--soft); }
+    td:first-child { font-weight: 700; }
+    tr:last-child td { border-bottom: 0; }
+    .table-wrap[tabindex] { border-radius: .2rem; }
+    .field-label { display: none; }
+    @container (max-width: 40rem) {
+      .record-table, .record-table tbody { display: grid; }
+      .record-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+      .record-table tbody tr {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        gap: .4rem .85rem;
+        border-top: 1px solid var(--line);
+        padding: .65rem 0;
+      }
+      .record-table td { display: block; padding: 0; border: 0; }
+      .record-table td:last-child, .record-table.pin-table td:nth-child(3) { grid-column: 1 / -1; }
+      .field-label { display: block; color: var(--muted); font-size: .75rem; font-weight: 700; }
+    }
+    mark { background: var(--marked); color: var(--ink); }
+    .noted-text {
+      background: var(--noted);
+      text-decoration: underline dotted var(--note-underline);
+      text-underline-offset: .2em;
+      cursor: pointer;
+      box-decoration-break: clone;
+      -webkit-box-decoration-break: clone;
+    }
+    .noted-text.search-hit { background: var(--marked); }
+    .noted-text:hover { text-decoration-style: solid; }
+    dialog {
+      background: var(--paper);
+      color: var(--ink);
+      border: 1px solid var(--line);
+      border-radius: .65rem;
+      width: min(100% - 2rem, 36rem);
+      max-height: calc(100dvh - 2rem);
+      padding: 1.25rem;
+    }
+    dialog::backdrop { background: #11252b88; }
+    dialog h2 { font-size: 1.25rem; }
+    textarea { width: 100%; min-height: 6.5rem; padding: .65rem; resize: vertical; }
+    blockquote { margin: 0; border-left: 3px solid var(--line); padding-left: .6rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .note-card { padding: .75rem 0; border-top: 1px solid var(--line); }
+    .note-card p { white-space: pre-wrap; overflow-wrap: anywhere; }
+    .draft-progress { min-height: 1.3em; }
+    .warning { padding: .65rem clamp(1rem, 3.6vw, 3rem); background: var(--soft); }
+    .session-bar {
+      background: var(--paper);
+      border-bottom: 1px solid var(--line);
+      padding: .7rem clamp(1rem, 3.6vw, 3rem);
+    }
+    .timer-open .session-bar { position: sticky; top: 0; z-index: 2; }
+    .timer-open .panel-head { top: var(--session-height); }
+    .timer-open .sidebar { top: calc(1rem + var(--session-height)); }
+    .timer-open #section-list { max-height: calc(100dvh - 8.5rem - var(--session-height)); }
+    .timer-open #progress, .timer-open #panels h2 { scroll-margin-top: calc(.5rem + var(--session-height)); }
+    .session-bar input { width: 4.5rem; }
+    #session-clock { font-variant-numeric: tabular-nums; }
+    #time-info { min-height: 1.3em; }
+    .joined-titlebar { margin-bottom: .9rem; }
+    .joined-heading { overflow-wrap: anywhere; font-size: clamp(1.15rem, 2.2vw, 1.6rem); }
+    .joined-packet + .joined-packet { margin-top: .8rem; }
+    .joined-packet .panel-head { display: flex; padding-block: .65rem; }
+    .joined-packet .panel-head h3 { font-size: 1rem; }
+    .joined-packet .content h4 { margin: 0; font-size: 1rem; }
+    .joined-packet .content p { overflow-wrap: anywhere; }
+    .joined-packet .content .reused { border-top: 1px solid var(--line); padding-top: .65rem; }
+    .wording-item + .wording-item { border-top: 1px solid var(--line); padding-top: .7rem; }
+    .wording-label { display: block; margin-bottom: .15rem; }
+    .reused summary { cursor: pointer; color: var(--accent); }
+    .reused ul { margin-bottom: .35rem; padding-left: 1.25rem; }
+    .reused button {
+      min-height: 0;
+      padding: .12rem .15rem;
+      border: 0;
+      background: transparent;
+      color: var(--accent);
+      text-align: left;
+      text-decoration: underline;
+      text-underline-offset: .15em;
+    }
+    .repeats { margin-top: 1rem; }
+    .join-footer { margin-top: .85rem; }
+    @media (max-width: 1110px) {
+      .layout { grid-template-columns: minmax(0, 1fr); gap: .9rem; }
+      .sidebar { position: static; }
+      #section-list { display: none; }
+      .compact-navigation { display: block; }
+      .sidebar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 820px) {
+      .panels.comparing { grid-template-columns: minmax(0, 1fr); }
+    }
+    @media (max-width: 500px) {
+      .sidebar { grid-template-columns: minmax(0, 1fr); }
+      .selectors label, .selectors select { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <header class="masthead">
+    <div class="line spaced">
+      <h1>Manual text review</h1>
+      <div class="line">
+        <button type="button" id="open-local-app" hidden>Open autosave app</button>
+        <button type="button" id="show-notes">Review notes</button>
+      </div>
+    </div>
+    <div class="line selectors">
+      <label for="view-mode">View</label>
+      <select id="view-mode">
+        <option value="wording">Wording review</option>
+        <option value="joined">Combined review</option>
+        <option value="full">Full drafts</option>
+      </select>
+      <div class="line" id="draft-selectors" hidden>
+        <label>Draft <select id="primary-draft"></select></label>
+        <label class="check" id="comparison-control"><input type="checkbox" id="compare"> Compare</label>
+        <label id="secondary-control" hidden>With <select id="secondary-draft"></select></label>
+      </div>
+    </div>
+    <p id="workspace-status" class="small muted" role="status" hidden></p>
+  </header>
+  <section class="session-bar stack" id="review-session" aria-label="Review time">
+    <div class="line">
+      <label for="session-minutes">Session time</label>
+      <input type="number" id="session-minutes" min="1" max="180" value="10" required>
+      <span class="small">min</span>
+      <button type="button" id="session-toggle">Start timer</button>
+      <button type="button" id="session-reset" hidden>Reset timer</button>
+      <span class="small" id="session-clock"></span>
+    </div>
+    <p id="time-info" class="small muted"></p>
+  </section>
+  <p class="warning small" id="storage-warning" role="status" hidden>Browser storage is unavailable. Export your notes before closing this page.</p>
+  <noscript><p class="warning">Enable JavaScript to use the review tool.</p></noscript>
+  <div class="layout">
+    <aside class="sidebar stack" aria-label="Section navigation">
+      <div>
+        <label class="small" for="search">Find text</label>
+        <input id="search" type="search" placeholder="Section, signal, or phrase" autocomplete="off">
+        <p id="search-status" class="small muted" role="status"></p>
+      </div>
+      <div class="compact-navigation">
+        <label class="small" for="section-select">Section</label>
+        <select id="section-select"></select>
+      </div>
+      <nav id="section-list" aria-label="Sections"></nav>
+    </aside>
+    <main class="reading">
+      <div class="line spaced reading-bar">
+        <p id="progress" class="muted small draft-progress" aria-live="polite"></p>
+        <div class="line">
+          <button type="button" id="previous">Previous section</button>
+          <button type="button" id="next">Next section</button>
+          <button type="button" class="primary" id="next-unreviewed">Next unreviewed</button>
+        </div>
+      </div>
+      <div class="panels" id="panels"></div>
+    </main>
+  </div>
+  <dialog id="note-dialog" aria-labelledby="note-title">
+    <form id="note-form" class="stack">
+      <h2 id="note-title">Review note</h2>
+      <p id="note-context" class="muted small"></p>
+      <blockquote id="note-quote" class="small" hidden></blockquote>
+      <label for="note-text">Comment</label>
+      <textarea id="note-text" required maxlength="8000"></textarea>
+      <div class="line">
+        <button class="primary" type="submit">Save note</button>
+        <button type="button" id="cancel-note">Cancel</button>
+        <button type="button" id="delete-note" class="danger" hidden>Delete note</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="review-dialog" aria-labelledby="review-title">
+    <div class="stack">
+      <div class="line spaced">
+        <h2 id="review-title">Review notes</h2>
+        <button type="button" id="close-review">Close</button>
+      </div>
+      <p id="review-summary" class="muted small"></p>
+      <div class="line" id="review-export">
+        <button type="button" id="copy-review">Copy Markdown</button>
+        <button type="button" id="download-review">Download Markdown</button>
+      </div>
+      <p id="copy-status" role="status" class="muted small"></p>
+      <textarea id="copy-fallback" aria-label="Review notes as Markdown" readonly hidden></textarea>
+      <div id="review-notes"></div>
+    </div>
+  </dialog>
+  <script type="application/json" id="draft-data">__BOARD_REVIEW_DATA__</script>
+  <script>
+    "use strict";
+    const byId = (id) => document.getElementById(id);
+    const { drafts } = JSON.parse(byId("draft-data").textContent);
+    const normalize = (value) => value.toLocaleLowerCase().replace(/ё/g, "е");
+    const viewMode = byId("view-mode");
+    const draftSelect = byId("primary-draft");
+    const secondarySelect = byId("secondary-draft");
+    const compare = byId("compare");
+    const search = byId("search");
+    const sectionSelect = byId("section-select");
+    const sectionList = byId("section-list");
+    const panels = byId("panels");
+    const noteDialog = byId("note-dialog");
+    const noteText = byId("note-text");
+    const reviewDialog = byId("review-dialog");
+    const autosave = document.querySelector('meta[name="review-autosave"]').content === "on";
+    const appPort = document.querySelector('meta[name="review-app-port"]').content;
+    const storageKey = "board-manual-review:v1:" + JSON.stringify(drafts.map(({ id, revision }) => [id, revision]).sort());
+    const endpoint = "/api/review-state?review=" + encodeURIComponent(storageKey);
+    const outboxKey = autosave ? storageKey + ":workspace-outbox:" + tabIdentifier() : "";
+    const handoffKey = storageKey + ":workspace-handoff";
+    const unfolded = new Map();
+    const plan = buildReviewPlan();
+    const wordingPlan = buildWordingPlan();
+    const defaultSection = drafts[0].sections.find((section) => section.blocks.some((block) => block.kind === "table"))?.match
+      || drafts[0].sections[0].match;
+    let state = { units: {}, notes: [], sectionMatch: defaultSection, session: { minutes: 10, elapsed: null } };
+    let storage = true;
+    let workspaceVersion = null;
+    let workspaceStatus = "";
+    let workspaceConflict = false;
+    let queuedState = null;
+    let sendingState = null;
+    let initializedWorkspace = false;
+    let connectingWorkspace = false;
+    let match;
+    let pending = null;
+    let reviewFilter = null;
+    let returnToReview = false;
+    let noteRanges = new Map();
+    let reviewChecks = [];
+    let timerPlaying = false;
+    let lastActivity = performance.now();
+    let lastTick = lastActivity;
+    let lastTimerSave = lastActivity;
+    let lastForeground = true;
+    const idleMs = 120_000;
+
+    function element(tag, text, className) {
+      const node = document.createElement(tag);
+      if (text !== undefined) node.textContent = text;
+      if (className) node.className = className;
+      return node;
+    }
+
+    function button(text, action) {
+      const node = element("button", text);
+      node.type = "button";
+      node.addEventListener("click", action);
+      return node;
+    }
+
+    function storageUnavailable() {
+      storage = false;
+      byId("storage-warning").hidden = autosave;
+    }
+
+    function restore(saved) {
+      if (Array.isArray(saved?.notes)) {
+        state.notes = saved.notes;
+        if (plan.entries.has(saved.sectionMatch) || wordingPlan.entries.has(saved.sectionMatch)) {
+          state.sectionMatch = saved.sectionMatch;
+        }
+        if (saved.session) state.session = saved.session;
+        if (saved.units) state.units = saved.units;
+        else if (saved.reviewed) {
+          for (const [key, units] of plan.bySection) {
+            if (saved.reviewed[key]) units.forEach(({ id }) => { state.units[id] = true; });
+          }
+        }
+      }
+      match = state.sectionMatch;
+    }
+
+    function readStorage(key) {
+      try {
+        return JSON.parse(localStorage.getItem(key));
+      } catch {
+        storageUnavailable();
+        return null;
+      }
+    }
+
+    function writeStorage(key, value) {
+      if (!storage) return;
+      try {
+        if (value === null) localStorage.removeItem(key);
+        else localStorage.setItem(key, JSON.stringify(value));
+      } catch {
+        storageUnavailable();
+      }
+    }
+
+    function setWorkspaceStatus(text) {
+      workspaceStatus = text;
+      byId("workspace-status").textContent = text;
+      byId("workspace-status").hidden = !text;
+    }
+
+    function tabIdentifier() {
+      const key = "board-review-autosave-tab";
+      const fresh = randomToken();
+      try {
+        const existing = sessionStorage.getItem(key);
+        if (existing) return existing;
+        sessionStorage.setItem(key, fresh);
+      } catch {
+        // The workspace remains usable when an embedded browser disables storage.
+      }
+      return fresh;
+    }
+
+    function randomToken() {
+      return [...crypto.getRandomValues(new Uint8Array(16))]
+        .map((byte) => byte.toString(16).padStart(2, "0")).join("");
+    }
+
+    function saveOutbox() {
+      writeStorage(outboxKey, queuedState ? { version: workspaceVersion, state: queuedState, sending: sendingState } : null);
+    }
+
+    async function saveWorkspace() {
+      if (workspaceVersion === null || workspaceConflict || !queuedState || sendingState) return;
+      const snapshot = queuedState;
+      sendingState = snapshot;
+      let savedToDisk = false;
+      saveOutbox();
+      setWorkspaceStatus("Saving to workspace…");
+      try {
+        const body = JSON.stringify({ version: workspaceVersion, state: snapshot });
+        const response = await fetch(endpoint, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body,
+          keepalive: new TextEncoder().encode(body).length < 48_000,
+          signal: AbortSignal.timeout(5000),
+        });
+        if (response.status === 409) {
+          workspaceConflict = true;
+          setWorkspaceStatus(storage
+            ? "The workspace changed in another tab. This tab kept its unsaved edits in the browser."
+            : "The workspace changed in another tab. Keep this tab open to retain its unsaved edits.");
+          return;
+        }
+        if (!response.ok) throw new Error("Workspace save failed.");
+        const saved = await response.json();
+        workspaceVersion = saved.version;
+        if (queuedState === snapshot) queuedState = null;
+        savedToDisk = true;
+      } catch {
+        setWorkspaceStatus(storage ? "Workspace save pending · retrying" : "Workspace save pending · keep this tab open");
+      } finally {
+        sendingState = null;
+        if (savedToDisk) {
+          saveOutbox();
+          if (queuedState) void saveWorkspace();
+          else setWorkspaceStatus("Saved to workspace");
+        }
+      }
+    }
+
+    function persist() {
+      writeStorage(storageKey, state);
+      if (autosave) {
+        queuedState = JSON.parse(JSON.stringify(state));
+        saveOutbox();
+        void saveWorkspace();
+      }
+    }
+
+    function openAutosaveApp() {
+      setWorkspaceStatus("Opening autosave app…");
+      const url = new URL(`http://127.0.0.1:${appPort}/`);
+      const previous = readStorage(handoffKey);
+      const previousNotes = new Set(previous?.notes || []);
+      const previousUnits = new Set(previous?.units || []);
+      const freshNotes = state.notes.filter((note) => !previousNotes.has(noteIdentity(note)));
+      const freshUnits = Object.fromEntries(Object.entries(state.units).filter(([unit]) => !previousUnits.has(unit)));
+      if (previous && !freshNotes.length && !Object.keys(freshUnits).length) {
+        setWorkspaceStatus(window.open(url.href, "_blank") ? "Autosave app opened" : "Allow the app window and try again.");
+        return;
+      }
+      const transfer = JSON.parse(JSON.stringify({ ...state, notes: freshNotes, units: freshUnits }));
+      const handoff = randomToken();
+      url.hash = new URLSearchParams({ handoff }).toString();
+      const app = window.open(url.href, "_blank");
+      if (!app) {
+        setWorkspaceStatus("Allow the app window and try again.");
+        return;
+      }
+      const listener = (event) => {
+        if (event.source !== app || event.origin !== url.origin || event.data?.handoff !== handoff ||
+            event.data.review !== storageKey) return;
+        if (event.data.type === "review-app-ready") {
+          app.postMessage({ type: "review-app-state", handoff, review: storageKey, state: transfer }, url.origin);
+        } else if (event.data.type === "review-app-finished") {
+          window.removeEventListener("message", listener);
+          clearTimeout(timeout);
+          if (event.data.saved) {
+            writeStorage(handoffKey, {
+              notes: [...previousNotes, ...transfer.notes.map(noteIdentity)],
+              units: [...previousUnits, ...Object.keys(transfer.units)],
+            });
+          }
+          setWorkspaceStatus(event.data.saved ? "Review copied to workspace" : "Review transferred · workspace save pending");
+        }
+      };
+      const timeout = setTimeout(() => {
+        window.removeEventListener("message", listener);
+        setWorkspaceStatus("The app did not receive this review. Start the matching local app and try again.");
+      }, 10_000);
+      window.addEventListener("message", listener);
+    }
+
+    function receiveHandoff() {
+      const handoff = new URLSearchParams(location.hash.slice(1)).get("handoff");
+      const opener = window.opener;
+      if (!opener || !handoff || !/^[a-f0-9]{32}$/.test(handoff)) return Promise.resolve(null);
+      history.replaceState(null, "", location.pathname + location.search);
+      return new Promise((resolve) => {
+        const listener = (event) => {
+          if (event.source !== opener || !["null", "file://"].includes(event.origin) ||
+              event.data?.type !== "review-app-state" || event.data.handoff !== handoff ||
+              event.data.review !== storageKey || !Array.isArray(event.data.state?.notes)) return;
+          window.removeEventListener("message", listener);
+          clearTimeout(timeout);
+          resolve({
+            state: event.data.state,
+            finish: (saved) => opener.postMessage({ type: "review-app-finished", handoff, review: storageKey, saved }, "*"),
+          });
+        };
+        const timeout = setTimeout(() => {
+          window.removeEventListener("message", listener);
+          resolve(null);
+        }, 4000);
+        window.addEventListener("message", listener);
+        // A file page has an opaque origin. The handshake messages carry no review text.
+        opener.postMessage({ type: "review-app-ready", handoff, review: storageKey }, "*");
+      });
+    }
+
+    function noteIdentity(note) {
+      return JSON.stringify([note.draft, note.section, note.quote, note.text]);
+    }
+
+    function mergeHandoff(incoming, workspaceHasState) {
+      if (!workspaceHasState && !queuedState) {
+        restore(incoming);
+        return;
+      }
+      const notes = new Set(state.notes.map(noteIdentity));
+      for (const note of incoming.notes) {
+        const key = noteIdentity(note);
+        if (!notes.has(key)) state.notes.push(note);
+        notes.add(key);
+      }
+      Object.assign(state.units, incoming.units || {});
+    }
+
+    async function connectWorkspace(handoffPromise = Promise.resolve(null)) {
+      if (connectingWorkspace) return;
+      connectingWorkspace = true;
+      setWorkspaceStatus("Opening workspace…");
+      const handoff = await handoffPromise;
+      try {
+        const response = await fetch(endpoint, { signal: AbortSignal.timeout(5000) });
+        if (!response.ok) throw new Error("Workspace load failed.");
+        const remote = await response.json();
+        const outbox = readStorage(outboxKey) || (queuedState ? { version: workspaceVersion, state: queuedState } : null);
+        workspaceVersion = remote.version;
+        initializedWorkspace = true;
+        restore(remote.state);
+        if (outbox?.state) {
+          const same = (left, right) => JSON.stringify(left) === JSON.stringify(right);
+          if (same(outbox.state, remote.state)) {
+            queuedState = null;
+            saveOutbox();
+          } else {
+            queuedState = outbox.state;
+            restore(queuedState);
+            if (outbox.version !== remote.version && remote.state && !same(outbox.sending, remote.state)) {
+              workspaceConflict = true;
+              // Keep the original base version in the outbox for later reconciliation.
+              workspaceVersion = outbox.version;
+            }
+          }
+        }
+        if (handoff) {
+          mergeHandoff(handoff.state, Boolean(remote.state));
+          writeStorage(storageKey, state);
+          queuedState = JSON.parse(JSON.stringify(state));
+          saveOutbox();
+        }
+        if (workspaceConflict) {
+          setWorkspaceStatus(storage
+            ? "The workspace changed in another tab. This tab kept its unsaved edits in the browser."
+            : "The workspace changed in another tab. Keep this tab open to retain its unsaved edits.");
+        } else if (queuedState) {
+          await saveWorkspace();
+        } else {
+          setWorkspaceStatus(remote.state ? "Saved to workspace" : "Workspace autosave on");
+        }
+        if (handoff) handoff.finish(!queuedState && !workspaceConflict);
+      } catch {
+        if (handoff) {
+          mergeHandoff(handoff.state, false);
+          persist();
+          handoff.finish(false);
+        }
+        setWorkspaceStatus(storage ? "Workspace unavailable · retrying" : "Workspace unavailable · keep this tab open");
+      } finally {
+        byId("session-minutes").value = state.session.minutes;
+        document.body.inert = false;
+        connectingWorkspace = false;
+        render();
+      }
+    }
+
+    function options(select, available, selected) {
+      select.replaceChildren(...available.map(({ id, title }) => new Option(title, id)));
+      if (available.some(({ id }) => id === selected)) select.value = selected;
+    }
+
+    function syncSelectors() {
+      options(secondarySelect, drafts.filter((draft) => draft.id !== draftSelect.value), secondarySelect.value);
+      byId("secondary-control").hidden = !compare.checked;
+      byId("draft-selectors").hidden = joined();
+    }
+
+    function activeDrafts() {
+      const ids = compare.checked ? [draftSelect.value, secondarySelect.value] : [draftSelect.value];
+      return ids.map((id) => drafts.find((draft) => draft.id === id));
+    }
+
+    function notesFor(draft, section) {
+      const matches = (ref) => ref.draft === draft.id && ref.section === section.id;
+      return state.notes.filter((note) => matches(note) || note.also?.some(matches));
+    }
+
+    function reviewKey(draft, section) {
+      return JSON.stringify([draft.id, section.id]);
+    }
+
+    function joined() {
+      return viewMode.value !== "full";
+    }
+
+    function wording() {
+      return viewMode.value === "wording";
+    }
+
+    function activePlan() {
+      return wording() ? wordingPlan : plan;
+    }
+
+    function collectSections(selectedDrafts) {
+      const sections = new Map();
+      for (const draft of selectedDrafts) {
+        for (const section of draft.sections) {
+          if (!sections.has(section.match)) sections.set(section.match, []);
+          sections.get(section.match).push({ draft, section });
+        }
+      }
+      return sections;
+    }
+
+    function buildReviewPlan() {
+      const entries = new Map();
+      const bySection = new Map();
+      const unique = new Map();
+      let occurrences = 0;
+      for (const [sectionMatch, refs] of collectSections(drafts)) {
+        const entry = { refs, units: new Set(), own: [] };
+        entries.set(sectionMatch, entry);
+        for (const ref of refs) {
+          const { draft, section } = ref;
+          const refKey = reviewKey(draft, section);
+          const units = new Set();
+          const items = [{ kind: "title", text: section.title }];
+          for (const block of section.blocks) {
+            if (block.kind === "table") {
+              for (const row of block.rows) items.push({ kind: "row", headers: block.headers, row });
+            } else {
+              items.push(block);
+            }
+          }
+          for (const item of items) {
+            const key = itemKey(item);
+            if (!unique.has(key)) {
+              const sourceText = item.text ?? item.row.join(" ");
+              const words = (sourceText.match(/\S+/g) || []).length;
+              const seconds = words * 60 / 160 + (item.kind === "row" ? 3 : 0);
+              const unit = { ...item, owner: sectionMatch, refs: new Map(), seconds };
+              unique.set(key, unit);
+              entry.own.push(unit);
+            }
+            const unit = unique.get(key);
+            unit.refs.set(refKey, ref);
+            units.add(unit);
+            entry.units.add(unit);
+            occurrences++;
+          }
+          bySection.set(refKey, units);
+        }
+      }
+      const keys = [...unique.keys()].sort();
+      keys.forEach((key, index) => { unique.get(key).id = String(index); });
+      return { entries, bySection, byText: unique, items: new Map([...unique.values()].map((unit) => [unit.id, unit])), occurrences };
+    }
+
+    function itemKey(item) {
+      return JSON.stringify([item.kind, item.text ?? [item.headers, item.row]]);
+    }
+
+    function wordingMatch(section) {
+      return section.group ? "wording-group:" + section.group : section.match;
+    }
+
+    function buildWordingPlan() {
+      const entries = new Map();
+      const items = new Map();
+      const anchors = new Map();
+      let occurrences = 0;
+      for (const draft of drafts) {
+        for (const section of draft.sections) {
+          const ref = { draft, section };
+          const sectionMatch = wordingMatch(section);
+          if (!entries.has(sectionMatch)) entries.set(sectionMatch, { refs: [], units: new Set(), own: [] });
+          const entry = entries.get(sectionMatch);
+          entry.refs.push(ref);
+          const fragments = [];
+          for (const block of ref.section.blocks) {
+            if (block.kind === "paragraph" && block.role !== "caption") {
+              fragments.push({ text: block.text, source: plan.byText.get(itemKey(block)) });
+            } else if (block.role === "overview") {
+              for (const row of block.rows) {
+                // Values such as a firmware ID or a dimension have no prose to edit.
+                if (!/\s/u.test(row[1]) || (row[1].match(/\p{L}+/gu) || []).length < 2) continue;
+                const source = plan.byText.get(itemKey({ kind: "row", headers: block.headers, row }));
+                fragments.push({ text: row[1], label: row[0], column: 1, source });
+              }
+            }
+          }
+          for (const { text, label, column, source } of fragments) {
+            if (!items.has(text)) {
+              const seconds = (text.match(/\S+/g) || []).length * 60 / 160;
+              const item = { text, label, owner: sectionMatch, refs: new Map(), sources: new Set(), anchors: new Set(), seconds };
+              items.set(text, item);
+              entry.own.push(item);
+            }
+            const item = items.get(text);
+            const key = textKey(source, column);
+            anchors.set(key, item);
+            item.anchors.add(key);
+            item.sources.add(source);
+            item.refs.set(reviewKey(ref.draft, ref.section), ref);
+            entry.units.add(item);
+            occurrences++;
+          }
+        }
+      }
+      return { entries, items, anchors, occurrences };
+    }
+
+    function unitReviewed(unit) {
+      return unit.sources ? [...unit.sources].every((source) => state.units[source.id]) : state.units[unit.id];
+    }
+
+    function sectionReviewed(draft, section) {
+      return [...plan.bySection.get(reviewKey(draft, section))].every(({ id }) => state.units[id]);
+    }
+
+    function currentSections() {
+      if (!joined()) return collectSections(activeDrafts());
+      const sections = [...activePlan().entries].filter(([, entry]) => !wording() || entry.own.length);
+      return new Map(sections.map(([key, entry]) => [key, entry.refs]));
+    }
+
+    function searchText(draft, section) {
+      const key = reviewKey(draft, section);
+      if (!unfolded.has(key)) {
+        const blocks = section.blocks.flatMap((block) => block.kind === "table"
+          ? [...block.headers, ...block.rows.flat()]
+          : [block.text]);
+        unfolded.set(key, normalize([section.title, section.group || "", ...blocks].join("\n")));
+      }
+      return unfolded.get(key);
+    }
+
+    function choose(sectionMatch) {
+      match = sectionMatch;
+      state.sectionMatch = sectionMatch;
+      persist();
+      render();
+      byId("progress").scrollIntoView({ block: "nearest" });
+    }
+
+    function textKey(unit, column) {
+      return column === undefined ? `unit:${unit.id}` : `unit:${unit.id}:${column}`;
+    }
+
+    function findLegacyRange(note) {
+      const { draft, section } = locate(note);
+      if (!note.quote || !draft || !section) return [];
+      const matches = [];
+      for (const unit of plan.bySection.get(reviewKey(draft, section))) {
+        const fragments = unit.kind === "row"
+          ? unit.row.map((text, column) => [textKey(unit, column), text])
+          : [[textKey(unit), unit.text]];
+        for (const [key, text] of fragments) {
+          const start = text.indexOf(note.quote);
+          if (start === -1) continue;
+          if (matches.length || text.indexOf(note.quote, start + 1) !== -1) return [];
+          matches.push({ key, start, end: start + note.quote.length });
+        }
+      }
+      return matches;
+    }
+
+    function indexNoteRanges() {
+      const index = new Map();
+      for (const note of state.notes) {
+        if (!Array.isArray(note.ranges)) note.ranges = findLegacyRange(note);
+        for (const range of note.ranges) {
+          if (!index.has(range.key)) index.set(range.key, []);
+          index.get(range.key).push({ ...range, note });
+        }
+      }
+      return index;
+    }
+
+    function searchRanges(text, query) {
+      if (!query) return [];
+      const normalized = normalize(text);
+      const hits = [];
+      let start = normalized.indexOf(query);
+      while (start !== -1) {
+        const end = Math.min(start + query.length, text.length);
+        hits.push({ start, end });
+        start = normalized.indexOf(query, start + query.length);
+      }
+      return hits;
+    }
+
+    function noteMark(text, notes, searchHit) {
+      const mark = element("mark", text, searchHit ? "noted-text search-hit" : "noted-text");
+      mark.dataset.noteIndexes = notes.map((note) => state.notes.indexOf(note)).join(" ");
+      mark.tabIndex = 0;
+      mark.setAttribute("role", "button");
+      const action = notes.length === 1 ? "Edit note" : `Open ${notes.length} notes`;
+      mark.setAttribute("aria-label", `${action} for ${text.slice(0, 160)}`);
+      mark.title = action;
+      const open = () => {
+        if (notes.length > 1) {
+          openReview(notes);
+          return;
+        }
+        const { draft, section } = locate(notes[0]);
+        if (draft && section) openNote(draft, section, notes[0]);
+      };
+      mark.addEventListener("click", () => {
+        const selection = window.getSelection();
+        if (!selection || selection.isCollapsed) open();
+      });
+      mark.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        open();
+      });
+      return mark;
+    }
+
+    function appendReviewText(target, text, context, key, unit, wordingItem) {
+      const source = element("span", undefined, "source-text");
+      source.dataset.textKey = key;
+      if (unit) source.dataset.unit = unit.id;
+      const keys = wordingItem ? [...wordingItem.anchors] : [key];
+      const hits = searchRanges(text, context.query);
+      const annotations = keys.flatMap((anchor) => noteRanges.get(anchor) || []).filter(({ note, start, end }) =>
+        (context.notes.has(note) || (context.shared && (unit || wordingItem))) &&
+        Number.isInteger(start) && Number.isInteger(end) && start >= 0 && end > start && end <= text.length);
+      const boundaries = new Set([0, text.length]);
+      for (const { start, end } of [...hits, ...annotations]) {
+        boundaries.add(start);
+        boundaries.add(end);
+      }
+      const points = [...boundaries].sort((left, right) => left - right);
+      for (let index = 1; index < points.length; index++) {
+        const start = points[index - 1];
+        const end = points[index];
+        const slice = text.slice(start, end);
+        const searchHit = hits.some((hit) => start >= hit.start && end <= hit.end);
+        const notes = [...new Set(annotations.filter((range) => start >= range.start && end <= range.end)
+          .map(({ note }) => note))];
+        if (notes.length) source.append(noteMark(slice, notes, searchHit));
+        else source.append(searchHit ? element("mark", slice) : slice);
+      }
+      target.append(source);
+    }
+
+    function sectionContent(section, context) {
+      const content = element("div", undefined, "content");
+      content.lang = "ru";
+      for (const block of section.blocks) {
+        if (block.kind !== "table") {
+          const heading = block.kind === "heading" || block.kind === "title";
+          const node = element(heading ? "h4" : "p");
+          const unit = plan.byText.get(itemKey(block));
+          appendReviewText(node, block.text, context, textKey(unit), unit);
+          content.append(node);
+          continue;
+        }
+        const wrap = element("div", undefined, "table-wrap");
+        wrap.tabIndex = 0;
+        wrap.setAttribute("role", "region");
+        wrap.setAttribute("aria-label", section.title);
+        const table = element("table");
+        if (block.headers.length >= 4) {
+          table.className = block.headers.length === 4 ? "record-table pin-table" : "record-table";
+        }
+        table.setAttribute("role", "table");
+        const head = table.createTHead();
+        head.setAttribute("role", "rowgroup");
+        const header = head.insertRow();
+        header.setAttribute("role", "row");
+        for (const [index, text] of block.headers.entries()) {
+          const cell = element("th");
+          cell.scope = "col";
+          cell.setAttribute("role", "columnheader");
+          appendReviewText(cell, text, context, JSON.stringify(["header", block.headers, index]));
+          header.append(cell);
+        }
+        const body = table.createTBody();
+        body.setAttribute("role", "rowgroup");
+        for (const rowData of block.rows) {
+          const row = body.insertRow();
+          row.setAttribute("role", "row");
+          const unit = plan.byText.get(itemKey({ kind: "row", headers: block.headers, row: rowData }));
+          for (const [index, text] of rowData.entries()) {
+            const cell = row.insertCell();
+            cell.setAttribute("role", "cell");
+            if (block.headers.length >= 4) {
+              const label = element("span", block.headers[index], "field-label");
+              label.setAttribute("aria-hidden", "true");
+              cell.append(label);
+            }
+            appendReviewText(cell, text, context, textKey(unit, index), unit);
+          }
+        }
+        wrap.append(table);
+        content.append(wrap);
+      }
+      return content;
+    }
+
+    function selectedText(roots) {
+      const selection = window.getSelection();
+      const owns = (node) => roots.some((root) => root.contains(node));
+      if (!selection || selection.isCollapsed || !owns(selection.anchorNode) || !owns(selection.focusNode)) return null;
+      const range = selection.getRangeAt(0);
+      const fragments = roots.flatMap((root) => [...root.querySelectorAll("[data-text-key]")]);
+      const ranges = [];
+      const excerpts = [];
+      const units = new Set();
+      const wordingItems = new Set();
+      const prefix = (fragment, node, offset, fallback) => {
+        if (!fragment.contains(node)) return fallback;
+        const before = document.createRange();
+        before.selectNodeContents(fragment);
+        before.setEnd(node, offset);
+        return before.toString().length;
+      };
+      for (const fragment of fragments) {
+        if (!range.intersectsNode(fragment)) continue;
+        const start = prefix(fragment, range.startContainer, range.startOffset, 0);
+        const end = prefix(fragment, range.endContainer, range.endOffset, fragment.textContent.length);
+        if (start >= end) continue;
+        const item = wording() ? wordingPlan.anchors.get(fragment.dataset.textKey) : undefined;
+        const keys = item?.anchors || [fragment.dataset.textKey];
+        for (const key of keys) ranges.push({ key, start, end });
+        if (item) wordingItems.add(item);
+        excerpts.push(fragment.textContent.slice(start, end));
+        units.add(fragment.dataset.unit);
+      }
+      if (!ranges.length) return null;
+      return {
+        quote: excerpts.join("\n").trim().slice(0, 2000),
+        ranges,
+        unit: units.size === 1 ? plan.items.get([...units][0]) : undefined,
+        refs: wordingItems.size
+          ? [...new Map([...wordingItems].flatMap((item) => [...item.refs])).values()]
+          : undefined,
+      };
+    }
+
+    function updateReviewChecks() {
+      for (const { checkbox, units } of reviewChecks) {
+        const reviewed = units.filter(({ id }) => state.units[id]).length;
+        checkbox.checked = reviewed === units.length;
+        checkbox.indeterminate = reviewed > 0 && reviewed < units.length;
+      }
+    }
+
+    function reviewCheckbox(units) {
+      const reviewed = element("label", undefined, "check small");
+      const checkbox = element("input");
+      checkbox.type = "checkbox";
+      reviewChecks.push({ checkbox, units: [...units] });
+      checkbox.addEventListener("change", () => {
+        for (const { id } of units) {
+          if (checkbox.checked) state.units[id] = true;
+          else delete state.units[id];
+        }
+        persist();
+        updateReviewChecks();
+        renderNavigation();
+        renderProgress();
+      });
+      reviewed.append(checkbox, "Reviewed");
+      return reviewed;
+    }
+
+    function addNoteButton({ draft, section }, roots, refs = []) {
+      let selected = null;
+      const capture = () => { selected = selectedText(roots); };
+      const add = button("Add note", () => {
+        if (!selected) capture();
+        const affected = selected?.refs ?? (refs.length && selected?.unit ? [...selected.unit.refs.values()] : refs);
+        const primary = selected?.refs?.find((ref) => ref.draft === draft && wordingMatch(ref.section) === match)
+          ?? selected?.refs?.[0] ?? { draft, section };
+        openNote(primary.draft, primary.section, null, selected?.quote, affected, selected?.ranges);
+        selected = null;
+      });
+      add.title = "Select text first to attach a quote to your note";
+      add.addEventListener("pointerdown", capture);
+      return add;
+    }
+
+    function sectionNotesButton(notes) {
+      return button(`Section notes (${notes.size})`, () => openReview([...notes]));
+    }
+
+    function panel(draft, section, fallback, query) {
+      const article = element("article", undefined, "panel");
+      const header = element("div", undefined, "panel-head");
+      header.append(element("p", draft.title, "small muted"));
+      const title = element("h2");
+      title.lang = "ru";
+      header.append(title);
+      article.append(header);
+      if (!section) {
+        title.textContent = fallback.title;
+        article.append(element("p", "This draft has no matching section.", "content muted"));
+        return article;
+      }
+
+      const context = { query, notes: new Set(notesFor(draft, section)), shared: false };
+      const titleUnit = plan.byText.get(itemKey({ kind: "title", text: section.title }));
+      appendReviewText(title, section.title, context, textKey(titleUnit), titleUnit);
+      const content = sectionContent(section, context);
+      const actions = element("div", undefined, "line spaced");
+      const noteActions = element("div", undefined, "line");
+      if (context.notes.size) noteActions.append(sectionNotesButton(context.notes));
+      noteActions.append(addNoteButton({ draft, section }, [article]));
+      actions.append(reviewCheckbox(plan.bySection.get(reviewKey(draft, section))), noteActions);
+      header.append(actions);
+      article.append(content);
+      return article;
+    }
+
+    function entryTitle(sectionMatch, refs) {
+      if (sectionMatch.startsWith("wording-group:")) return refs[0].section.group;
+      const titles = new Set(refs.map(({ section }) => section.title));
+      return titles.size === 1 ? refs[0].section.title : sectionMatch.split(":").at(-1) + " · Board-specific text";
+    }
+
+    function repeatedLinks(title, links) {
+      const details = element("details", undefined, "reused small");
+      details.append(element("summary", title));
+      const list = element("ul");
+      for (const [target, count] of links) {
+        const entry = activePlan().entries.get(target);
+        const label = `${entryTitle(target, entry.refs)} (${count})`;
+        const item = element("li");
+        item.append(button(label, () => {
+          search.value = "";
+          if (wording() && !entry.own.length) {
+            const { draft, section } = entry.refs[0];
+            viewMode.value = "full";
+            draftSelect.value = draft.id;
+            compare.checked = false;
+            syncSelectors();
+            choose(section.match);
+            return;
+          }
+          choose(target);
+        }));
+        list.append(item);
+      }
+      details.append(list);
+      return details;
+    }
+
+    function groupSection(units, heading) {
+      const blocks = [];
+      for (const unit of units) {
+        if (unit.kind === "title" && unit.text === heading) continue;
+        if (unit.kind !== "row") {
+          blocks.push(unit);
+          continue;
+        }
+        let table = blocks.at(-1);
+        if (table?.kind !== "table" || JSON.stringify(table.headers) !== JSON.stringify(unit.headers)) {
+          table = { kind: "table", headers: unit.headers, rows: [] };
+          blocks.push(table);
+        }
+        table.rows.push(unit.row);
+      }
+      return { title: heading, blocks };
+    }
+
+    function wordingContent(items, context) {
+      const content = element("div", undefined, "content");
+      content.lang = "ru";
+      for (const item of items) {
+        const container = element("div", undefined, "wording-item");
+        const connectors = new Map();
+        for (const { section } of item.refs.values()) {
+          if (section.group) connectors.set(section.match, section.title);
+        }
+        const label = item.label || (connectors.size === 1 ? [...connectors.values()][0]
+          : [...connectors.keys()].map((key) => key.slice("connector:".length)).join(", "));
+        if (label) container.append(element("span", label, "wording-label muted small"));
+        const paragraph = element("p");
+        appendReviewText(paragraph, item.text, context, [...item.anchors][0], null, item);
+        container.append(paragraph);
+        content.append(container);
+      }
+      return content;
+    }
+
+    function joinedPacket(group, heading, titleNode, titleUnit, query) {
+      const { units, refs } = group;
+      const article = element("article", undefined, "panel joined-packet");
+      const header = element("div", undefined, "panel-head line spaced");
+      const label = refs.length === drafts.length && drafts.length === 2 ? "Both drafts"
+        : refs.map(({ draft }) => draft.title).join(" · ");
+      const subtitle = element("h3", label);
+      const notes = new Set(refs.flatMap(({ draft, section }) => notesFor(draft, section)));
+      const context = { query, notes, shared: true };
+      const content = wording() ? wordingContent(units, context) : sectionContent(groupSection(units, heading), context);
+      const roots = units.includes(titleUnit) ? [titleNode, content] : [content];
+      const sourceUnits = new Set(units.flatMap((unit) => unit.sources ? [...unit.sources] : [unit]));
+      header.append(subtitle, reviewCheckbox(sourceUnits), addNoteButton(refs[0], roots, refs));
+      article.append(header);
+      const otherMatches = new Map();
+      for (const unit of units) {
+        const matches = new Set([...unit.refs.values()].map(({ section }) => wording() ? wordingMatch(section) : section.match));
+        for (const target of matches) {
+          if (target !== match) otherMatches.set(target, (otherMatches.get(target) || 0) + 1);
+        }
+      }
+      if (otherMatches.size) {
+        content.append(repeatedLinks(`Also used in ${otherMatches.size} other sections`, otherMatches));
+      }
+      if (content.childElementCount) article.append(content);
+      return article;
+    }
+
+    function combinedPanel(entry, query) {
+      const title = entryTitle(match, entry.refs);
+      const heading = element("h2", undefined, "joined-heading");
+      const titleUnit = entry.own.find((unit) => unit.kind === "title" && unit.text === title);
+      const notes = new Set(entry.refs.flatMap(({ draft, section }) => notesFor(draft, section)));
+      if (titleUnit) appendReviewText(heading, title, { query, notes, shared: true }, textKey(titleUnit), titleUnit);
+      else heading.textContent = title;
+      heading.lang = "ru";
+      const section = element("section");
+      const titleBar = element("div", undefined, "line spaced joined-titlebar");
+      titleBar.append(heading);
+      if (notes.size) titleBar.append(sectionNotesButton(notes));
+      section.append(titleBar);
+      const groups = new Map();
+      for (const unit of entry.own) {
+        const related = [...unit.refs.values()];
+        const refs = wording() ? drafts.map((draft) =>
+          related.find((ref) => ref.draft === draft && wordingMatch(ref.section) === match) ||
+          related.find((ref) => ref.draft === draft)).filter(Boolean)
+          : entry.refs.filter(({ draft, section }) => unit.refs.has(reviewKey(draft, section)));
+        const key = refs.map(({ draft }) => draft.id).sort().join(":");
+        if (!groups.has(key)) groups.set(key, { refs, units: [] });
+        groups.get(key).units.push(unit);
+      }
+      const ordered = [...groups.values()].sort((left, right) => right.refs.length - left.refs.length);
+      section.append(...ordered.map((group) => joinedPacket(group, title, heading, titleUnit, query)));
+      const elsewhere = new Map();
+      let reused = 0;
+      for (const unit of entry.units) {
+        if (unit.owner === match) continue;
+        elsewhere.set(unit.owner, (elsewhere.get(unit.owner) || 0) + 1);
+        reused++;
+      }
+      if (reused) {
+        const details = repeatedLinks(`${reused} repeated passages shown in other sections`, elsewhere);
+        details.classList.add("repeats");
+        section.append(details);
+      }
+      return section;
+    }
+
+    function renderProgress() {
+      if (joined()) {
+        const visible = activePlan();
+        const count = [...visible.items.values()].filter(unitReviewed).length;
+        byId("progress").textContent = wording()
+          ? `${count} of ${visible.items.size} wording passages reviewed · Reference tables in Full drafts`
+          : `${count} of ${visible.items.size} passages reviewed · ${visible.occurrences - visible.items.size} repeated occurrences combined`;
+      } else {
+        byId("progress").textContent = activeDrafts().map((draft) => {
+          const count = draft.sections.filter((section) => sectionReviewed(draft, section)).length;
+          const board = compare.checked ? draft.title + " · " : "";
+          return `${board}${count} of ${draft.sections.length} reviewed`;
+        }).join("  /  ");
+      }
+      byId("show-notes").textContent = `Review notes (${state.notes.length})`;
+      renderTime();
+    }
+
+    function renderNavigation() {
+      const focusedMatch = sectionList.contains(document.activeElement) ? document.activeElement.dataset.match : null;
+      const all = currentSections();
+      const query = normalize(search.value.trim());
+      const visible = [...all.entries()].filter(([key, candidates]) => {
+        if (!query) return true;
+        if (wording()) return wordingPlan.entries.get(key).own.some((unit) => normalize(unit.text).includes(query)) ||
+          normalize(entryTitle(key, candidates)).includes(query) ||
+          candidates.some(({ section }) => normalize(section.title).includes(query));
+        return candidates.some(({ draft, section }) => searchText(draft, section).includes(query));
+      });
+      sectionList.replaceChildren();
+      sectionSelect.replaceChildren();
+      let lastGroup = null;
+      let groupSelect = sectionSelect;
+      for (const [sectionMatch, candidates] of visible) {
+        const { section } = candidates[0];
+        const group = wording() ? "" : section.group || "";
+        if (group !== lastGroup) {
+          if (group) {
+            const groupLabel = element("p", group, "nav-group");
+            groupLabel.lang = "ru";
+            sectionList.append(groupLabel);
+            groupSelect = element("optgroup");
+            groupSelect.label = group;
+            sectionSelect.append(groupSelect);
+          } else {
+            groupSelect = sectionSelect;
+          }
+          lastGroup = group;
+        }
+        const entry = button("", () => choose(sectionMatch));
+        entry.className = "nav-item";
+        entry.dataset.match = sectionMatch;
+        entry.setAttribute("aria-current", String(sectionMatch === match));
+        const heading = joined() ? entryTitle(sectionMatch, candidates) : section.title;
+        const label = element("span", heading);
+        label.lang = "ru";
+        entry.append(label);
+        const checked = wording() ? wordingPlan.entries.get(sectionMatch).own.every(unitReviewed)
+          : candidates.every(({ draft, section }) => sectionReviewed(draft, section));
+        const notes = new Set(candidates.flatMap(({ draft, section }) => notesFor(draft, section))).size;
+        if (notes || checked) {
+          const badge = element("span", [checked ? "✓" : "", notes ? String(notes) : ""].filter(Boolean).join(" · "), "nav-status");
+          badge.setAttribute("aria-label", [checked ? "Reviewed" : "", notes ? `${notes} notes` : ""].filter(Boolean).join(", "));
+          entry.append(badge);
+        }
+        sectionList.append(entry);
+        groupSelect.append(new Option(heading, sectionMatch));
+        if (sectionMatch === focusedMatch) entry.focus();
+      }
+      if (!visible.length) {
+        sectionList.append(element("p", "No sections match.", "small muted"));
+        sectionSelect.append(new Option("No sections match", ""));
+      }
+      sectionSelect.disabled = !visible.length;
+      if (visible.length && !visible.some(([id]) => id === match)) {
+        const prompt = new Option("Choose a matching section", "");
+        prompt.disabled = true;
+        sectionSelect.prepend(prompt);
+      }
+      sectionSelect.value = visible.some(([id]) => id === match) ? match : "";
+      byId("search-status").textContent = query ? `${visible.length} matching sections` : "";
+      const index = visible.findIndex(([id]) => id === match);
+      byId("previous").disabled = index <= 0;
+      byId("next").disabled = index >= visible.length - 1;
+      byId("previous").onclick = () => choose(visible[index - 1][0]);
+      byId("next").onclick = () => choose(visible[index + 1][0]);
+      return all;
+    }
+
+    function render() {
+      const all = renderNavigation();
+      if (!all.has(match)) {
+        const related = wording()
+          ? plan.entries.get(match)?.refs.map(({ section }) => wordingMatch(section))
+          : wordingPlan.entries.get(match)?.refs.map(({ section }) => section.match);
+        match = [state.sectionMatch, ...(related || [])].find((key) => all.has(key)) ?? all.keys().next().value;
+        renderNavigation();
+      }
+      const entries = all.get(match);
+      const query = normalize(search.value.trim());
+      search.placeholder = wording() ? "Section or phrase" : "Section, signal, or phrase";
+      reviewChecks = [];
+      noteRanges = indexNoteRanges();
+      panels.classList.toggle("comparing", !joined() && compare.checked);
+      byId("next-unreviewed").hidden = !joined();
+      if (!entries) panels.replaceChildren(element("p", "There is no wording to review. Open Full drafts to read the text.", "muted"));
+      else if (joined()) panels.replaceChildren(combinedPanel(activePlan().entries.get(match), query));
+      else panels.replaceChildren(...activeDrafts().map((draft) =>
+        panel(draft, entries.find((entry) => entry.draft.id === draft.id)?.section, entries[0].section, query)));
+      updateReviewChecks();
+      renderProgress();
+    }
+
+    function orderedRemaining() {
+      const entries = [...activePlan().entries];
+      const start = entries.findIndex(([key]) => key === match);
+      return [...entries.slice(start), ...entries.slice(0, start)].map(([key, entry]) => ({
+        key,
+        seconds: entry.own.reduce((sum, unit) => unitReviewed(unit) ? sum : sum + unit.seconds, 0),
+      })).filter(({ seconds }) => seconds > 0);
+    }
+
+    function minutesText(seconds) {
+      return seconds < 60 ? "under 1 min" : `${Math.ceil(seconds / 60)} min`;
+    }
+
+    function clockText(ms) {
+      const seconds = Math.max(0, Math.ceil(ms / 1000));
+      return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+    }
+
+    function isForeground() {
+      return document.visibilityState === "visible" && document.hasFocus();
+    }
+
+    function renderTime() {
+      const session = state.session;
+      const started = session.elapsed !== null;
+      const left = session.minutes * 60_000 - (session.elapsed ?? 0);
+      const expired = started && left <= 0;
+      document.body.classList.toggle("timer-open", started && !expired);
+      const idle = !isForeground() || performance.now() - lastActivity >= idleMs;
+      const toggle = byId("session-toggle");
+      toggle.textContent = !started || expired ? "Start timer" : timerPlaying ? "Pause timer" : "Resume timer";
+      byId("session-reset").hidden = !started;
+      byId("session-minutes").disabled = started && !expired;
+      byId("session-clock").textContent = !started ? "" : expired ? "Session time reached"
+        : `${clockText(left)} left${!timerPlaying ? " · Paused" : idle ? " · Paused while away" : ""}`;
+      if (!joined()) {
+        byId("time-info").textContent = "";
+        return;
+      }
+
+      const remaining = orderedRemaining();
+      const total = remaining.reduce((sum, item) => sum + item.seconds, 0);
+      const next = remaining.find(({ key }) => key !== match);
+      byId("next-unreviewed").disabled = !next;
+      byId("next-unreviewed").onclick = () => {
+        search.value = "";
+        choose(next.key);
+      };
+      if (!total) {
+        byId("time-info").textContent = wording() ? "Wording review complete." : "Combined review complete.";
+        return;
+      }
+      const here = remaining.find(({ key }) => key === match)?.seconds;
+      let budget = Math.max(left, 0) / 1000;
+      let fits = 0;
+      for (const item of remaining) {
+        if (item.seconds > budget) break;
+        fits++;
+        budget -= item.seconds;
+      }
+      const fitText = fits === 1 ? "1 section fits" : `${fits} sections fit`;
+      byId("time-info").textContent = [
+        `Estimated review left: ${minutesText(total)}`,
+        here ? `This section: ${minutesText(here)}` : "",
+        left > 0 ? fitText + " in this session" : "",
+      ].filter(Boolean).join(" · ");
+      byId("time-info").title = wording() ? "Estimate uses 160 words per minute."
+        : "Estimate uses 160 words per minute plus 3 seconds per table row.";
+    }
+
+    function tickTimer(now) {
+      const present = isForeground();
+      if (timerPlaying && present && lastForeground) {
+        const elapsed = Math.max(0, Math.min(now, lastActivity + idleMs) - lastTick);
+        const limit = state.session.minutes * 60_000;
+        state.session.elapsed = Math.min(limit, state.session.elapsed + elapsed);
+        if (state.session.elapsed >= limit) {
+          timerPlaying = false;
+          persist();
+        } else if (now - lastTimerSave >= 15_000) {
+          lastTimerSave = now;
+          persist();
+        }
+      }
+      lastTick = now;
+      lastForeground = present;
+    }
+
+    function wakeTimer() {
+      const now = performance.now();
+      tickTimer(now);
+      lastActivity = now;
+    }
+
+    function timerPauseOrStart() {
+      const minutes = byId("session-minutes");
+      if (!minutes.checkValidity()) {
+        minutes.reportValidity();
+        return;
+      }
+      wakeTimer();
+      if (state.session.elapsed === null || state.session.elapsed >= state.session.minutes * 60_000) {
+        state.session = { minutes: Number(minutes.value), elapsed: 0 };
+        timerPlaying = true;
+      } else {
+        timerPlaying = !timerPlaying;
+      }
+      persist();
+      renderTime();
+    }
+
+    function notesReferences(note) {
+      return (note.also || []).map(locate).filter(({ draft, section }) => draft && section)
+        .map(({ draft, section }) => `${draft.title} / ${section.title}`);
+    }
+
+    function openNote(draft, section, existing = null, quote = "", refs = [], ranges = []) {
+      returnToReview = reviewDialog.open;
+      if (returnToReview) reviewDialog.close();
+      const also = refs.filter((ref) => ref.draft !== draft || ref.section !== section)
+        .map((ref) => ({ draft: ref.draft.id, section: ref.section.id }));
+      pending = existing || { draft: draft.id, section: section.id, quote, also, ranges };
+      const extra = notesReferences(pending).length;
+      byId("note-context").textContent = `${draft.title} / ${section.title}` +
+        (extra ? ` · Also applies to ${extra} other ${extra === 1 ? "section" : "sections"}` : "");
+      byId("note-quote").hidden = !pending.quote;
+      byId("note-quote").textContent = pending.quote;
+      byId("delete-note").hidden = !existing;
+      noteText.value = existing?.text || "";
+      noteText.setCustomValidity("");
+      noteDialog.showModal();
+      noteText.focus();
+    }
+
+    function closeNote() {
+      noteDialog.close();
+    }
+
+    noteDialog.addEventListener("close", () => {
+      pending = null;
+      if (returnToReview) openReview(reviewFilter);
+    });
+
+    function locate(note) {
+      const draft = drafts.find((item) => item.id === note.draft);
+      return { draft, section: draft?.sections.find((section) => section.id === note.section) };
+    }
+
+    function focusHighlight(note) {
+      const index = String(state.notes.indexOf(note));
+      const highlight = [...panels.querySelectorAll(".noted-text")]
+        .find((mark) => mark.dataset.noteIndexes.split(" ").includes(index));
+      if (!highlight) return;
+      highlight.scrollIntoView({ block: "center" });
+      highlight.focus({ preventScroll: true });
+    }
+
+    function goToNote(note, draft, section) {
+      compare.checked = false;
+      draftSelect.value = draft.id;
+      search.value = "";
+      reviewDialog.close();
+      if (wording()) {
+        const item = (note.ranges || []).map(({ key }) => wordingPlan.anchors.get(key)).find(Boolean);
+        if (item) {
+          choose(item.owner);
+          focusHighlight(note);
+          return;
+        }
+        viewMode.value = "full";
+      }
+      syncSelectors();
+      const id = note.ranges?.find(({ key }) => key.startsWith("unit:"))?.key.split(":")[1];
+      const owner = joined() ? plan.items.get(id)?.owner : null;
+      choose(owner || section.match);
+      focusHighlight(note);
+    }
+
+    function deleteNote(note) {
+      if (!confirm("Delete this review note?")) return false;
+      state.notes = state.notes.filter((item) => item !== note);
+      persist();
+      render();
+      return true;
+    }
+
+    function openReview(filter = null) {
+      reviewFilter = filter;
+      const list = byId("review-notes");
+      const visible = filter ? state.notes.filter((note) => filter.includes(note)) : state.notes;
+      const count = Object.keys(state.units).length;
+      const notes = visible.length;
+      const progress = filter ? "" : ` · ${count} ${count === 1 ? "passage" : "passages"} reviewed`;
+      byId("review-summary").textContent = `${notes} ${notes === 1 ? "note" : "notes"}${progress}. ` +
+        (autosave ? workspaceStatus : storage ? "Saved in this browser." : "Available until you close this page.");
+      byId("review-export").hidden = Boolean(filter);
+      byId("copy-status").textContent = "";
+      byId("copy-fallback").hidden = true;
+      list.replaceChildren();
+      for (const note of visible) {
+        const { draft, section } = locate(note);
+        if (!draft || !section) continue;
+        const card = element("article", undefined, "note-card stack");
+        card.append(element("h3", `${draft.title} / ${section.title}`, "small"));
+        const extra = notesReferences(note);
+        if (extra.length) {
+          const refs = element("details", undefined, "reused small");
+          refs.append(element("summary", `Also applies to ${extra.length} other ${extra.length === 1 ? "section" : "sections"}`));
+          const list = element("ul");
+          list.append(...extra.map((label) => element("li", label)));
+          refs.append(list);
+          card.append(refs);
+        }
+        if (note.quote) card.append(element("blockquote", note.quote, "small muted"));
+        card.append(element("p", note.text));
+        const actions = element("div", undefined, "line");
+        const remove = button("Delete note", () => {
+          if (deleteNote(note)) openReview(filter);
+        });
+        remove.classList.add("danger");
+        actions.append(
+          button("Go to section", () => goToNote(note, draft, section)),
+          button("Edit note", () => openNote(draft, section, note)),
+          remove,
+        );
+        card.append(actions);
+        list.append(card);
+      }
+      if (!reviewDialog.open) reviewDialog.showModal();
+    }
+
+    function exportMarkdown() {
+      const lines = ["# Manual text review", ""];
+      for (const draft of drafts) {
+        const primaryNotes = (section) => state.notes.filter((note) => note.draft === draft.id && note.section === section.id);
+        const relevant = draft.sections.filter((section) => sectionReviewed(draft, section) || primaryNotes(section).length);
+        lines.push(`## ${draft.title}`, "", `Draft revision: ${draft.revision}`, "");
+        if (!relevant.length) lines.push("No reviewed sections or notes.", "");
+        for (const section of relevant) {
+          lines.push(`### ${section.title}`, "");
+          if (sectionReviewed(draft, section)) lines.push("Reviewed", "");
+          for (const note of primaryNotes(section)) {
+            const extra = notesReferences(note);
+            if (extra.length) lines.push("Also applies to", "", ...extra.map((label) => "- " + label), "");
+            if (note.quote) lines.push(...note.quote.split("\n").map((line) => "> " + line), "");
+            lines.push(note.text, "");
+          }
+        }
+      }
+      return lines.join("\n");
+    }
+
+    restore(readStorage(storageKey));
+    options(draftSelect, drafts);
+    byId("comparison-control").hidden = drafts.length < 2;
+    syncSelectors();
+    viewMode.addEventListener("change", () => { syncSelectors(); render(); });
+    draftSelect.addEventListener("change", () => { syncSelectors(); render(); });
+    secondarySelect.addEventListener("change", render);
+    compare.addEventListener("change", () => { syncSelectors(); render(); });
+    search.addEventListener("input", render);
+    sectionSelect.addEventListener("change", () => choose(sectionSelect.value));
+    byId("show-notes").addEventListener("click", () => openReview());
+    byId("close-review").addEventListener("click", () => reviewDialog.close());
+    byId("cancel-note").addEventListener("click", closeNote);
+    byId("delete-note").addEventListener("click", () => {
+      if (deleteNote(pending)) closeNote();
+    });
+    noteText.addEventListener("input", () => noteText.setCustomValidity(""));
+    byId("note-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      const text = noteText.value.trim();
+      if (!text) {
+        noteText.setCustomValidity("Enter a comment.");
+        noteText.reportValidity();
+        return;
+      }
+      const note = pending;
+      note.text = text;
+      if (!state.notes.includes(note)) state.notes.push(note);
+      persist();
+      closeNote();
+      render();
+      if (!returnToReview) focusHighlight(note);
+    });
+    byId("copy-review").addEventListener("click", async () => {
+      const markdown = exportMarkdown();
+      try {
+        await navigator.clipboard.writeText(markdown);
+        byId("copy-status").textContent = "Copied to clipboard.";
+        byId("copy-fallback").hidden = true;
+      } catch {
+        const fallback = byId("copy-fallback");
+        fallback.hidden = false;
+        fallback.value = markdown;
+        fallback.focus();
+        fallback.select();
+        byId("copy-status").textContent = "Press Ctrl+C or Cmd+C to copy the selected notes.";
+      }
+    });
+    byId("download-review").addEventListener("click", () => {
+      const url = URL.createObjectURL(new Blob([exportMarkdown()], { type: "text/markdown;charset=utf-8" }));
+      const link = element("a");
+      link.href = url;
+      link.download = "manual-review-notes.md";
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    });
+    const minutes = byId("session-minutes");
+    new ResizeObserver(([{ target }]) => {
+      document.body.style.setProperty("--session-height", `${target.offsetHeight}px`);
+    }).observe(byId("review-session"));
+    minutes.value = state.session.minutes;
+    minutes.addEventListener("input", () => {
+      if (!minutes.checkValidity()) return;
+      state.session = { minutes: Number(minutes.value), elapsed: null };
+      persist();
+      renderTime();
+    });
+    byId("session-toggle").addEventListener("click", timerPauseOrStart);
+    byId("session-reset").addEventListener("click", () => {
+      state.session.elapsed = null;
+      timerPlaying = false;
+      persist();
+      renderTime();
+    });
+    for (const event of ["pointerdown", "keydown", "wheel", "scroll"]) {
+      window.addEventListener(event, wakeTimer, { passive: true });
+    }
+    window.addEventListener("focus", wakeTimer);
+    const saveTimer = () => {
+      tickTimer(performance.now());
+      if (state.session.elapsed !== null) persist();
+    };
+    document.addEventListener("visibilitychange", saveTimer);
+    window.addEventListener("blur", saveTimer);
+    window.addEventListener("pagehide", saveTimer);
+    setInterval(() => {
+      if (timerPlaying) {
+        tickTimer(performance.now());
+        renderTime();
+      }
+    }, 1000);
+    if (autosave) {
+      document.body.inert = true;
+      void connectWorkspace(receiveHandoff());
+      setInterval(() => {
+        if (!initializedWorkspace) void connectWorkspace();
+        else void saveWorkspace();
+      }, 3000);
+    } else {
+      const open = byId("open-local-app");
+      open.hidden = location.protocol !== "file:";
+      open.addEventListener("click", openAutosaveApp);
+      render();
+    }
+  </script>
+</body>
+</html>

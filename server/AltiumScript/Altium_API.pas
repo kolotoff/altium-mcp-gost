@@ -1267,7 +1267,8 @@ begin
 
         if PlacementsList.Count > 0 then
         begin
-            Result := PlaceComponentsFromList(PlacementsList);
+            Result := PlaceComponentsFromList(PlacementsList,
+                RequestText(RequestData, 'placement_require_all', 'false') = 'true');
         end
         else
         begin
@@ -2401,8 +2402,7 @@ begin
     end;
 end;
 
-// Main procedure to run the bridge
-procedure Run;
+procedure DispatchBridgeRequest;
 var
     CommandType: String;
     CommandResult: String;
@@ -2410,12 +2410,12 @@ var
     Line: String;
     ValueStart: Integer;
     ErrText: String;
+    Claimed: Boolean;
 begin
-    // Initialize file paths based on script location
-    InitializeFilePaths();
     RequestId := '';
     CommandType := '';
     LastScriptError := '';
+    Claimed := False;
 
     // Check if request file exists
     if not FileExists(REQUEST_FILE) then
@@ -2437,6 +2437,7 @@ begin
             // script started, and a duplicate launch finds nothing to re-run
             if not DeleteFile(REQUEST_FILE) then
                 Exit;
+            Claimed := True;
             LastProgress := 0;
             ReportProgress;
 
@@ -2503,6 +2504,7 @@ begin
             Params.Free;
         end;
     except
+        if not Claimed then Exit;
         // ExceptionMessage is Altium's own text for the error (the sandbox
         // template reports it the same way)
         ErrText := ExceptionMessage;
@@ -2511,6 +2513,13 @@ begin
         WriteResponse(False, '', 'Exception during script execution: ' + ErrText);
         LogScriptError('Error: Exception during script execution: ' + ErrText);
     end;
+end;
+
+// One-shot entry point for RunScriptFile and custom script projects.
+procedure Run;
+begin
+    InitializeFilePaths();
+    DispatchBridgeRequest;
 end;
 
 

@@ -27,6 +27,7 @@ from .routing_operations import (
     plan_batch,
     reconcile_batch,
 )
+from .signal_routing import plan_length_match, plan_pair
 
 
 GENERATED = Path(__file__).resolve().parents[1] / "generated"
@@ -250,14 +251,20 @@ class RoutingService:
         apply=False,
         output="",
         allow_via_in_pad=False,
+        undo_group=False,
     ):
         before = audit.read_snapshot(Path(snapshot_directory))
+        return await self._batch(before, operations, apply, output, allow_via_in_pad, undo_group)
+
+    async def _batch(self, before, operations, apply, output, allow_via_in_pad, undo_group=False):
         plan = plan_batch(before, operations, allow_via_in_pad=allow_via_in_pad)
         directory = output_directory(output, "routing-batches")
         _baseline(before, directory)
         (directory / "operations.tsv").write_text(batch_tsv(plan), encoding="utf-8-sig")
         write_json(
-            directory / "plan.json", {k: v for k, v in plan.items() if k != "expected"}
+            directory / "plan.json", {
+                **{k: v for k, v in plan.items() if k != "expected"}, "undo_group": undo_group,
+            }
         )
         if not apply:
             return {
@@ -267,6 +274,7 @@ class RoutingService:
                 "nets": plan["nets"],
                 "baseline_fingerprint": plan["baseline_fingerprint"],
                 "operation_directory": str(directory),
+                "undo_group": undo_group,
             }
         snapshot_id = uuid.uuid4().hex
         result = await self._native(
@@ -275,10 +283,11 @@ class RoutingService:
             directory,
             snapshot_id,
             allow_via_in_pad="true" if allow_via_in_pad else "false",
+            undo_group="true" if undo_group else "false",
         )
         write_json(directory / "native-result.json", result)
         if not result["success"]:
-            return result
+            return {**result, "undo_group": undo_group}
         audit.seal_inventory(directory, snapshot_id)
         after = audit.read_snapshot(directory)
         verification = reconcile_batch(before, after, plan)
@@ -287,6 +296,7 @@ class RoutingService:
             "success": verification["verified"],
             "applied": True,
             "completed_rows": result.get("completed_rows"),
+            "undo_steps": result.get("undo_steps"),
             "verified": verification["verified"],
             "geometry_mismatches": verification["geometry_mismatches"],
             "regressions": verification["audit"]["regressions"],
@@ -295,6 +305,41 @@ class RoutingService:
             "native_drc_required": True,
             "saved": False,
         }
+
+    async def signal_plan(self, kind, snapshot_directory, apply, output, **options):
+        before = await asyncio.to_thread(audit.read_snapshot, Path(snapshot_directory))
+        planner = {"pair": plan_pair, "length-match": plan_length_match}[kind]
+        plan = await asyncio.to_thread(planner, before, **options)
+        operations = plan.pop("operations")
+        directory = output_directory(output, "signal-routing")
+        path = directory / "signal-plan.json"
+        write_json(path, {
+            **plan, "operations": operations,
+            "snapshot_directory": before["directory"],
+            "baseline_fingerprint": before["manifest"]["fingerprint"],
+            "parameters": options,
+        })
+        result = {
+            "success": True, "applied": False, **plan, "operation_count": len(operations),
+            "report_path": str(path), "native_drc_required": bool(operations),
+            "limits": [
+                "Models straight-edged board perimeter, track centerlines, pad envelopes, via copper and drill spacing, and conservative arc bounds.",
+                "Use a corridor clear of keepouts, cutouts, fills, regions and poured copper.",
+                "Run native DRC for scoped clearance, differential coupling and width after applying.",
+            ],
+        }
+        if apply and operations:
+            batch_directory = directory / "batch"
+            try:
+                result.update(await self._batch(
+                    before, operations, True, str(batch_directory), False, undo_group=True
+                ))
+            except (ValueError, OSError) as error:
+                result.update(success=False, error=str(error), operation_directory=str(batch_directory))
+            if not result["success"] and result["applied"] is False:
+                result["applied"] = None
+                result.setdefault("recovery", "Inspect the operation receipt and live geometry before retrying.")
+        return result
 
     async def polygon(
         self, snapshot_directory, name, net, layer_id, vertices, apply=False, output=""

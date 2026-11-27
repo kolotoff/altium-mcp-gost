@@ -184,7 +184,7 @@ def preview_clearance(snapshot, segments, clearance_mm):
         conflicts = [
             {"gap_mm": gap, "kind": kind, "record": row}
             for gap, kind, row in candidates
-            if gap < clearance
+            if gap < clearance and not math.isclose(gap, clearance, rel_tol=0, abs_tol=1e-12)
         ]
         observations.append(
             {
@@ -210,7 +210,7 @@ def preview_clearance(snapshot, segments, clearance_mm):
                 segment_segment(*points)
                 - (float(left["width_raw"]) + float(right["width_raw"])) / scale / 2
             )
-            if gap < clearance:
+            if gap < clearance and not math.isclose(gap, clearance, rel_tol=0, abs_tol=1e-12):
                 candidate_conflicts.append({"segments": [j, i], "gap_mm": gap})
     return {
         "observations": observations,

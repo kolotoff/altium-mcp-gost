@@ -2,10 +2,13 @@
 
 import asyncio
 import json
+from pathlib import Path
 
 from mcp.server.fastmcp import Context
 
 from .native_drc import continue_polygon_warning
+from .routing_audit import read_snapshot
+from .signal_routing import measure_paths
 from .pcb_routing import (
     RoutingService,
     compare_snapshot_artifacts,
@@ -155,6 +158,7 @@ def register_routing_tools(register_tool, bridge):
         apply: bool = False,
         output_directory: str = "",
         allow_via_in_pad: bool = False,
+        undo_group: bool = False,
     ) -> str:
         """Plan or apply exact track/via add/edit/remove operations, leaving edits dirty.
 
@@ -163,7 +167,9 @@ def register_routing_tools(register_tool, bridge):
         are track edits. Coordinates/dimensions are absolute native integers from
         the snapshot, NOT user-origin mils. New vias are Top-Bottom through vias.
         Default is dry run. Live apply checks the whole baseline, records partial
-        progress and reconciles exact readback. Per-row Undo; no atomic rollback.
+        progress and reconciles exact readback. By default each row has an Undo
+        step. Set undo_group=true for one Undo step covering attempted edits.
+        The group can contain partial edits if the apply stops early.
         On timeout inspect get_pcb_routing_operation before any retry. Native DRC
         remains required; this tool never saves.
         """
@@ -174,6 +180,7 @@ def register_routing_tools(register_tool, bridge):
                 apply,
                 output_directory,
                 allow_via_in_pad,
+                undo_group,
             )
         )
 
@@ -316,6 +323,87 @@ def register_routing_tools(register_tool, bridge):
                 clearance_mm=clearance_mm,
             )
         )
+
+    @tool(read_only=True)
+    async def measure_pcb_path_lengths(ctx: Context, snapshot_directory: str, nets: list) -> str:
+        """Measure routed lengths in mm and report skew for native pairs among the requested nets.
+
+        Accepts up to 32 exact net names. Each measured net must be a single
+        unbranched track-and-via chain between two pad centers. Reports
+        planar track and vertical via lengths separately, and unsupported
+        topology per net. Multilayer paths require a fresh stack snapshot.
+        """
+        try:
+            snapshot = await asyncio.to_thread(read_snapshot, Path(snapshot_directory))
+            return encode({"success": True, **await asyncio.to_thread(measure_paths, snapshot, nets)})
+        except (ValueError, OSError) as error:
+            return encode({"success": False, "error": str(error)})
+
+    @tool()
+    async def plan_pcb_diff_pair(
+        ctx: Context, snapshot_directory: str, pair: str, layer_id: int,
+        width_mm: float, clearance_mm: float, corridor_raw: list,
+        detour_step_mm: float = 0.25, edge_clearance_mm: float = 0.25,
+        apply: bool = False, output_directory: str = "",
+        routing_layer_ids: list | None = None, via_diameter_mm: float | None = None,
+        via_hole_mm: float | None = None, hole_clearance_mm: float | None = None,
+        max_layer_changes: int = 2, mask_expansion_mm: float | None = None,
+        min_mask_sliver_mm: float | None = None,
+    ) -> str:
+        """Plan both rails of a native differential pair, with optional paired through vias.
+
+        Two unrouted two-pad nets with aligned horizontal or vertical launches
+        of equal pitch and matching polarity. Tests the straight path
+        and paired 45-degree detours inside corridor_raw [x1,y1,x2,y2] in
+        absolute Altium units. With routing_layer_ids including layer_id, supply
+        via_diameter_mm and via_hole_mm. The planner may place a paired
+        Top–Bottom through via at each transition and widen the via pitch
+        symmetrically. hole_clearance_mm defaults to clearance_mm.
+        Supply both mask_expansion_mm and min_mask_sliver_mm to also screen
+        via sites against nearby pad/via mask openings under a uniform expansion.
+        Choose a corridor clear of keepouts, cutouts, fills, regions and pours.
+        Default dry run. Apply uses the guarded batch and leaves the PCB dirty.
+        """
+        try:
+            return encode(await service.signal_plan(
+                "pair", snapshot_directory, apply, output_directory, pair=pair, layer_id=layer_id,
+                width_mm=width_mm, clearance_mm=clearance_mm, corridor_raw=corridor_raw,
+                detour_step_mm=detour_step_mm, edge_clearance_mm=edge_clearance_mm,
+                routing_layer_ids=routing_layer_ids, via_diameter_mm=via_diameter_mm,
+                via_hole_mm=via_hole_mm, hole_clearance_mm=hole_clearance_mm,
+                max_layer_changes=max_layer_changes, mask_expansion_mm=mask_expansion_mm,
+                min_mask_sliver_mm=min_mask_sliver_mm,
+            ))
+        except (ValueError, OSError) as error:
+            return encode({"success": False, "error": str(error)})
+
+    @tool()
+    async def plan_pcb_length_match(
+        ctx: Context, snapshot_directory: str, corridors_raw: dict,
+        tolerance_mm: float, clearance_mm: float, target_mm: float | None = None,
+        edge_clearance_mm: float = 0.25, apply: bool = False, output_directory: str = "",
+        nets: list | None = None, pairs: list | None = None,
+    ) -> str:
+        """Plan length matching for up to 32 two-pad track-and-via routes.
+
+        Supply nets for individual tuning or pairs for coupled tuning by native
+        pair name. Supply a corridor [x1,y1,x2,y2] in absolute Altium units for
+        each net or pair that needs added length, clear of keepouts, cutouts,
+        fills, regions and pours. Default target is the longest member's
+        measured length including traversed via height. Paired tuning adds
+        equal length to both rails and preserves their existing skew and vias.
+        Tolerance is absolute around target in mm and also bounds the total
+        spread across the members in pair mode.
+        Default dry run. Apply uses the guarded batch and leaves the PCB dirty.
+        """
+        try:
+            return encode(await service.signal_plan(
+                "length-match", snapshot_directory, apply, output_directory, nets=nets,
+                corridors_raw=corridors_raw, tolerance_mm=tolerance_mm, clearance_mm=clearance_mm,
+                target_mm=target_mm, edge_clearance_mm=edge_clearance_mm, pairs=pairs,
+            ))
+        except (ValueError, OSError) as error:
+            return encode({"success": False, "error": str(error)})
 
     @tool(read_only=True)
     async def get_pcb_routing_operation(ctx: Context, operation_directory: str) -> str:

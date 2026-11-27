@@ -92,6 +92,19 @@ class ShapeTest(unittest.TestCase):
 
 
 class RouteTest(unittest.TestCase):
+    def test_hard_routing_bounds_include_trace_and_via_radii(self):
+        board = router.Board([0, 0, 200, 100], 2.5, [TOP, BOT], 6, 6, 24, {"A"},
+                             hard_bounds=[0, 0, 200, 100])
+        self.assertIsNone(router.route_one(board, "A", (2, 20), (180, 20), [TOP], [TOP]))
+        self.assertFalse(board.via_free(*board.cell(10, 20), board.id("A")))
+        track = {"start": [10, 20], "end": [199, 20], "width": 6}
+        self.assertFalse(board.fits_bounds([track], []))
+
+    def test_occupied_destination_is_never_treated_as_free(self):
+        grid = board()
+        grid.add(router.Shape("circle", "B", [TOP], cx=120, cy=50, r=3))
+        self.assertIsNone(router.route_one(grid, "A", (20, 50), (120, 50), [TOP], [TOP]))
+
     def test_straight(self):
         b = board()
         legs, vias = router.route_one(b, "A", (10, 50), (190, 50), [TOP], [TOP])
@@ -167,6 +180,18 @@ class FanoutTest(unittest.TestCase):
 
 
 class RouteConnectionsToolTest(unittest.IsolatedAsyncioTestCase):
+    async def test_pair_members_are_skipped_before_obstacle_scan(self):
+        import main
+
+        connection = {"net": "P", "inside": True, "length": 25}
+        with (patch.object(main, "get_unrouted_connections", new=AsyncMock(return_value=json.dumps(
+                  {"success": True, "connections": [connection]}))),
+              patch.object(main, "get_layout", new=AsyncMock()) as get_layout,
+              patch.object(main, "_net_rules", new=AsyncMock(return_value={"P": {"paired": True}}))):
+            reply = json.loads(await main.route_connections(None, nets=["P"], dry_run=True))
+        self.assertEqual(reply["skipped_differential_pair_nets"], ["P"])
+        get_layout.assert_not_awaited()
+
     async def test_tool_does_not_route_on_a_layer_seen_only_in_the_layout(self):
         import main
 
@@ -182,7 +207,7 @@ class RouteConnectionsToolTest(unittest.IsolatedAsyncioTestCase):
         with (patch.object(main, "get_unrouted_connections", new=AsyncMock(return_value=json.dumps(
                   {"success": True, "connections": connections}))),
               patch.object(main, "get_layout", new=AsyncMock(return_value=json.dumps(layout))) as get_layout,
-              patch.object(main, "_net_rules", new=AsyncMock(return_value={}))):
+              patch.object(main, "_net_rules", new=AsyncMock(return_value={"SIGNAL": {"paired": False}}))):
             reply = json.loads(await main.route_connections(
                 None, nets=["SIGNAL"], layers=[TOP], grid_mils=10, dry_run=True,
             ))

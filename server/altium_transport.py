@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
+from uuid import uuid4
 
 from .altium_files import read_altium_text
 
@@ -17,6 +19,62 @@ def atomic_json(path: Path, value: dict) -> None:
         stream.flush()
         os.fsync(stream.fileno())
     os.replace(temporary, path)
+
+
+@dataclass(frozen=True)
+class ResidentSession:
+    """A leased native run with a request path unique to that run."""
+
+    directory: Path
+    bundle_key: str
+    token: str
+    executable: str
+
+    @classmethod
+    def load(cls, directory: Path) -> ResidentSession | None:
+        try:
+            ticket = json.loads((directory / "bridge-resident.json").read_text(encoding="utf-8-sig"))
+        except (FileNotFoundError, ValueError):
+            return None
+        if isinstance(ticket, dict):
+            key, token, exe = (ticket.get(name) for name in ("bundle_key", "token", "executable"))
+            if (isinstance(key, str) and re.fullmatch(r"[0-9a-f]{12}", key)
+                    and isinstance(token, str) and re.fullmatch(r"[0-9a-f]{32}", token)
+                    and isinstance(exe, str) and exe):
+                return cls(directory, key, token, exe)
+        return None
+
+    @classmethod
+    def start(cls, directory: Path, bundle_key: str, executable: str) -> ResidentSession:
+        session = cls(directory, bundle_key, uuid4().hex, executable)
+        session.lease.touch()
+        try:
+            atomic_json(directory / "bridge-resident.json", {
+                "bundle_key": bundle_key, "token": session.token, "executable": executable,
+            })
+        except OSError:
+            session.lease.unlink(missing_ok=True)
+            raise
+        return session
+
+    def _path(self, extension: str) -> Path:
+        return self.directory / f"bridge-resident-{self.token}.{extension}"
+
+    @property
+    def lease(self) -> Path:
+        return self._path("lease")
+
+    @property
+    def ready(self) -> Path:
+        return self._path("ready")
+
+    @property
+    def settling(self) -> Path:
+        return self._path("settling")
+
+    @property
+    def request(self) -> Path:
+        return self._path("request.json")
 
 
 class PendingCommand:

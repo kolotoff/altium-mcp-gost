@@ -904,7 +904,7 @@ begin
 end;
 
 // net_rules: the width rule and the clearance gap Altium applies to a track
-// of each net in NetNames on LayerName, one N|net|min|preferred|max|rule|gap
+// of each net in NetNames on LayerName, one N|net|min|preferred|max|rule|gap|paired
 // line each (internal units). The rules are evaluated on a probe track added
 // off the board for the query and removed straight after (rule lookups need
 // the object on the board), and the gap against a probe track with no net.
@@ -958,7 +958,7 @@ begin
             Gap := -1;
             R := Board.FindDominantRuleForObjectPair(T, T2, eRule_Clearance);
             if R <> nil then Gap := R.Gap;
-            Lines.Add(Line + '|' + IntToStr(Gap));
+            Lines.Add(Line + '|' + IntToStr(Gap) + '|' + BoolToStr(Net.InDifferentialPair, True));
             Board.RemovePCBObject(T);
         end;
         Board.RemovePCBObject(T2);

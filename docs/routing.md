@@ -1,4 +1,4 @@
-# Routing inspection and explicit editing
+# Routing inspection, planning and editing
 
 These tools generalize the MIT-licensed inspection, geometry-editing and audit
 code from Quilter's PCB routing test. Upstream notices are retained in
@@ -20,6 +20,10 @@ all clients using the old file transport before using concurrent clients.
 | `compare_pcb_drc` | Compare full occurrences, processed-rule coverage and waived counts. |
 | `validate_altium_project` | Review compiled schematic, PCB inventory, designator and native DRC evidence in one read-only report. |
 | `get_effective_routing_rules` | Query width/impedance and differential-gap values for exact existing objects. |
+| `route_connections` | Maze-route unrouted single-ended connections on selected layers. Reports native differential-pair members separately. |
+| `plan_pcb_diff_pair` | Route a native pair through straight sections, paired 45° detours and optional through vias. |
+| `measure_pcb_path_lengths` | Measure supported two-pad paths and report skew for native pair members. |
+| `plan_pcb_length_match` | Tune shorter nets individually or lengthen both rails of several pairs together. |
 | `select_pcb_routing` | Select nets, connections, pads or exact routing objects; optionally zoom. |
 | `apply_pcb_routing_batch` | Plan or apply track/via addition, edits, width changes and removal. |
 | `set_pcb_polygon_outline` | Plan or apply a named polygon's simple line boundary. |
@@ -29,8 +33,9 @@ all clients using the old file transport before using concurrent clients.
 | `get_pcb_routing_operation` | Read operation progress and exact reconciliation without replaying. |
 | `get_altium_command_status` | Read the command channel's unresolved receipt without invoking Altium. |
 
-Every write-capable routing tool defaults to `apply=false`. Applying edits leaves
-the document dirty. Saving remains a separate `save_current_document` operation
+The snapshot-based planners and edit tools default to `apply=false`. Use
+`dry_run=true` with `route_connections` or `route_path` to preview them.
+Applying edits leaves the document dirty. Saving remains a separate `save_current_document` operation
 that requires an explicit user save request. Snapshots do not save, repour, select,
 or rebuild connectivity. Selection and repour are separate explicit tools.
 
@@ -94,7 +99,9 @@ comes from `layers.tsv`, not numeric sorting or displayed layer names.
 
 A snapshot contains `board`, `nets`, `pads`, `tracks`, `vias`, `connections`,
 `rules`, `components`, `layers`, `arcs`, and `polygons` TSV tables, a terminal
-completion marker, a native board signature and a SHA-256 manifest. New snapshots
+completion marker, a native board signature and a SHA-256 manifest. The board
+table also stores `outline_raw`, `differential_pairs_json` and, when dielectric
+thickness is present between adjacent copper layers, `copper_depths_raw`. New snapshots
 require all tables, a matching generation ID, valid counts and unchanged bytes.
 Native text fields use ASCII JSON escapes so the on-disk field format has an
 explicit codec. Cyrillic/CJK/supplementary-character handling in the installed
@@ -103,9 +110,73 @@ Altium scripting host still requires runtime qualification.
 The signature excludes selection and cached connectivity flags. Before a live
 operation, Altium regenerates its modeled board signature and rejects a stale
 baseline. It includes component positions, rule summaries, origin, units, stack,
-and exported copper/definitions. It does not model full pad stacks, board-outline
-or keepout semantics, poured polygon copper, or reference continuity. Snapshot
+exported copper, board outline, native pair definitions and available copper center depths. Snapshot
+geometry omits full pad stacks, keepout semantics, poured polygon copper and reference continuity. Snapshot
 comparisons cannot establish electrical or manufacturing acceptance.
+
+## Automatic routes and signal lengths
+
+`route_connections` uses `area` to select ratsnest connections. Supply
+`routing_area` to constrain the actual trace and via copper to a rectangle
+in origin-relative mils. The maze router approximates clearance from layout
+copper, and board outline, keepouts, pours and scoped rule checks require
+native review. Use `route_path` with explicit waypoints when you need to
+choose the route and run immediate native object checks.
+
+For differential pairs and length matching, export a fresh snapshot and
+choose a corridor with a uniform stack and clear of cutouts, keepouts,
+fills, regions and poured copper. The planners check the straight-edged
+board perimeter and approximate clearance to pad envelopes, via copper,
+tracks and arcs. Through-via planning also screens drill spacing across
+the full drill span. The planners return an exact operation list
+in `signal-plan.json`; pass `apply=true` to run the guarded batch against the
+same snapshot. The result includes the post-apply snapshot directory and
+exact reconciliation. Each signal plan uses one native Undo group. If an
+apply stops early, the group can contain partial edits. Check the operation
+receipt and compare a fresh snapshot before retrying.
+
+- `plan_pcb_diff_pair` takes the native pair name, numeric copper layer ID,
+  width and clearance in mm, and a `corridor_raw` rectangle in absolute Altium
+  units. It supports unrouted two-pad members with horizontal or vertical
+  launches, equal pitch and consistent polarity. At the launch pitch, trace
+  width determines the edge gap. Choose one width suitable for all allowed
+  layers and set clearance from the board's rules. The planner tests up to
+  16 shifts in each direction using `detour_step_mm`.
+- To allow layer changes, pass `routing_layer_ids` with up to four physical
+  signal layers including `layer_id`, the preferred routing layer. Set
+  `via_diameter_mm` and `via_hole_mm` from the routing via rule.
+  `hole_clearance_mm` defaults to `clearance_mm`. Each transition puts one
+  Top–Bottom through via on each rail at the same longitudinal station.
+  The planner widens the via pitch symmetrically when drill or copper
+  clearance requires it. It searches stations on flat sections, prefers
+  fewer transitions and accepts 0–4 via pairs with `max_layer_changes`
+  (default 2).
+- Set both `mask_expansion_mm` and `min_mask_sliver_mm` to screen open vias
+  against nearby pad and via mask openings. The estimate applies the same
+  expansion to each opening and can widen the pair or move a transition.
+  Run native DRC to check actual mask rules and per-object settings.
+  [Altium minimum solder mask sliver rule](https://www.altium.com/documentation/altium-designer/pcb/design-rule-types/manufacturing).
+- `measure_pcb_path_lengths` traces a single unbranched chain of tracks and
+  via junctions between two pad centers. Each via must meet two track layers
+  at its center. The tool reports planar length, vertical length between
+  connected copper centers, total length, and pair skew when both members
+  are measured. Native signal length and delay use additional information.
+  [Altium differential-pair routing](https://www.altium.com/documentation/altium-designer/pcb/high-speed-design/interactively-routing-differential-pairs).
+- `plan_pcb_length_match` accepts either `nets` or native `pairs`. Key
+  `corridors_raw` by those names for routes that need added length. Set
+  `target_mm` or use the longest measured member as the target. In pair mode,
+  the tool adds one coupled 45° excursion to a shared straight section of
+  each shorter pair. Both rails gain equal length, preserving their skew.
+  In pair mode the tolerance also bounds the length spread across all
+  members. The edit preserves vias, track width and pad endpoints. Run measurement
+  on the resulting snapshot and check applicable native rules.
+  [Altium length tuning and matched-length rules](https://www.altium.com/documentation/altium-designer/pcb/high-speed-design/length-tuning).
+
+For placement, `place_components(require_all=true, board_path=...)` resolves
+every designator on the target PCB before the transaction. Verify the returned
+positions and call `check_placement` with the same `board_path` to inspect
+same-side overlaps and primitive clearance. Native component clearance, board
+edge and placement keepout checks are separate.
 
 ## Explicit batches
 
@@ -133,10 +204,11 @@ First export a snapshot. Read exact rows from its tables, then pass operations:
 The numbers are illustrative; use the actual board's records and rules. `add`
 omits `old`; `remove` omits `new`. An edit preserves its net. Reversed track
 endpoints are equivalent. Repeated targets, duplicate destinations, stale targets,
-unknown nets and absent copper layers are rejected. Dominant width rules are
-queried on attached tracks after each native Undo transaction; detached candidates
-did not resolve a rule in AD 26.11.1. A failed width check can therefore leave an
-attempted row applied: inspect its audit and use guarded Undo before retrying.
+unknown nets and absent copper layers are rejected. The batch checks the width
+rule for a single-ended track and the differential routing rule for a pair
+member. Width checks run on attached tracks before advancing to the
+next row. A failed width check can leave the attempted row applied.
+Inspect the audit and use guarded Undo before retrying.
 Width readback does not establish clearance or full DRC acceptance.
 
 Via records contain `net`, `x_raw`, `y_raw`, `size_raw`, `hole_size_raw`,
@@ -146,13 +218,17 @@ via centers are refused. Via-in-pad requires explicit `allow_via_in_pad=true`
 and the same assigned net. That flag does not establish filled/capped fabrication
 support or drill clearances.
 
-The default dry run stages `operations.tsv` and `plan.json` and does not call
-Altium. `apply=true` performs native whole-request preflight, per-row Undo
-transactions and readback, then exports and compares the entire expected track
-and via multisets plus immutable records. Success requires exact reconciliation,
-not only the native helper's status or object count. There is no automatic atomic
-batch rollback. Native DRC, return paths, timing and manufacturing review remain
-separate checks.
+The default dry run stages `operations.tsv` and `plan.json` without contacting
+Altium. Live apply checks the exact baseline and indexes requested nets
+and geometry in the same board pass before preparing candidates. It
+checks the exact baseline again immediately before editing. Both checks
+read only signature fields. Live apply exports the full post-edit
+inventory and reconciles the resulting track and via multisets and
+immutable records. Explicit batches
+use per-row Undo by default. Set `undo_group=true` to use one Undo step
+for the attempted edits. Width checks and progress receipts still run per
+row in either mode. Native DRC, return paths, timing and manufacturing
+review remain separate checks.
 
 Polygon outline edits preserve an existing polygon's name, net, layer and pour
 settings. New polygons use a solid same-net pour definition. Boundaries must be
@@ -167,7 +243,8 @@ polygon child/region counts before and after in `polygon-copper-before.tsv` and
 ## Rule, layer and clearance observations
 
 Rule queries require an exact existing object record plus a requested copper
-layer. They expose numeric width/impedance and differential-gap constraints.
+layer. They expose numeric width and impedance constraints for ordinary width
+rules and both width and gap for differential-pair rules.
 The selected rule applies to that sampled object's context; it is not necessarily
 the winner for another object, room, location or proposed segment on the same net.
 The tools do not convert unqualified native delay getters into ps/ns.

@@ -151,6 +151,10 @@ discover the new tools.
 - Native DRC reports use `export_pcb_drc_report`, `summarize_pcb_drc`, and `compare_pcb_drc`.
 - Routing operations use `get_effective_routing_rules`, `select_pcb_routing`,
   `apply_pcb_routing_batch`, `set_pcb_polygon_outline`, `repour_pcb_polygons`, and `undo_pcb_routing`.
+- Use `plan_pcb_diff_pair` for native differential pairs with optional paired
+  through-via transitions, `measure_pcb_path_lengths` for track-and-via lengths
+  and skew, and `plan_pcb_length_match` to tune individual nets or several
+  differential pairs inside explicit corridors.
 - Recovery uses `get_altium_command_status` for the bridge receipt and
   `get_pcb_routing_operation` for progress and reconciliation.
 
@@ -1020,14 +1024,29 @@ clipping can hide stale out-of-board circles in a preview.
 
 The server communicates with Altium Designer using a scripting bridge:
 
-1. It writes command requests to `C:\Users\Public\altium_mcp\request.json`
-2. It launches Altium with instructions to run the bridge script: the units of `server/AltiumScript/Altium_API.PrjScr` merged into one file in `C:\Users\Public\altium_mcp\bridge`, named after its content so Altium never runs a stale copy it still holds open (`ScriptingSystem:RunScriptFile`)
+1. It writes command requests under `C:\Users\Public\altium_mcp`. The one-shot bridge reads `request.json` and the resident bridge reads a session-specific request file.
+2. When a native launch is needed, it runs a content-versioned script file in `C:\Users\Public\altium_mcp\bridge` with `ScriptingSystem:RunScriptFile`. The file is generated from the units of `server/AltiumScript/Altium_API.PrjScr`.
 3. The script processes the request and writes results to `C:\Users\Public\altium_mcp\response.json`
 4. The server matches the response to its request ID and archives the receipt. An unresolved timeout keeps the command channel blocked until a terminal response is available.
 
 **Why one merged file, not the script project.** Running a script *project* (`ScriptingSystem:RunScript` with `ProjectName`) makes Altium create a hidden copy of every form in the script projects on the user's menus, and never free it. On one machine with 14 such forms that was about 105 Windows USER objects per call. Windows caps a process at 10,000 (`USERProcessHandleQuota`). Near the cap Altium shows "System Error. Code: 1158 ... used all of its system allowance of handles for Window Manager objects" and then crashes, losing unsaved work, after about 90 calls. Running a single script file (`RunScriptFile`) or script text (`RunScriptText`) leaks nothing, so `server/script_bundle.py` merges the units into one file: global `var`/`const` blocks first, then each routine after the routines it calls (a single file must define a routine before its first use). The bundle is rebuilt whenever a unit changes. The project is still the source to edit, and the fallback if bundling fails.
 
 When adding bridge code: start every routine, and its `begin` and final `end;`, at column 0, and don't let routines call each other in a cycle (the bundle has no forward declarations). `tests/test_script_bundle.py` checks the real units. The sandbox runs its script as a file too.
+
+The built-in bridge reuses one native run for the routing dispatcher,
+routing-rule creation, unrouted-connection queries and document listing.
+It processes requests serially and releases Altium's script engine after
+10 idle seconds or before a sandbox or other MCP command runs. Altium pumps
+UI messages between requests, while its script engine is reserved by the
+bridge. A resident run signals when it is processing the previous
+command's final UI messages. A follow-up then has up to five seconds
+to be claimed, compared with the usual half second. The server stops
+waiting if the resident lease ends. Set `ALTIUM_MCP_REUSE_BRIDGE=0` on
+the MCP server to use one-shot execution. If a resident run misses a
+request, the server withdraws it
+before falling back. A claimed request retains its receipt and cannot be
+replayed automatically. The one-shot path uses command-specific files when
+available. Custom script projects continue to use their configured bundle.
 
 Altium's script engine also leaks memory: every property read of a board object costs roughly 100-200 bytes that are never freed. On a 40,000-object board that is about 25 MB per silkscreen export and 50 MB per full silkscreen check, so a long session of exports grows Altium by gigabytes until it runs out of memory and dies with unsaved work. The bridge scripts read each object's properties once and skip objects early; the silkscreen tools reuse one board export for up to 15 minutes and update it themselves after their own moves and link graphics.
 

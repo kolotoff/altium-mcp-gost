@@ -85,21 +85,25 @@ begin
         ',"completed_rows":' + IntToStr(Completed) + ',"error":' + RoutingQuote(RoutingFailure) + ',"saved":false}');
 end;
 
+function RoutingTrackGeometry(X1, Y1, X2, Y2, Width, LayerID : Integer) : String;
+var T : Integer;
+begin
+    if (X1 > X2) or ((X1 = X2) and (Y1 > Y2)) then
+    begin
+        T := X1; X1 := X2; X2 := T; T := Y1; Y1 := Y2; Y2 := T;
+    end;
+    Result := Format('%d,%d,%d,%d,%d,%d',[X1,Y1,X2,Y2,Width,LayerID]);
+end;
+
 function RoutingGeometry(Primitive : IPCB_Primitive) : String;
 var Track : IPCB_Track; Via : IPCB_Via; Pad : IPCB_Pad; Arc : IPCB_Arc;
-    X1, Y1, X2, Y2, T : Integer;
 begin
     Result := '';
     case Primitive.ObjectId of
         eTrackObject:
         begin
             Track := Primitive;
-            X1 := Track.X1; Y1 := Track.Y1; X2 := Track.X2; Y2 := Track.Y2;
-            if (X1 > X2) or ((X1 = X2) and (Y1 > Y2)) then
-            begin
-                T := X1; X1 := X2; X2 := T; T := Y1; Y1 := Y2; Y2 := T;
-            end;
-            Result := IntToStr(X1)+','+IntToStr(Y1)+','+IntToStr(X2)+','+IntToStr(Y2)+','+IntToStr(Track.Width)+','+IntToStr(Track.Layer);
+            Result := RoutingTrackGeometry(Track.X1,Track.Y1,Track.X2,Track.Y2,Track.Width,Track.Layer);
         end;
         eViaObject:
         begin
@@ -150,34 +154,173 @@ begin
     end;
 end;
 
-procedure RoutingCollect(Board : IPCB_Board; Tables : TStringList; Signature : TStringList);
+procedure RoutingSignalContext(Board : IPCB_Board; Summary, Signature : TStringList);
+var Iterator : IPCB_BoardIterator; PairItem : IPCB_DifferentialPair;
+    Net : IPCB_Net; Pairs : TStringList; PositiveName, NegativeName, Outline, PairJSON : String;
+    Segment : TPolySegment; I : Integer;
+begin
+    Outline:='';
+    for I:=0 to Board.BoardOutline.PointCount-1 do
+    begin
+        Segment:=Board.BoardOutline.Segments[I];
+        if I>0 then Outline:=Outline+';';
+        Outline:=Outline+IntToStr(Segment.Kind)+','+IntToStr(Segment.vx)+','+IntToStr(Segment.vy)+','+
+            IntToStr(Segment.cx)+','+IntToStr(Segment.cy)+','+IntToStr(Segment.Radius)+','+
+            RoutingFloat(Segment.Angle1)+','+RoutingFloat(Segment.Angle2);
+    end;
+    Pairs:=TStringList.Create;
+    Iterator:=Board.BoardIterator_Create;
+    try
+        Iterator.AddFilter_ObjectSet(MkSet(eDifferentialPairObject));
+        Iterator.AddFilter_LayerSet(AllLayers);
+        Iterator.AddFilter_Method(eProcessAll);
+        PairItem:=Iterator.FirstPCBObject;
+        while PairItem<>nil do
+        begin
+            PositiveName:=''; NegativeName:='';
+            Net:=PairItem.PositiveNet; if Net<>nil then PositiveName:=Net.Name;
+            Net:=PairItem.NegativeNet; if Net<>nil then NegativeName:=Net.Name;
+            Pairs.Add('["'+JSONEscapeString(PairItem.Name)+'","'+JSONEscapeString(PositiveName)+'","'+
+                JSONEscapeString(NegativeName)+'"]');
+            PairItem:=Iterator.NextPCBObject;
+        end;
+        Pairs.Sort;
+        PairJSON:='[';
+        for I:=0 to Pairs.Count-1 do
+        begin
+            if I>0 then PairJSON:=PairJSON+',';
+            PairJSON:=PairJSON+Pairs[I];
+        end;
+        PairJSON:=PairJSON+']';
+    finally
+        Board.BoardIterator_Destroy(Iterator);
+        Pairs.Free;
+    end;
+    PairJSON:=JSONEscapeString(PairJSON);
+    if Summary<>nil then
+    begin
+        Summary.Add('outline_raw'+#9+Outline);
+        Summary.Add('differential_pairs_json'+#9+PairJSON);
+    end;
+    Signature.Add('routing-context-v1');
+    Signature.Add('routing-outline'+#9+Outline);
+    Signature.Add('routing-pairs'+#9+PairJSON);
+end;
+
+function RoutingBatchKey(Kind, NetName, Geometry : String) : String;
+begin
+    Result:=Kind+#9+NetName+#9+Geometry;
+end;
+
+procedure RoutingRecordBatchMatch(Keys, Hits : TStringList; Found : TInterfaceList;
+                                  Primitive : IPCB_Primitive; Kind, Name, Geometry : String);
+var Key : String; Slot : Integer;
+begin
+    Key:=RoutingBatchKey(Kind,Name,Geometry);
+    Slot:=Keys.IndexOf(Key);
+    if Slot<0 then Exit;
+    if Keys[Slot]<>Key then Exit;
+    if Hits[Slot]='-1' then
+    begin
+        Hits[Slot]:=IntToStr(Found.Count);
+        Found.Add(Primitive);
+    end
+    else Hits[Slot]:='-2';
+end;
+
+function RoutingEncodedText(Value : String; Keys, Encoded : TStringList) : String;
+var Slot : Integer;
+begin
+    Result:='';
+    if Value='' then Exit;
+    Slot:=Keys.IndexOf(Value);
+    if Slot>=0 then
+    begin
+        { TStringList lookup uses the locale. Only reuse an exact match. }
+        if Keys[Slot]=Value then Result:=Encoded[Slot]
+        else Result:=JSONEscapeString(Value);
+        Exit;
+    end;
+    Result:=JSONEscapeString(Value);
+    { Bound the per-pass cache on boards with many distinct strings. }
+    if Keys.Count<256 then
+    begin
+        Slot:=Keys.Add(Value);
+        Encoded.Insert(Slot,Result);
+    end;
+end;
+
+function RoutingEncodedLayer(LayerID : Integer; Labels : TStringList) : String;
+var Key : String;
+begin
+    Key:=IntToStr(LayerID);
+    Result:=Labels.Values[Key];
+    if Result='' then
+    begin
+        Result:=JSONEscapeString(Layer2String(LayerID));
+        Labels.Values[Key]:=Result;
+    end;
+end;
+
+procedure RoutingCollect(Board : IPCB_Board; Signature : TStringList; Directory, SnapshotID : String;
+                         IndexKeys, IndexHits : TStringList; IndexObjects : TInterfaceList);
 var Iterator : IPCB_BoardIterator; Primitive : IPCB_Primitive;
     Net : IPCB_Net; Pad : IPCB_Pad; Track : IPCB_Track; Via : IPCB_Via;
     Connection : IPCB_Connection; Rule : IPCB_Rule; Component : IPCB_Component;
-    Arc : IPCB_Arc; Polygon : IPCB_Polygon; Stack : IPCB_LayerStack_V7; LayerObject : IPCB_LayerObject;
+    Arc : IPCB_Arc; Polygon : IPCB_Polygon; Stack : IPCB_LayerStack_V7; LayerObject : IPCB_LayerObject_V7;
     Nets, Pads, Tracks, Vias, Connections, Rules, Components, Layers, Arcs, Polygons, Summary : TStringList;
-    Row, Refdes, ModeName : String; RatsnestCount, RedundantCount, InvalidNetCount, LayerCount : Integer;
+    TextKeys, EncodedText, LayerLabels : TStringList;
+    Row, Refdes, ModeName, CopperDepths, NetName, RawName, Geometry, PadRowFormat, TrackRowFormat, UnassignedKey : String;
+    RatsnestCount, RedundantCount, InvalidNetCount, LayerCount, DielectricBelow, XOrigin, YOrigin, UnitsPerMil : Integer;
+    LayerID, CopperThickness, PinCount, X1, Y1, X2, Y2, Width, KeySlot : Integer;
+    Depth : Double; HasCopperDepths, EmitTables, Invalid, Redundant, BuildIndex, IndexUnassigned : Boolean;
+    ObjectSet : TObjectSet;
 begin
-    Nets:=TStringList.Create; Pads:=TStringList.Create; Tracks:=TStringList.Create; Vias:=TStringList.Create;
-    Connections:=TStringList.Create; Rules:=TStringList.Create; Components:=TStringList.Create;
-    Layers:=TStringList.Create; Arcs:=TStringList.Create; Polygons:=TStringList.Create; Summary:=TStringList.Create;
+    { Baseline guards need the same signature, without inventory-only fields
+      such as net connectivity, ratsnest objects or primitive selection. }
+    EmitTables:=Directory<>'';
+    PadRowFormat:='%s'+#9+'%s'+#9+'%s'+#9+'%d'+#9+'%d'+#9+'%d'+#9+'%s'+#9+'%s'+#9+'%d'+#9+'%d'+#9+'%d';
+    BuildIndex:=IndexKeys<>nil;
+    IndexUnassigned:=False;
+    if BuildIndex then
+    begin
+        UnassignedKey:=RoutingBatchKey('net','','');
+        KeySlot:=IndexKeys.IndexOf(UnassignedKey);
+        if KeySlot>=0 then IndexUnassigned:=IndexKeys[KeySlot]=UnassignedKey;
+    end;
+    TextKeys:=TStringList.Create; EncodedText:=TStringList.Create; LayerLabels:=TStringList.Create;
+    TextKeys.CaseSensitive:=True; TextKeys.Sorted:=True;
+    Summary:=nil;
+    if EmitTables then
+    begin
+        TrackRowFormat:='%s'+#9+'%d'+#9+'%d'+#9+'%d'+#9+'%d'+#9+'%d'+#9+'%d'+#9+'%s'+#9+'%s';
+        Nets:=TStringList.Create; Pads:=TStringList.Create; Tracks:=TStringList.Create; Vias:=TStringList.Create;
+        Connections:=TStringList.Create; Rules:=TStringList.Create; Components:=TStringList.Create;
+        Layers:=TStringList.Create; Arcs:=TStringList.Create; Polygons:=TStringList.Create; Summary:=TStringList.Create;
+    end;
     try
-        Nets.Add('net'+#9+'pin_count'+#9+'via_count'+#9+'routed_length_raw'+#9+'connectivity_invalid'+#9+'connections_visible');
-        Pads.Add('refdes'+#9+'pad'+#9+'net'+#9+'x_raw'+#9+'y_raw'+#9+'layer_id'+#9+'layer'+#9+'rotation_degrees'+#9+'top_x_size_raw'+#9+'top_y_size_raw'+#9+'hole_size_raw'+#9+'selected');
-        Tracks.Add('net'+#9+'x1_raw'+#9+'y1_raw'+#9+'x2_raw'+#9+'y2_raw'+#9+'width_raw'+#9+'layer_id'+#9+'layer'+#9+'selected');
-        Vias.Add('net'+#9+'x_raw'+#9+'y_raw'+#9+'size_raw'+#9+'hole_size_raw'+#9+'low_layer_id'+#9+'high_layer_id'+#9+'selected');
-        Connections.Add('net'+#9+'x1_raw'+#9+'y1_raw'+#9+'x2_raw'+#9+'y2_raw'+#9+'layer1_id'+#9+'layer2_id'+#9+'mode'+#9+'redundant'+#9+'selected');
-        Rules.Add('name'+#9+'kind_id'+#9+'priority'+#9+'drc_enabled'+#9+'scope1'+#9+'scope2'+#9+'summary');
-        Components.Add('refdes'+#9+'comment'+#9+'footprint'+#9+'x_raw'+#9+'y_raw'+#9+'rotation_degrees'+#9+'layer_id'+#9+'layer');
-        Layers.Add('stack_index'+#9+'layer_id'+#9+'layer_name'+#9+'copper_thickness_raw');
-        Arcs.Add('net'+#9+'x_raw'+#9+'y_raw'+#9+'radius_raw'+#9+'start_angle'+#9+'end_angle'+#9+'width_raw'+#9+'layer_id'+#9+'selected');
-        Polygons.Add('name'+#9+'net'+#9+'layer_id'+#9+'definition');
-        RatsnestCount:=0; RedundantCount:=0; InvalidNetCount:=0;
+        if EmitTables then
+        begin
+            Nets.Add('net'+#9+'pin_count'+#9+'via_count'+#9+'routed_length_raw'+#9+'connectivity_invalid'+#9+'connections_visible');
+            Pads.Add('refdes'+#9+'pad'+#9+'net'+#9+'x_raw'+#9+'y_raw'+#9+'layer_id'+#9+'layer'+#9+'rotation_degrees'+#9+'top_x_size_raw'+#9+'top_y_size_raw'+#9+'hole_size_raw'+#9+'selected');
+            Tracks.Add('net'+#9+'x1_raw'+#9+'y1_raw'+#9+'x2_raw'+#9+'y2_raw'+#9+'width_raw'+#9+'layer_id'+#9+'layer'+#9+'selected');
+            Vias.Add('net'+#9+'x_raw'+#9+'y_raw'+#9+'size_raw'+#9+'hole_size_raw'+#9+'low_layer_id'+#9+'high_layer_id'+#9+'selected');
+            Connections.Add('net'+#9+'x1_raw'+#9+'y1_raw'+#9+'x2_raw'+#9+'y2_raw'+#9+'layer1_id'+#9+'layer2_id'+#9+'mode'+#9+'redundant'+#9+'selected');
+            Rules.Add('name'+#9+'kind_id'+#9+'priority'+#9+'drc_enabled'+#9+'scope1'+#9+'scope2'+#9+'summary');
+            Components.Add('refdes'+#9+'comment'+#9+'footprint'+#9+'x_raw'+#9+'y_raw'+#9+'rotation_degrees'+#9+'layer_id'+#9+'layer');
+            Layers.Add('stack_index'+#9+'layer_id'+#9+'layer_name'+#9+'copper_thickness_raw');
+            Arcs.Add('net'+#9+'x_raw'+#9+'y_raw'+#9+'radius_raw'+#9+'start_angle'+#9+'end_angle'+#9+'width_raw'+#9+'layer_id'+#9+'selected');
+            Polygons.Add('name'+#9+'net'+#9+'layer_id'+#9+'definition');
+            RatsnestCount:=0; RedundantCount:=0; InvalidNetCount:=0;
+        end;
+        XOrigin:=Board.XOrigin; YOrigin:=Board.YOrigin; UnitsPerMil:=MilsToCoord(1);
         Signature.Clear;
-        Signature.Add('board'+#9+JSONEscapeString(UpperCase(Board.FileName))+#9+IntToStr(Board.XOrigin)+#9+IntToStr(Board.YOrigin)+#9+IntToStr(MilsToCoord(1)));
+        Signature.Add('board'+#9+JSONEscapeString(UpperCase(Board.FileName))+#9+IntToStr(XOrigin)+#9+IntToStr(YOrigin)+#9+IntToStr(UnitsPerMil));
+        ObjectSet:=MkSet(eNetObject,ePadObject,eTrackObject,eViaObject,eRuleObject,eComponentObject,eArcObject,ePolyObject);
+        if EmitTables then ObjectSet:=SetUnion(ObjectSet,MkSet(eConnectionObject));
         Iterator:=Board.BoardIterator_Create;
         try
-            Iterator.AddFilter_ObjectSet(MkSet(eNetObject,ePadObject,eTrackObject,eViaObject,eConnectionObject,eRuleObject,eComponentObject,eArcObject,ePolyObject));
+            Iterator.AddFilter_ObjectSet(ObjectSet);
             Iterator.AddFilter_LayerSet(AllLayers);
             Iterator.AddFilter_Method(eProcessAll);
             Primitive:=Iterator.FirstPCBObject;
@@ -187,62 +330,118 @@ begin
                     eNetObject:
                     begin
                         Net:=Primitive;
-                        Nets.Add(JSONEscapeString(Net.Name)+#9+IntToStr(Net.PinCount)+#9+IntToStr(Net.ViaCount)+#9+IntToStr(Net.RoutedLength)+#9+RoutingBool(Net.ConnectivelyInvalid)+#9+RoutingBool(Net.ConnectsVisible));
-                        Signature.Add('net'+#9+JSONEscapeString(Net.Name)+#9+IntToStr(Net.PinCount));
-                        if Net.ConnectivelyInvalid then Inc(InvalidNetCount);
+                        RawName:=Net.Name; PinCount:=Net.PinCount;
+                        NetName:=RoutingEncodedText(RawName,TextKeys,EncodedText);
+                        if BuildIndex then
+                            RoutingRecordBatchMatch(IndexKeys,IndexHits,IndexObjects,Net,'net',RawName,'');
+                        if EmitTables then
+                        begin
+                            Invalid:=Net.ConnectivelyInvalid;
+                            Nets.Add(NetName+#9+IntToStr(PinCount)+#9+IntToStr(Net.ViaCount)+#9+IntToStr(Net.RoutedLength)+#9+
+                                RoutingBool(Invalid)+#9+RoutingBool(Net.ConnectsVisible));
+                            if Invalid then Inc(InvalidNetCount);
+                        end;
+                        Signature.Add('net'+#9+NetName+#9+IntToStr(PinCount));
                     end;
                     ePadObject:
                     begin
                         Pad:=Primitive; Refdes:='';
-                        if Pad.Component<>nil then Refdes:=Pad.Component.Name.Text;
-                        Row:=JSONEscapeString(Refdes)+#9+JSONEscapeString(Pad.Name)+#9+JSONEscapeString(PCBPrimitiveNetName(Pad))+#9+IntToStr(Pad.X)+#9+IntToStr(Pad.Y)+#9+IntToStr(Pad.Layer)+#9+JSONEscapeString(Layer2String(Pad.Layer))+#9+RoutingFloat(Pad.Rotation)+#9+IntToStr(Pad.TopXSize)+#9+IntToStr(Pad.TopYSize)+#9+IntToStr(Pad.HoleSize);
-                        Pads.Add(Row+#9+RoutingBool(Pad.Selected)); Signature.Add('pad'+#9+Row);
+                        Component:=Pad.Component;
+                        if Component<>nil then Refdes:=Component.Name.Text;
+                        LayerID:=Pad.Layer;
+                        Net:=Pad.Net; NetName:='';
+                        if Net<>nil then NetName:=RoutingEncodedText(Net.Name,TextKeys,EncodedText);
+                        Row:=Format(PadRowFormat,[
+                            RoutingEncodedText(Refdes,TextKeys,EncodedText),RoutingEncodedText(Pad.Name,TextKeys,EncodedText),
+                            NetName,Pad.X,Pad.Y,LayerID,RoutingEncodedLayer(LayerID,LayerLabels),
+                            RoutingFloat(Pad.Rotation),Pad.TopXSize,Pad.TopYSize,Pad.HoleSize]);
+                        if EmitTables then Pads.Add(Row+#9+RoutingBool(Pad.Selected));
+                        Signature.Add('pad'+#9+Row);
                     end;
                     eTrackObject:
                     begin
                         Track:=Primitive;
-                        Row:=JSONEscapeString(PCBPrimitiveNetName(Track))+#9+IntToStr(Track.X1)+#9+IntToStr(Track.Y1)+#9+IntToStr(Track.X2)+#9+IntToStr(Track.Y2)+#9+IntToStr(Track.Width)+#9+IntToStr(Track.Layer)+#9+JSONEscapeString(Layer2String(Track.Layer));
-                        Tracks.Add(Row+#9+RoutingBool(Track.Selected));
-                        Signature.Add('track'+#9+JSONEscapeString(PCBPrimitiveNetName(Track))+#9+RoutingGeometry(Track));
+                        Net:=Track.Net; RawName:=''; NetName:='';
+                        if Net<>nil then
+                        begin
+                            RawName:=Net.Name;
+                            NetName:=RoutingEncodedText(RawName,TextKeys,EncodedText);
+                        end;
+                        X1:=Track.X1; Y1:=Track.Y1; X2:=Track.X2; Y2:=Track.Y2;
+                        Width:=Track.Width; LayerID:=Track.Layer;
+                        if EmitTables then
+                            Tracks.Add(Format(TrackRowFormat,[NetName,X1,Y1,X2,Y2,Width,LayerID,
+                                RoutingEncodedLayer(LayerID,LayerLabels),RoutingBool(Track.Selected)]));
+                        Geometry:=RoutingTrackGeometry(X1,Y1,X2,Y2,Width,LayerID);
+                        Signature.Add('track'+#9+NetName+#9+Geometry);
+                        if BuildIndex and (IndexUnassigned or (RawName<>'')) then
+                            RoutingRecordBatchMatch(IndexKeys,IndexHits,IndexObjects,Track,'track',RawName,Geometry);
                     end;
                     eViaObject:
                     begin
                         Via:=Primitive;
-                        Row:=JSONEscapeString(PCBPrimitiveNetName(Via))+#9+IntToStr(Via.X)+#9+IntToStr(Via.Y)+#9+IntToStr(Via.Size)+#9+IntToStr(Via.HoleSize)+#9+IntToStr(Via.LowLayer)+#9+IntToStr(Via.HighLayer);
-                        Vias.Add(Row+#9+RoutingBool(Via.Selected)); Signature.Add('via'+#9+Row);
+                        RawName:=PCBPrimitiveNetName(Via);
+                        NetName:=RoutingEncodedText(RawName,TextKeys,EncodedText);
+                        Geometry:=IntToStr(Via.X)+#9+IntToStr(Via.Y)+#9+IntToStr(Via.Size)+#9+IntToStr(Via.HoleSize)+
+                            #9+IntToStr(Via.LowLayer)+#9+IntToStr(Via.HighLayer);
+                        Row:=NetName+#9+Geometry;
+                        if EmitTables then Vias.Add(Row+#9+RoutingBool(Via.Selected));
+                        Signature.Add('via'+#9+Row);
+                        if BuildIndex then
+                            RoutingRecordBatchMatch(IndexKeys,IndexHits,IndexObjects,Via,'via',RawName,
+                                StringReplace(Geometry,#9,',',MkSet(rfReplaceAll)));
                     end;
                     eConnectionObject:
                     begin
                         Connection:=Primitive; ModeName:='other';
-                        if Connection.Mode=eRatsNestConnection then ModeName:='ratsnest';
-                        if Connection.Mode=eBrokenNetMarker then ModeName:='broken_net_marker';
-                        Connections.Add(JSONEscapeString(PCBPrimitiveNetName(Connection))+#9+IntToStr(Connection.X1)+#9+IntToStr(Connection.Y1)+#9+IntToStr(Connection.X2)+#9+IntToStr(Connection.Y2)+#9+IntToStr(Connection.Layer1)+#9+IntToStr(Connection.Layer2)+#9+ModeName+#9+RoutingBool(Connection.IsRedundant)+#9+RoutingBool(Connection.Selected));
-                        if Connection.IsRedundant then Inc(RedundantCount)
-                        else if Connection.Mode=eRatsNestConnection then Inc(RatsnestCount);
+                        if Connection.Mode=eRatsNestConnection then ModeName:='ratsnest'
+                        else if Connection.Mode=eBrokenNetMarker then ModeName:='broken_net_marker';
+                        Redundant:=Connection.IsRedundant;
+                        NetName:=RoutingEncodedText(PCBPrimitiveNetName(Connection),TextKeys,EncodedText);
+                        Connections.Add(NetName+#9+IntToStr(Connection.X1)+#9+IntToStr(Connection.Y1)+#9+
+                            IntToStr(Connection.X2)+#9+IntToStr(Connection.Y2)+#9+IntToStr(Connection.Layer1)+#9+
+                            IntToStr(Connection.Layer2)+#9+ModeName+#9+RoutingBool(Redundant)+#9+RoutingBool(Connection.Selected));
+                        if Redundant then Inc(RedundantCount)
+                        else if ModeName='ratsnest' then Inc(RatsnestCount);
                     end;
                     eRuleObject:
                     begin
                         Rule:=Primitive;
-                        Row:=JSONEscapeString(Rule.Name)+#9+IntToStr(Rule.RuleKind)+#9+IntToStr(Rule.Priority)+#9+RoutingBool(Rule.DRCEnabled)+#9+JSONEscapeString(Rule.Scope1Expression)+#9+JSONEscapeString(Rule.Scope2Expression)+#9+JSONEscapeString(Rule.GetState_DataSummaryString);
-                        Rules.Add(Row); Signature.Add('rule'+#9+Row);
+                        Row:=JSONEscapeString(Rule.Name)+#9+IntToStr(Rule.RuleKind)+#9+IntToStr(Rule.Priority)+
+                            #9+RoutingBool(Rule.DRCEnabled)+#9+RoutingEncodedText(Rule.Scope1Expression,TextKeys,EncodedText)+
+                            #9+RoutingEncodedText(Rule.Scope2Expression,TextKeys,EncodedText)+#9+
+                            JSONEscapeString(Rule.GetState_DataSummaryString);
+                        if EmitTables then Rules.Add(Row);
+                        Signature.Add('rule'+#9+Row);
                     end;
                     eComponentObject:
                     begin
                         Component:=Primitive;
-                        Row:=JSONEscapeString(Component.Name.Text)+#9+JSONEscapeString(Component.Comment.Text)+#9+JSONEscapeString(Component.Pattern)+#9+IntToStr(Component.X)+#9+IntToStr(Component.Y)+#9+RoutingFloat(Component.Rotation)+#9+IntToStr(Component.Layer)+#9+JSONEscapeString(Layer2String(Component.Layer));
-                        Components.Add(Row); Signature.Add('component'+#9+Row);
+                        LayerID:=Component.Layer;
+                        Row:=RoutingEncodedText(Component.Name.Text,TextKeys,EncodedText)+#9+
+                            RoutingEncodedText(Component.Comment.Text,TextKeys,EncodedText)+#9+
+                            RoutingEncodedText(Component.Pattern,TextKeys,EncodedText)+#9+IntToStr(Component.X)+#9+IntToStr(Component.Y)+#9+
+                            RoutingFloat(Component.Rotation)+#9+IntToStr(LayerID)+#9+RoutingEncodedLayer(LayerID,LayerLabels);
+                        if EmitTables then Components.Add(Row);
+                        Signature.Add('component'+#9+Row);
                     end;
                     eArcObject:
                     begin
                         Arc:=Primitive;
-                        Row:=JSONEscapeString(PCBPrimitiveNetName(Arc))+#9+IntToStr(Arc.XCenter)+#9+IntToStr(Arc.YCenter)+#9+IntToStr(Arc.Radius)+#9+RoutingFloat(Arc.StartAngle)+#9+RoutingFloat(Arc.EndAngle)+#9+IntToStr(Arc.LineWidth)+#9+IntToStr(Arc.Layer);
-                        Arcs.Add(Row+#9+RoutingBool(Arc.Selected)); Signature.Add('arc'+#9+Row);
+                        NetName:=RoutingEncodedText(PCBPrimitiveNetName(Arc),TextKeys,EncodedText);
+                        Row:=NetName+#9+IntToStr(Arc.XCenter)+#9+IntToStr(Arc.YCenter)+#9+IntToStr(Arc.Radius)+#9+
+                            RoutingFloat(Arc.StartAngle)+#9+RoutingFloat(Arc.EndAngle)+#9+IntToStr(Arc.LineWidth)+#9+IntToStr(Arc.Layer);
+                        if EmitTables then Arcs.Add(Row+#9+RoutingBool(Arc.Selected));
+                        Signature.Add('arc'+#9+Row);
                     end;
                     ePolyObject:
                     begin
                         Polygon:=Primitive;
-                        Row:=JSONEscapeString(Polygon.Name)+#9+JSONEscapeString(PCBPrimitiveNetName(Polygon))+#9+IntToStr(Polygon.Layer)+#9+JSONEscapeString(RoutingPolygonDefinition(Polygon));
-                        Polygons.Add(Row); Signature.Add('polygon'+#9+Row);
+                        NetName:=RoutingEncodedText(PCBPrimitiveNetName(Polygon),TextKeys,EncodedText);
+                        Row:=JSONEscapeString(Polygon.Name)+#9+NetName+#9+IntToStr(Polygon.Layer)+#9+
+                            JSONEscapeString(RoutingPolygonDefinition(Polygon));
+                        if EmitTables then Polygons.Add(Row);
+                        Signature.Add('polygon'+#9+Row);
                     end;
                 end;
                 Primitive:=Iterator.NextPCBObject;
@@ -252,70 +451,111 @@ begin
         end;
         Stack:=Board.LayerStack_V7;
         if Stack=nil then begin RoutingFail('PCB has no V7 layer stack.'); Exit; end;
-        LayerCount:=0; LayerObject:=Stack.FirstLayer;
+        LayerCount:=0; Depth:=0; DielectricBelow:=0; HasCopperDepths:=True;
+        CopperDepths:=''; LayerObject:=Stack.FirstLayer;
         while LayerObject<>nil do
         begin
             Inc(LayerCount);
             if LayerCount>64 then begin RoutingFail('Layer stack iteration exceeded 64 entries.'); Exit; end;
-            Row:=IntToStr(LayerCount)+#9+IntToStr(LayerObject.V6_LayerID)+#9+JSONEscapeString(LayerObject.Name)+#9+IntToStr(LayerObject.CopperThickness);
-            Layers.Add(Row); Signature.Add('layer'+#9+Row);
+            if (LayerCount>1) and (DielectricBelow<=0) then HasCopperDepths:=False;
+            LayerID:=LayerObject.V6_LayerID; CopperThickness:=LayerObject.CopperThickness;
+            Row:=IntToStr(LayerCount)+#9+IntToStr(LayerID)+#9+JSONEscapeString(LayerObject.Name)+#9+IntToStr(CopperThickness);
+            if EmitTables then Layers.Add(Row);
+            Signature.Add('layer'+#9+Row);
+            if LayerCount>1 then CopperDepths:=CopperDepths+';';
+            CopperDepths:=CopperDepths+IntToStr(LayerID)+','+RoutingFloat(Depth+CopperThickness/2.0);
+            DielectricBelow:=0;
+            if LayerObject.Dielectric.DielectricType<>eNoDielectric then
+                DielectricBelow:=LayerObject.Dielectric.DielectricHeight;
+            Depth:=Depth+CopperThickness+DielectricBelow;
             LayerObject:=Stack.NextLayer(LayerObject);
         end;
+        if not HasCopperDepths then CopperDepths:='';
+        Signature.Add('routing-depths'+#9+CopperDepths);
+        if EmitTables then
+        begin
+            Summary.Add('field'+#9+'value');
+            Summary.Add('board_file'+#9+JSONEscapeString(Board.FileName));
+            Summary.Add('coordinate_units'+#9+'Altium internal units');
+            Summary.Add('field_encoding'+#9+'json-string');
+            Summary.Add('internal_units_per_mil'+#9+IntToStr(UnitsPerMil));
+            Summary.Add('x_origin_raw'+#9+IntToStr(XOrigin)); Summary.Add('y_origin_raw'+#9+IntToStr(YOrigin));
+            Summary.Add('net_count'+#9+IntToStr(Nets.Count-1)); Summary.Add('pad_count'+#9+IntToStr(Pads.Count-1));
+            Summary.Add('track_segment_count'+#9+IntToStr(Tracks.Count-1)); Summary.Add('via_count'+#9+IntToStr(Vias.Count-1));
+            Summary.Add('connection_object_count'+#9+IntToStr(Connections.Count-1)); Summary.Add('rule_count'+#9+IntToStr(Rules.Count-1));
+            Summary.Add('nonredundant_ratsnest_connections'+#9+IntToStr(RatsnestCount));
+            Summary.Add('redundant_connection_objects'+#9+IntToStr(RedundantCount)); Summary.Add('connectivity_invalid_nets'+#9+IntToStr(InvalidNetCount));
+            Summary.Add('components_count'+#9+IntToStr(Components.Count-1)); Summary.Add('layers_count'+#9+IntToStr(Layers.Count-1));
+            Summary.Add('arcs_count'+#9+IntToStr(Arcs.Count-1)); Summary.Add('polygons_count'+#9+IntToStr(Polygons.Count-1));
+            Summary.Add('copper_depths_raw'+#9+CopperDepths);
+        end;
+        RoutingSignalContext(Board,Summary,Signature);
         Signature.Sort;
-        Summary.Add('field'+#9+'value');
-        Summary.Add('board_file'+#9+JSONEscapeString(Board.FileName));
-        Summary.Add('coordinate_units'+#9+'Altium internal units');
-        Summary.Add('field_encoding'+#9+'json-string');
-        Summary.Add('internal_units_per_mil'+#9+IntToStr(MilsToCoord(1)));
-        Summary.Add('x_origin_raw'+#9+IntToStr(Board.XOrigin)); Summary.Add('y_origin_raw'+#9+IntToStr(Board.YOrigin));
-        Summary.Add('net_count'+#9+IntToStr(Nets.Count-1)); Summary.Add('pad_count'+#9+IntToStr(Pads.Count-1));
-        Summary.Add('track_segment_count'+#9+IntToStr(Tracks.Count-1)); Summary.Add('via_count'+#9+IntToStr(Vias.Count-1));
-        Summary.Add('connection_object_count'+#9+IntToStr(Connections.Count-1)); Summary.Add('rule_count'+#9+IntToStr(Rules.Count-1));
-        Summary.Add('nonredundant_ratsnest_connections'+#9+IntToStr(RatsnestCount));
-        Summary.Add('redundant_connection_objects'+#9+IntToStr(RedundantCount)); Summary.Add('connectivity_invalid_nets'+#9+IntToStr(InvalidNetCount));
-        Summary.Add('components_count'+#9+IntToStr(Components.Count-1)); Summary.Add('layers_count'+#9+IntToStr(Layers.Count-1));
-        Summary.Add('arcs_count'+#9+IntToStr(Arcs.Count-1)); Summary.Add('polygons_count'+#9+IntToStr(Polygons.Count-1));
-        Tables.Values['board']:=Summary.Text; Tables.Values['nets']:=Nets.Text; Tables.Values['pads']:=Pads.Text;
-        Tables.Values['tracks']:=Tracks.Text; Tables.Values['vias']:=Vias.Text; Tables.Values['connections']:=Connections.Text;
-        Tables.Values['rules']:=Rules.Text; Tables.Values['components']:=Components.Text; Tables.Values['layers']:=Layers.Text;
-        Tables.Values['arcs']:=Arcs.Text; Tables.Values['polygons']:=Polygons.Text;
+        if not EmitTables then Exit;
+        Summary.Add('snapshot_id'+#9+SnapshotID);
+        Summary.SaveToFile(Directory+'\board.tsv');
+        Nets.SaveToFile(Directory+'\nets.tsv');
+        Pads.SaveToFile(Directory+'\pads.tsv');
+        Tracks.SaveToFile(Directory+'\tracks.tsv');
+        Vias.SaveToFile(Directory+'\vias.tsv');
+        Connections.SaveToFile(Directory+'\connections.tsv');
+        Rules.SaveToFile(Directory+'\rules.tsv');
+        Components.SaveToFile(Directory+'\components.tsv');
+        Layers.SaveToFile(Directory+'\layers.tsv');
+        Arcs.SaveToFile(Directory+'\arcs.tsv');
+        Polygons.SaveToFile(Directory+'\polygons.tsv');
     finally
-        Summary.Free; Polygons.Free; Arcs.Free; Layers.Free; Components.Free; Rules.Free;
-        Connections.Free; Vias.Free; Tracks.Free; Pads.Free; Nets.Free;
+        LayerLabels.Free; EncodedText.Free; TextKeys.Free;
+        if EmitTables then
+        begin
+            Summary.Free; Polygons.Free; Arcs.Free; Layers.Free; Components.Free; Rules.Free;
+            Connections.Free; Vias.Free; Tracks.Free; Pads.Free; Nets.Free;
+        end;
     end;
 end;
 
 procedure RoutingExport(Board : IPCB_Board; Directory, SnapshotID : String);
-var Tables, Signature, Names : TStringList; I : Integer;
+var Signature : TStringList;
 begin
-    Tables:=TStringList.Create; Signature:=TStringList.Create; Names:=TStringList.Create;
+    Signature:=TStringList.Create;
     try
         RoutingWrite(Directory+'\inventory-status.txt','exporting');
-        RoutingCollect(Board,Tables,Signature); if RoutingFailure<>'' then Exit;
-        Names.CommaText:='board,nets,pads,tracks,vias,connections,rules,components,layers,arcs,polygons';
-        for I:=0 to Names.Count-1 do
-        begin
-            if Names[I]='board' then Tables.Values['board']:=Tables.Values['board']+'snapshot_id'+#9+SnapshotID+#13#10;
-            RoutingWrite(Directory+'\'+Names[I]+'.tsv',Tables.Values[Names[I]]);
-        end;
+        RoutingCollect(Board,Signature,Directory,SnapshotID,nil,nil,nil); if RoutingFailure<>'' then Exit;
         Signature.SaveToFile(Directory+'\board-signature.txt');
         RoutingWrite(Directory+'\inventory-status.txt','complete');
     finally
-        Names.Free; Signature.Free; Tables.Free;
+        Signature.Free;
+    end;
+end;
+
+procedure RoutingCheckBaselineIndex(Board : IPCB_Board; Directory : String;
+                                    IndexKeys, IndexHits : TStringList; IndexObjects : TInterfaceList);
+var Signature, Baseline : TStringList; I : Integer; HasDepths : Boolean;
+begin
+    Signature:=TStringList.Create; Baseline:=TStringList.Create;
+    try
+        Baseline.LoadFromFile(Directory+'\baseline-signature.txt');
+        if IndexKeys<>nil then
+            for I:=0 to IndexKeys.Count-1 do IndexHits.Add('-1');
+        RoutingCollect(Board,Signature,'','',IndexKeys,IndexHits,IndexObjects); if RoutingFailure<>'' then Exit;
+        HasDepths:=False;
+        for I:=0 to Baseline.Count-1 do
+            if Pos('routing-depths'+#9,Baseline[I])=1 then HasDepths:=True;
+        if not HasDepths then
+            for I:=Signature.Count-1 downto 0 do
+                if Pos('routing-depths'+#9,Signature[I])=1 then Signature.Delete(I);
+        if Baseline.IndexOf('routing-context-v1')<0 then
+            for I:=Signature.Count-1 downto 0 do
+                if Pos('routing-',Signature[I])=1 then Signature.Delete(I);
+        if Baseline.Text<>Signature.Text then begin RoutingFail('PCB changed since baseline snapshot; refresh and replan.'); Exit; end;
+    finally
+        Baseline.Free; Signature.Free;
     end;
 end;
 
 procedure RoutingCheckBaseline(Board : IPCB_Board; Directory : String);
-var Tables, Signature, Baseline : TStringList;
 begin
-    Tables:=TStringList.Create; Signature:=TStringList.Create; Baseline:=TStringList.Create;
-    try
-        Baseline.LoadFromFile(Directory+'\baseline-signature.txt');
-        RoutingCollect(Board,Tables,Signature); if RoutingFailure<>'' then Exit;
-        if Baseline.Text<>Signature.Text then begin RoutingFail('PCB changed since baseline snapshot; refresh and replan.'); Exit; end;
-    finally
-        Baseline.Free; Signature.Free; Tables.Free;
-    end;
+    RoutingCheckBaselineIndex(Board,Directory,nil,nil,nil);
 end;
 
 function RoutingFind(Board : IPCB_Board; Kind, NetName, Geometry : String; var Matches : Integer) : IPCB_Primitive;
@@ -458,7 +698,10 @@ begin
             if PairRule<>nil then
                 PairJSON:='{"name":'+RoutingQuote(PairRule.Name)+',"scope1":'+RoutingQuote(PairRule.Scope1Expression)+
                     ',"minimum_gap_raw":'+IntToStr(PairRule.GetState_MinGap(QueryLayer))+',"preferred_gap_raw":'+IntToStr(PairRule.GetState_PreferedGap(QueryLayer))+
-                    ',"maximum_gap_raw":'+IntToStr(PairRule.GetState_MaxGap(QueryLayer))+'}';
+                    ',"maximum_gap_raw":'+IntToStr(PairRule.GetState_MaxGap(QueryLayer))+
+                    ',"minimum_width_raw":'+IntToStr(PairRule.GetState_MinWidth(QueryLayer))+
+                    ',"preferred_width_raw":'+IntToStr(PairRule.GetState_PreferedWidth(QueryLayer))+
+                    ',"maximum_width_raw":'+IntToStr(PairRule.GetState_MaxWidth(QueryLayer))+'}';
             Row:='{"kind":'+RoutingQuote(Fields[0])+',"net":'+RoutingQuote(Fields[1])+',"geometry":'+RoutingQuote(Fields[2])+
                 ',"layer_id":'+IntToStr(QueryLayer)+',"width_rule":'+WidthJSON+',"differential_rule":'+PairJSON+'}';
             Rows.Add(Row);
@@ -535,21 +778,41 @@ begin
     finally MatchesList.Free; Fields.Free; Lines.Free; end;
 end;
 
+function RoutingIndexedMatch(Keys, Hits : TStringList; Found : TInterfaceList;
+                             Key : String; var Matches : Integer) : IPCB_Primitive;
+var Slot, Entry : Integer;
+begin
+    Result:=nil; Matches:=0;
+    Slot:=Keys.IndexOf(Key);
+    if Slot<0 then Exit;
+    if Keys[Slot]<>Key then Exit;
+    Entry:=StrToInt(Hits[Slot]);
+    if Entry=-2 then Matches:=2
+    else if Entry>=0 then
+    begin
+        Matches:=1; Result:=Found.Items[Entry];
+    end;
+end;
+
 procedure RoutingBatch(Board : IPCB_Board; Directory, SnapshotID, RequestID : String; var Completed : Integer; var ResponseText : String);
-var Lines, Fields, Values, Audit : TStringList; I, J, Count, Matches : Integer;
+var Lines, Fields, Values, Audit, IndexKeys, IndexHits : TStringList; IndexObjects : TInterfaceList;
+    I, J, Count, Matches, MinimumWidth, MaximumWidth, UndoSteps : Integer;
     Kinds, Actions, Nets, OldGeometry, NewGeometry : array[1..256] of String;
     Targets, Candidates : array[1..256] of IPCB_Primitive;
     TargetNets : array[1..256] of IPCB_Net;
     Primitive, Existing : IPCB_Primitive; Track : IPCB_Track; Via : IPCB_Via;
-    WidthRule : IPCB_MaxMinWidthConstraint; AllowViaInPad : Boolean;
+    WidthRule : IPCB_MaxMinWidthConstraint; PairRule : IPCB_DifferentialPairsRoutingRule;
+    AllowViaInPad, GroupUndo, UndoOpen : Boolean;
 begin
     ResponseText:='';
     Lines:=TStringList.Create; Fields:=TStringList.Create; Values:=TStringList.Create; Audit:=TStringList.Create;
+    IndexKeys:=TStringList.Create; IndexHits:=TStringList.Create; IndexObjects:=TInterfaceList.Create;
+    IndexKeys.CaseSensitive:=True; IndexKeys.Sorted:=True; IndexKeys.Duplicates:=dupIgnore;
     Count:=0; Completed:=0;
     AllowViaInPad:=Params.Values['allow_via_in_pad']='true';
+    GroupUndo:=Params.Values['undo_group']='true'; UndoOpen:=False; UndoSteps:=0;
     for I:=1 to 256 do begin Targets[I]:=nil; Candidates[I]:=nil; end;
     try
-        RoutingCheckBaseline(Board,Directory); if RoutingFailure<>'' then Exit;
         Lines.LoadFromFile(Directory+'\operations.tsv'); Count:=Lines.Count-1;
         if (Count<1) or (Count>256) then begin RoutingFail('Batch requires 1-256 rows.'); Exit; end;
         if Lines[0]<>'kind'+#9+'action'+#9+'net'+#9+'old_geometry'+#9+'new_geometry' then begin RoutingFail('Invalid batch header.'); Exit; end;
@@ -563,18 +826,35 @@ begin
             OldGeometry[I]:=Fields[3]; NewGeometry[I]:=Fields[4];
             if (Kinds[I]<>'track') and (Kinds[I]<>'via') then begin RoutingFail('Unsupported batch primitive.'); Exit; end;
             if (Actions[I]<>'add') and (Actions[I]<>'edit') and (Actions[I]<>'remove') then begin RoutingFail('Unsupported batch action.'); Exit; end;
-            if Nets[I]<>'' then TargetNets[I]:=RoutingFindNet(Board,Nets[I]) else TargetNets[I]:=nil;
-            if RoutingFailure<>'' then Exit;
+            IndexKeys.Add(RoutingBatchKey('net',Nets[I],''));
+            if Actions[I]<>'add' then IndexKeys.Add(RoutingBatchKey(Kinds[I],Nets[I],OldGeometry[I]))
+            else if OldGeometry[I]<>'-' then begin RoutingFail('Add must omit old geometry.'); Exit; end;
+            if Actions[I]<>'remove' then IndexKeys.Add(RoutingBatchKey(Kinds[I],Nets[I],NewGeometry[I]))
+            else if NewGeometry[I]<>'-' then begin RoutingFail('Remove must omit new geometry.'); Exit; end;
+        end;
+        { Build target matches during the first exact baseline pass. }
+        RoutingCheckBaselineIndex(Board,Directory,IndexKeys,IndexHits,IndexObjects);
+        if RoutingFailure<>'' then Exit;
+        for I:=1 to Count do
+        begin
+            RoutingStatus(Directory,RequestID,'preflight',I,Completed);
+            TargetNets[I]:=nil;
+            if Nets[I]<>'' then
+            begin
+                TargetNets[I]:=RoutingIndexedMatch(IndexKeys,IndexHits,IndexObjects,
+                    RoutingBatchKey('net',Nets[I],''),Matches);
+                if Matches<>1 then begin RoutingFail('Net must resolve to exactly one existing PCB net.'); Exit; end;
+            end;
             if (Actions[I]='add') and (TargetNets[I]=nil) then begin RoutingFail('New copper requires an assigned net.'); Exit; end;
             if Actions[I]<>'add' then
             begin
-                Targets[I]:=RoutingFind(Board,Kinds[I],Nets[I],OldGeometry[I],Matches);
+                Targets[I]:=RoutingIndexedMatch(IndexKeys,IndexHits,IndexObjects,
+                    RoutingBatchKey(Kinds[I],Nets[I],OldGeometry[I]),Matches);
                 if Matches<>1 then begin RoutingFail('Old target does not resolve exactly once.'); Exit; end;
                 for J:=1 to I-1 do
                     if Targets[J]<>nil then
                         if Targets[J].I_ObjectAddress=Targets[I].I_ObjectAddress then begin RoutingFail('Repeated old target.'); Exit; end;
-            end
-            else if OldGeometry[I]<>'-' then begin RoutingFail('Add must omit old geometry.'); Exit; end;
+            end;
             if Actions[I]<>'remove' then
             begin
                 if Kinds[I]='track' then Candidates[I]:=PCBServer.PCBObjectFactory(eTrackObject,eNoDimension,eCreate_Default)
@@ -595,7 +875,8 @@ begin
                         if (Via.LowLayer<>StrToInt(Values[4])) or (Via.HighLayer<>StrToInt(Values[5])) then begin RoutingFail('Via edits must preserve drill span.'); Exit; end;
                     end;
                 end;
-                Existing:=RoutingFind(Board,Kinds[I],Nets[I],NewGeometry[I],Matches);
+                Existing:=RoutingIndexedMatch(IndexKeys,IndexHits,IndexObjects,
+                    RoutingBatchKey(Kinds[I],Nets[I],NewGeometry[I]),Matches);
                 if Matches>0 then
                 begin
                     if Targets[I]=nil then begin RoutingFail('Destination already exists.'); Exit; end;
@@ -604,8 +885,7 @@ begin
                 end;
                 for J:=1 to I-1 do
                     if (Kinds[J]=Kinds[I]) and (NewGeometry[J]=NewGeometry[I]) then begin RoutingFail('Repeated destination.'); Exit; end;
-            end
-            else if NewGeometry[I]<>'-' then begin RoutingFail('Remove must omit new geometry.'); Exit; end;
+            end;
             Audit.Add(IntToStr(I)+#9+Kinds[I]+#9+Actions[I]+#9+'preflight_ok');
         end;
         Audit.SaveToFile(Directory+'\batch-audit.tsv');
@@ -619,7 +899,12 @@ begin
             RoutingStatus(Directory,RequestID,'applying_partial_changes_possible',I,Completed);
             Audit[I]:=IntToStr(I)+#9+Kinds[I]+#9+Actions[I]+#9+'mutation_attempted';
             Audit.SaveToFile(Directory+'\batch-audit.tsv');
-            PCBServer.PreProcess;
+            if not UndoOpen then
+            begin
+                PCBServer.PreProcess;
+                UndoOpen:=True;
+                Inc(UndoSteps);
+            end;
             try
                 if Actions[I]='remove' then
                 begin
@@ -642,31 +927,61 @@ begin
                     finally PCBServer.SendMessageToRobots(Primitive.I_ObjectAddress,c_Broadcast,PCBM_EndModify,c_NoEventData); end;
                     if RoutingGeometry(Primitive)<>NewGeometry[I] then begin RoutingFail('Edited primitive readback failed.'); Exit; end;
                 end;
-            finally PCBServer.PostProcess; end;
+            finally
+                if not GroupUndo then
+                begin
+                    UndoOpen:=False;
+                    PCBServer.PostProcess;
+                end;
+            end;
             { Dominant-rule lookup requires an attached object in AD 26.11.1.
               This is post-write validation: failure leaves the attempted row
               explicitly partial, with its Undo transaction and audit intact. }
             if (Kinds[I]='track') and (Actions[I]<>'remove') then
             begin
                 Track:=Primitive;
-                WidthRule:=Board.FindDominantRuleForObject(Track,eRule_MaxMinWidth);
-                if WidthRule=nil then
-                begin RoutingFail('Attached track has no dominant width rule; inspect the attempted row and Undo before retrying.'); Exit; end;
-                if (Track.Width<WidthRule.MinWidth(Track.Layer)) or (Track.Width>WidthRule.MaxWidth(Track.Layer)) then
+                if TargetNets[I].InDifferentialPair then
+                begin
+                    PairRule:=Board.FindDominantRuleForObject(Track,eRule_DifferentialPairsRouting);
+                    if PairRule=nil then
+                    begin RoutingFail('Attached pair track has no dominant differential routing rule; inspect the attempted row and Undo before retrying.'); Exit; end;
+                    MinimumWidth:=PairRule.GetState_MinWidth(Track.Layer);
+                    MaximumWidth:=PairRule.GetState_MaxWidth(Track.Layer);
+                end
+                else
+                begin
+                    WidthRule:=Board.FindDominantRuleForObject(Track,eRule_MaxMinWidth);
+                    if WidthRule=nil then
+                    begin RoutingFail('Attached track has no dominant width rule; inspect the attempted row and Undo before retrying.'); Exit; end;
+                    MinimumWidth:=WidthRule.MinWidth(Track.Layer);
+                    MaximumWidth:=WidthRule.MaxWidth(Track.Layer);
+                end;
+                if (Track.Width<MinimumWidth) or (Track.Width>MaximumWidth) then
                 begin RoutingFail('Applied track width is outside its native dominant rule; inspect the attempted row and Undo before retrying.'); Exit; end;
             end;
             Inc(Completed);
             Audit[I]:=IntToStr(I)+#9+Kinds[I]+#9+Actions[I]+#9+'readback_pending_exact_batch_comparison';
             Audit.SaveToFile(Directory+'\batch-audit.tsv');
         end;
+        if UndoOpen then
+        begin
+            UndoOpen:=False;
+            PCBServer.PostProcess;
+        end;
         RoutingExport(Board,Directory,SnapshotID); if RoutingFailure<>'' then Exit;
         RoutingStatus(Directory,RequestID,'complete_native_drc_not_checked',Count,Completed);
         Client.SendMessage('PCB:Zoom','Action=Redraw',255,Client.CurrentView);
-        ResponseText:='{"applied":true,"completed_rows":'+IntToStr(Completed)+',"native_drc_checked":false,"saved":false}';
+        ResponseText:='{"applied":true,"completed_rows":'+IntToStr(Completed)+
+            ',"undo_steps":'+IntToStr(UndoSteps)+',"native_drc_checked":false,"saved":false}';
     finally
-        { Factory objects never added to the board are released exactly once. }
-        for I:=1 to 256 do if Candidates[I]<>nil then PCBServer.DestroyPCBObject(Candidates[I]);
-        Audit.Free; Values.Free; Fields.Free; Lines.Free;
+        try
+            if UndoOpen then PCBServer.PostProcess;
+        finally
+            { Factory objects never added to the board are released exactly once. }
+            for I:=1 to 256 do if Candidates[I]<>nil then PCBServer.DestroyPCBObject(Candidates[I]);
+            IndexObjects.Free; IndexHits.Free; IndexKeys.Free;
+            Audit.Free; Values.Free; Fields.Free; Lines.Free;
+        end;
     end;
 end;
 

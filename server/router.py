@@ -155,7 +155,7 @@ def shapes_from_layout(lay, signal_layers):
 class Board:
     """The routing grids over an area: per layer, a track grid and a via grid."""
 
-    def __init__(self, area, pitch, layers, width, clearance, via_diameter, nets):
+    def __init__(self, area, pitch, layers, width, clearance, via_diameter, nets, *, hard_bounds=None):
         self.x0, self.y0, x1, y1 = area
         self.pitch = float(pitch)
         self.nx = int(math.ceil((x1 - self.x0) / self.pitch)) + 1
@@ -163,6 +163,7 @@ class Board:
         if self.nx * self.ny > 2_000_000:
             raise RouteError(f"the area is too large for a {pitch} mil grid ({self.nx} x {self.ny} cells)")
         self.layers = list(layers)
+        self.hard_bounds = hard_bounds
         self.width, self.clearance, self.via_r = width, clearance, via_diameter / 2
         self.net_id = {}
         for n in nets:
@@ -214,11 +215,27 @@ class Board:
         if not (0 <= ix < self.nx and 0 <= iy < self.ny):
             return False
         v = self.track[layer][iy * self.nx + ix]
-        return v == 0 or v == net
+        return v in (0, net) and (
+            self.hard_bounds is None or self.inside_bounds(self.xy(ix, iy), self.width / 2))
 
     def via_free(self, ix, iy, net):
         k = iy * self.nx + ix
-        return all(self.via[l][k] in (0, net) for l in self.layers)
+        return (self.hard_bounds is None or self.inside_bounds(self.xy(ix, iy), self.via_r)) and all(
+            self.via[l][k] in (0, net) for l in self.layers)
+
+    def inside_bounds(self, point, radius):
+        if self.hard_bounds is None:
+            return True
+        x1, y1, x2, y2 = self.hard_bounds
+        x, y = point
+        return x1 + radius <= x <= x2 - radius and y1 + radius <= y <= y2 - radius
+
+    def fits_bounds(self, tracks, vias):
+        if self.hard_bounds is None:
+            return True
+        return all(self.inside_bounds(track[key], track["width"] / 2)
+                   for track in tracks for key in ("start", "end")) and all(
+            self.inside_bounds(via, self.via_r) for via in vias)
 
 
 def route_one(board, net_name, start, end, start_layers, end_layers,
@@ -231,6 +248,10 @@ def route_one(board, net_name, start, end, start_layers, end_layers,
     clearance on all physical layers represented in the board."""
     net = board.id(net_name)
     s, e = board.cell(*start), board.cell(*end)
+    if any(not board.inside_bounds(point, board.width / 2) for point in (start, end)):
+        return None
+    if s == e and start != end:
+        return None
     layers = board.layers if routing_layers is None else [
         layer for layer in board.layers if layer in routing_layers
     ]
@@ -243,7 +264,7 @@ def route_one(board, net_name, start, end, start_layers, end_layers,
 
     openq, came, cost = [], {}, {}
     for l in start_layers:
-        if l in layers:
+        if l in layers and board.free(l, *s, net):
             k = (s[0], s[1], l)
             cost[k] = 0.0
             came[k] = (None, None)
@@ -262,7 +283,7 @@ def route_one(board, net_name, start, end, start_layers, end_layers,
             ni, nj = i + di, j + dj
             if not (i1 <= ni <= i2 and j1 <= nj <= j2):
                 continue
-            if not board.free(l, ni, nj, net) and (ni, nj) != e:
+            if not board.free(l, ni, nj, net):
                 continue
             step = P * (1.4142 if di and dj else 1.0)
             if prev_dir is not None and prev_dir != d:

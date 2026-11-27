@@ -23,17 +23,24 @@ end;
 
 // Helper function to escape JSON strings
 function JSONEscapeString(const S: String): String;
-var I, Code : Integer;
+var I, Code, SpanStart : Integer;
 begin
     Result := '';
+    SpanStart := 1;
     for I := 1 to Length(S) do
     begin
         Code := Ord(S[I]);
-        if S[I] = '\' then Result := Result + '\\'
-        else if S[I] = '"' then Result := Result + '\"'
-        else if (Code < 32) or (Code > 126) then Result := Result + '\u' + IntToHex(Code, 4)
-        else Result := Result + S[I];
+        if (Code = 34) or (Code = 92) or (Code < 32) or (Code > 126) then
+        begin
+            // Copy the printable ASCII span preceding the character to escape.
+            Result := Result + Copy(S, SpanStart, I - SpanStart);
+            if (Code = 34) or (Code = 92) then Result := Result + '\' + S[I]
+            else Result := Result + '\u' + IntToHex(Code, 4);
+            SpanStart := I + 1;
+        end;
     end;
+    if SpanStart = 1 then Result := S
+    else Result := Result + Copy(S, SpanStart, Length(S) - SpanStart + 1);
 end;
 
 // Function to create a JSON name-value pair

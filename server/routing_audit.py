@@ -365,7 +365,8 @@ def category(rule):
 SNAPSHOT_SCHEMA = "altium-mcp-routing-snapshot/v1"
 SNAPSHOT_LIMITS = [
     "Legacy AllLayers inventory can omit extended mechanical objects.",
-    "Component placement, straight/arc tracks, copper stack and polygon definitions are exported.",
+    "Includes component placement, straight/arc tracks, copper stack and polygon definitions.",
+    "New exports capture the board outline, native differential pair definitions and copper center depths.",
     "Poured copper, complete pad stacks, keepout semantics and reference continuity are not modeled.",
     "Cached connection counts require native reconciliation; invalid flags do not prove topology.",
     "Unchanged rule records do not establish complete batch or online DRC coverage.",
@@ -500,6 +501,10 @@ def compare_snapshots(
         result["regressions"] = [
             r for r in result["regressions"] if r != "Immutable rules records changed"
         ]
+    for field, label in (("outline_raw", "Board outline"), ("differential_pairs_json", "Differential pairs"),
+                         ("copper_depths_raw", "Copper center depths")):
+        if field in before["board"] and field in after["board"] and before["board"][field] != after["board"][field]:
+            result["regressions"].append(f"{label} changed")
     for name in EXTRA_HEADERS:
         if (name in before["tables"]) != (name in after["tables"]):
             raise ValueError(f"Snapshot coverage differs for {name}")

@@ -2,13 +2,14 @@
 
 import asyncio
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from server import main
-from server.altium_transport import atomic_json
+from server.altium_transport import ResidentSession, atomic_json
 
 
 class TransportTests(unittest.IsolatedAsyncioTestCase):
@@ -23,8 +24,10 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
             RESPONSE_FILE=self.response, PROGRESS_FILE=self.root / "progress.txt",
             STUCK_MARKER=self.root / "mcp_script_stuck.txt", START_TIMEOUT=0.08,
             EXCHANGE_POLL=0.005, ROUTING_MUTATION_TIMEOUT=0.25,
-            ROUTING_NATIVE_DRC_TIMEOUT=0.25,
+            ROUTING_NATIVE_DRC_TIMEOUT=0.25, RESIDENT_POLL=0.005,
+            RESIDENT_PICKUP_TIMEOUT=0.04, RESIDENT_DRAIN_TIMEOUT=0.04,
         ))
+        self.start_patch(patch.dict(main.os.environ, {"ALTIUM_MCP_REUSE_BRIDGE": "0"}))
         self.start_patch(patch.object(main, "altium_limit_problem", return_value=None))
         self.start_patch(patch.object(main.sandbox, "altium_hung", return_value=False))
         self.start_patch(patch.object(main, "_dismiss_altium_dialogs"))
@@ -36,20 +39,161 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def claim(self):
-        request = json.loads(self.request.read_text(encoding="utf-8-sig"))
-        self.request.unlink()
+    def claim(self, path=None):
+        path = self.request if path is None else path
+        request = json.loads(path.read_text(encoding="utf-8-sig"))
+        path.unlink()
         return request
 
     def reply(self, request):
         atomic_json(self.response, dict(success=True, request_id=request["request_id"], result=request["command"]))
+
+    def enable_resident(self, bridge):
+        bridge._resident_enabled = True
+        bundle = self.root / "Altium_API_123456abcdef.pas"
+        self.start_patch(patch.object(main.script_bundle, "ensure_bundle", return_value=bundle))
+        bridge.config.script_path = str(main.DEFAULT_SCRIPT_PATH)
+        return bundle
+
+    async def test_resident_reused_by_separate_servers_and_drained_for_sandbox(self):
+        first, second = main.AltiumBridge(), main.AltiumBridge()
+        bundle = self.enable_resident(first)
+        second._resident_enabled = True
+        second.config.script_path = str(main.DEFAULT_SCRIPT_PATH)
+        leases = []
+
+        async def native():
+            session = ResidentSession.load(self.root)
+            leases.append(session)
+            session.ready.touch()
+            try:
+                while session.lease.exists():
+                    if session.request.exists():
+                        self.reply(self.claim(session.request))
+                    await asyncio.sleep(.001)
+            finally:
+                session.ready.unlink()
+
+        workers = []
+
+        def launch(path, entry):
+            self.assertEqual((path, entry), (bundle, "RunResident"))
+            workers.append(asyncio.create_task(native()))
+            return True
+
+        with patch.object(first, "_launch_bridge_file", side_effect=launch) as boot, \
+                patch.object(second, "_launch_bridge_file") as unexpected:
+            try:
+                self.assertTrue((await first.execute_command("list_open_documents", {}))["success"])
+                self.assertTrue((await second.execute_command("pcb_routing", {"operation": "snapshot"}))["success"])
+                async with second.exclusive_execution() as problem:
+                    self.assertIsNone(problem)
+                    self.assertFalse(leases[0].lease.exists())
+                    self.assertFalse(leases[0].ready.exists())
+                boot.assert_called_once()
+                unexpected.assert_not_called()
+            finally:
+                for worker in workers:
+                    worker.cancel()
+                await asyncio.gather(*workers, return_exceptions=True)
+
+    async def test_stale_resident_mailbox_withdrawn_before_one_shot_fallback(self):
+        bridge = main.AltiumBridge()
+        self.enable_resident(bridge)
+        executable = os.path.normcase(os.path.normpath(bridge.config.altium_exe_path))
+        stale = ResidentSession.start(self.root, "123456abcdef", executable)
+        stale.ready.touch()
+
+        async def launch(command):
+            self.assertEqual(command, "pcb_routing")
+            self.assertFalse(stale.request.exists())
+            self.assertFalse(stale.lease.exists())
+            self.reply(self.claim())
+            return True
+
+        with patch.object(bridge, "run_altium_script", side_effect=launch) as one_shot, \
+                patch.object(bridge, "_launch_bridge_file") as resident_launch:
+            result = await bridge.execute_command("pcb_routing", {"operation": "batch"})
+        self.assertTrue(result["success"])
+        one_shot.assert_awaited_once()
+        resident_launch.assert_not_called()
+
+    async def test_live_resident_can_finish_ui_work_before_claiming_next_request(self):
+        bridge = main.AltiumBridge()
+        self.enable_resident(bridge)
+        executable = os.path.normcase(os.path.normpath(bridge.config.altium_exe_path))
+        session = ResidentSession.start(self.root, "123456abcdef", executable)
+        session.ready.touch()
+        settling = session.settling
+        settling.touch()
+
+        async def resume_polling():
+            while not session.request.exists():
+                await asyncio.sleep(.002)
+            await asyncio.sleep(.1)
+            settling.unlink(missing_ok=True)
+            if session.request.exists():
+                self.reply(self.claim(session.request))
+
+        async def launch(command):
+            self.reply(self.claim())
+            return True
+
+        with patch.object(main, "RESIDENT_SETTLING_PICKUP_TIMEOUT", .5), \
+                patch.object(bridge, "run_altium_script", side_effect=launch) as one_shot:
+            worker = asyncio.create_task(resume_polling())
+            try:
+                result = await bridge.execute_command("create_pcb_rule", {})
+                self.assertTrue(result["success"])
+                one_shot.assert_not_called()
+            finally:
+                worker.cancel()
+                await asyncio.gather(worker, return_exceptions=True)
+
+    async def test_released_resident_ends_the_settling_wait_without_stealing_request(self):
+        session = ResidentSession.start(self.root, "123456abcdef", "X2.EXE")
+        session.ready.touch()
+        session.settling.touch()
+        session.request.touch()
+
+        async def release():
+            await asyncio.sleep(.09)
+            session.lease.unlink()
+
+        with patch.object(main, "RESIDENT_SETTLING_PICKUP_TIMEOUT", 5):
+            worker = asyncio.create_task(release())
+            started, _ = await asyncio.gather(
+                asyncio.wait_for(main.AltiumBridge._wait_for_start(.04, session.request, resident=session), .6),
+                worker,
+            )
+        self.assertFalse(started)
+        self.assertTrue(session.request.exists())
+
+    async def test_resident_claim_at_pickup_deadline_is_not_replayed(self):
+        bridge = main.AltiumBridge()
+        self.enable_resident(bridge)
+        executable = os.path.normcase(os.path.normpath(bridge.config.altium_exe_path))
+        session = ResidentSession.start(self.root, "123456abcdef", executable)
+        session.ready.touch()
+
+        async def pickup_deadline(timeout, path, *, resident):
+            self.assertEqual(path, session.request)
+            self.assertEqual(resident, session)
+            self.reply(self.claim(path))
+            return False
+
+        with patch.object(bridge, "_wait_for_start", side_effect=pickup_deadline), \
+                patch.object(bridge, "run_altium_script") as one_shot:
+            result = await bridge.execute_command("pcb_routing", {"operation": "batch"})
+        self.assertTrue(result["success"])
+        one_shot.assert_not_called()
 
     async def test_clients_share_an_os_writer_lock(self):
         active = 0
         maximum = 0
         jobs = []
 
-        async def launch():
+        async def launch(command):
             nonlocal active, maximum
             request = self.claim()
             active += 1
@@ -79,7 +223,7 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await legacy.acquire(1))
         bridge = main.AltiumBridge()
 
-        async def complete():
+        async def complete(command):
             self.reply(self.claim())
             return True
 
@@ -94,7 +238,7 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue((await task)["success"])
 
     async def test_wrong_response_id_blocks_next_launch(self):
-        async def launch():
+        async def launch(command):
             self.claim()
             atomic_json(self.response, {"success": True, "request_id": "wrong"})
             return True
@@ -111,7 +255,7 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
     async def test_routing_mutation_and_native_drc_can_exceed_standard_timeout(self):
         jobs = []
 
-        async def launch():
+        async def launch(command):
             request = self.claim()
 
             async def complete():
@@ -135,7 +279,7 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(legacy=legacy):
                 bridge = main.AltiumBridge()
 
-                async def abandon():
+                async def abandon(command):
                     self.claim()
                     return True
 
@@ -148,7 +292,7 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
                 restarted = main.AltiumBridge()
                 self.assertTrue(restarted.command_status()["terminal_response_available"])
 
-                async def complete():
+                async def complete(command):
                     self.reply(self.claim())
                     return True
 
@@ -163,7 +307,7 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         launched, release = asyncio.Event(), asyncio.Event()
         jobs = []
 
-        async def launch():
+        async def launch(command):
             request = self.claim()
 
             async def complete():
@@ -200,7 +344,7 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
             started.set()
             await complete.wait()
 
-        async def launch():
+        async def launch(command):
             self.reply(self.claim())
             return True
 
@@ -221,7 +365,7 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
     async def test_waits_for_transient_hung_state_before_rejecting_a_command(self):
         bridge = main.AltiumBridge()
 
-        async def launch():
+        async def launch(command):
             self.reply(self.claim())
             return True
 
@@ -252,14 +396,14 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         drc_request = None
         driver_started = asyncio.Event()
 
-        async def launch_first():
+        async def launch_first(command):
             request = self.claim()
             first_started.set()
             await first_complete.wait()
             self.reply(request)
             return True
 
-        async def launch_drc():
+        async def launch_drc(command):
             nonlocal drc_request
             drc_request = self.claim()
             return True
@@ -300,7 +444,7 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         bridge.STOP_SETTLE = 0
         published = asyncio.Event()
 
-        async def launch():
+        async def launch(command):
             request = self.claim()
             if request["command"] == "query_restore":
                 self.reply(request)

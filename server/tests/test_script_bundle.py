@@ -73,6 +73,47 @@ class BundleTests(unittest.TestCase):
             self.assertNotEqual(second, first)
             self.assertIn("ShowMessage('new')", second.read_text(encoding="latin-1"))
 
+    def test_real_routing_bundles_guard_the_request_and_include_selected_dispatch(self):
+        project = HERE.parent / "AltiumScript" / "Altium_API.PrjScr"
+        units = sb.project_units(project)
+        selected = {
+            "create_pcb_rule": "ExecuteCreatePCBRule",
+            "get_unrouted_connections": "ExecuteGetUnroutedConnections",
+            "list_open_documents": "ListOpenDocuments",
+            "pcb_routing": "ExecutePCBRouting",
+        }
+        full = sb.bundle_text(units)
+        for command, entry in selected.items():
+            with self.subTest(command=command):
+                specialized = sb.bundle_text(units, command)
+                guard = f"if (RequestText(RequestData, 'command', '') <> '{command}') then Exit;"
+                self.assertLess(specialized.index(guard), specialized.index("DeleteFile(REQUEST_FILE)"))
+                self.assertRegex(specialized, rf"(?i)\b{entry}\s*\(")
+                self.assertNotIn("ExecuteCreateSymbolsBatch", specialized)
+                self.assertLess(len(specialized), len(full) // 4)
+                self.assertEqual(defined_before_use(specialized), [])
+        with tempfile.TemporaryDirectory() as directory:
+            narrow = sb.ensure_bundle(project, directory, command="pcb_routing")
+            legacy = sb.ensure_bundle(project, directory)
+            self.assertNotEqual(narrow, legacy)
+            self.assertTrue(narrow.exists())
+            self.assertEqual(narrow, sb.ensure_bundle(project, directory, command="pcb_routing"))
+
+    def test_resident_bundle_keeps_only_routing_commands_and_binds_its_ticket(self):
+        project = HERE.parent / "AltiumScript" / "Altium_API.PrjScr"
+        with tempfile.TemporaryDirectory() as directory:
+            resident = sb.ensure_bundle(project, directory, resident=True)
+            text = resident.read_text(encoding="latin-1")
+            self.assertIn("procedure RunResident;", text)
+            self.assertNotIn("ExecuteCreateSymbolsBatch", text)
+            self.assertEqual(defined_before_use(text), [])
+            self.assertNotIn(sb.RESIDENT_KEY_PLACEHOLDER, text)
+            key = resident.stem.rsplit("_", 1)[1]
+            self.assertIn(f"BridgeResidentKey = '{key}'", text)
+            for command in sb.ROUTING_COMMANDS:
+                self.assertIn(f"RequestText(RequestData, 'command', '') <> '{command}'", text)
+            self.assertEqual(resident, sb.ensure_bundle(project, directory, resident=True))
+
     def test_keeps_the_newest_bundles(self):
         with tempfile.TemporaryDirectory() as d:
             unit = self.write(d, "u.pas", "procedure Run;\nbegin\nend;\n")

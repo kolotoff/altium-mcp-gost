@@ -12064,10 +12064,12 @@ begin
 end;
 
 function PCBPrimitiveNetName(Primitive: IPCB_Primitive): String;
+var Net: IPCB_Net;
 begin
     Result := '';
-    if (Primitive <> Nil) and (Primitive.Net <> Nil) then
-        Result := Primitive.Net.Name;
+    if Primitive = Nil then Exit;
+    Net := Primitive.Net;
+    if Net <> Nil then Result := Net.Name;
 end;
 
 function PCBLayerDisplayName(Board: IPCB_Board; Layer: TLayer): String;
@@ -13133,6 +13135,7 @@ begin
             Processed.Add(Target.Name.Text);
         end;
 
+        AddJSONProperty(ResultProps, 'board_path', Board.FileName);
         AddJSONInteger(ResultProps, 'checked_count', Targets.Count);
         AddJSONNumber(ResultProps, 'clearance_mils', ClearanceMils);
         AddJSONInteger(ResultProps, 'close_pairs_measured', PairsChecked);
@@ -13388,7 +13391,7 @@ begin
     end;
 end;
 
-function PlaceComponentsFromList(PlacementsList: TStringList): String;
+function PlaceComponentsFromList(PlacementsList: TStringList; RequireAll: Boolean): String;
 var
     Board            : IPCB_Board;
     Component        : IPCB_Component;
@@ -13408,6 +13411,7 @@ var
     xorigin, yorigin : TCoord;
     i                : Integer;
     PlacedCount      : Integer;
+    Editing          : Boolean;
 begin
     Board := GetBoardSafe(0);
     if (Board = nil) then
@@ -13415,6 +13419,17 @@ begin
         Result := 'ERROR: No PCB document is currently active';
         Exit;
     end;
+
+    if RequireAll then
+        for i := 0 to PlacementsList.Count - 1 do
+        begin
+            Designator := Trim(GetFieldFromPipeString(PlacementsList[i], 0));
+            if Board.GetPcbComponentByRefDes(Designator) = nil then
+            begin
+                Result := 'ERROR: Missing component ' + Designator + '. No placements applied.';
+                Exit;
+            end;
+        end;
 
     xorigin := Board.XOrigin;
     yorigin := Board.YOrigin;
@@ -13424,10 +13439,12 @@ begin
     PlacedArray := TStringList.Create;
     MovedTexts := TStringList.Create;
     PlacedCount := 0;
+    Editing := False;
 
     try
         // Single transaction for the whole batch (one undo step)
         PCBServer.PreProcess;
+        Editing := True;
 
         for i := 0 to PlacementsList.Count - 1 do
         begin
@@ -13502,6 +13519,7 @@ begin
             end;
         end;
 
+        Editing := False;
         PCBServer.PostProcess;
 
         // Rebuild the stroke geometry of every text placed: batch DRC checks a
@@ -13535,6 +13553,7 @@ begin
         ResultProps.Free;
         MissingArray.Free;
         PlacedArray.Free;
+        if Editing then PCBServer.PostProcess;
         MovedTexts.Free;
     end;
 end;

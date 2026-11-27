@@ -436,6 +436,18 @@
       "description": "Read dominant width/impedance and pair-gap rules for exact existing objects"
     },
     {
+      "name": "measure_pcb_path_lengths",
+      "description": "Measure two-pad track-and-via paths and report differential pair skew"
+    },
+    {
+      "name": "plan_pcb_diff_pair",
+      "description": "Plan or apply a native differential pair with optional paired through vias"
+    },
+    {
+      "name": "plan_pcb_length_match",
+      "description": "Plan or apply length tuning for individual nets or multiple differential pairs"
+    },
+    {
       "name": "get_library_symbol_primitive_font_dump",
       "description": "Return a read-only primitive and font dump for the currently open schematic library symbol"
     },

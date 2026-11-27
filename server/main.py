@@ -39,7 +39,7 @@ import script_bundle
 import pcblib_file
 import uuid
 
-from server.altium_transport import PendingCommand, atomic_json
+from server.altium_transport import PendingCommand, ResidentSession, atomic_json
 from server.project_validation import validate_project
 from server.routing_mcp import register_routing_tools
 
@@ -161,6 +161,10 @@ START_TIMEOUT_COLD = 240
 RESPONSE_TIMEOUT = 120
 RESPONSE_TIMEOUT_MAX = 30 * 60
 EXCHANGE_POLL = 0.25
+RESIDENT_POLL = 0.05
+RESIDENT_PICKUP_TIMEOUT = 0.5
+RESIDENT_SETTLING_PICKUP_TIMEOUT = 5.0
+RESIDENT_DRAIN_TIMEOUT = 1.0
 ROUTING_MUTATION_TIMEOUT = 600
 ROUTING_NATIVE_DRC_TIMEOUT = 900
 
@@ -619,6 +623,7 @@ class AltiumBridge:
         self._exchange_lock = ExchangeLock(EXCHANGE_DIR / "bridge.lock", EXCHANGE_DIR / "command.lock")
         self._pending = PendingCommand(EXCHANGE_DIR)
         self._command_tasks = set()
+        self._resident_enabled = os.environ.get("ALTIUM_MCP_REUSE_BRIDGE", "1") != "0"
 
     def command_status(self) -> dict:
         """Inspect the pending receipt without invoking an Altium script."""
@@ -691,6 +696,8 @@ class AltiumBridge:
                 if (problem is None and bridge_script and
                         await _altium_remains_hung(self.config.altium_exe_path)):
                     problem = {"success": False, "error": ALTIUM_HUNG_ERROR}
+                if problem is None and not bridge_script:
+                    await self._retire_resident(ResidentSession.load(EXCHANGE_DIR))
                 yield problem
             finally:
                 self._exchange_lock.release()
@@ -769,6 +776,7 @@ class AltiumBridge:
             await run
         except (asyncio.CancelledError, Exception):
             pass
+        await self._retire_resident(ResidentSession.load(EXCHANGE_DIR))
         await self.stop_script_debugger()
         await asyncio.sleep(self.STOP_SETTLE)
         receipt = self._pending.load()
@@ -806,12 +814,94 @@ class AltiumBridge:
             logger.error(f"Could not send -REditScript:Stop: {e}")
 
     @staticmethod
-    async def _wait_for_start(timeout: float) -> bool:
+    async def _wait_for_start(timeout: float, request_file: Optional[Path] = None, *,
+                              resident: Optional[ResidentSession] = None) -> bool:
         """The bridge claims a request before dispatching it."""
-        deadline = time.monotonic() + timeout
-        while REQUEST_FILE.exists() and time.monotonic() < deadline:
-            await asyncio.sleep(EXCHANGE_POLL)
-        return not REQUEST_FILE.exists()
+        path = REQUEST_FILE if request_file is None else request_file
+        poll = EXCHANGE_POLL if request_file is None else RESIDENT_POLL
+        began = time.monotonic()
+        deadline = began + timeout
+        settling = False
+        while path.exists():
+            if resident is not None:
+                if not resident.lease.exists() or not resident.ready.exists():
+                    return False
+                if not settling and resident.settling.exists():
+                    settling = True
+                    deadline = began + max(timeout, RESIDENT_SETTLING_PICKUP_TIMEOUT)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            await asyncio.sleep(min(poll, remaining))
+        return True
+
+    @staticmethod
+    async def _retire_resident(session: Optional[ResidentSession]) -> None:
+        """Stop accepting work, then give the native idle loop time to exit."""
+        if session is None:
+            return
+        session.lease.unlink(missing_ok=True)
+        deadline = time.monotonic() + RESIDENT_DRAIN_TIMEOUT
+        while session.ready.exists() and time.monotonic() < deadline:
+            await asyncio.sleep(RESIDENT_POLL)
+        # A killed Altium process can leave a marker. No future call can
+        # publish to this session's mailbox after its lease is revoked.
+        session.ready.unlink(missing_ok=True)
+        session.settling.unlink(missing_ok=True)
+
+    def _resident_bundle(self, command: str) -> Optional[Path]:
+        if (not self._resident_enabled or command not in script_bundle.ROUTING_COMMANDS
+                or Path(self.config.script_path).resolve() != DEFAULT_SCRIPT_PATH.resolve()
+                or STUCK_MARKER.exists()):
+            return None
+        try:
+            return script_bundle.ensure_bundle(self._resolve_msix_path(self.config.script_path),
+                                               EXCHANGE_DIR / "bridge", resident=True)
+        except (OSError, ValueError) as error:
+            logger.warning("Could not build the resident bridge: %s", error)
+            self._resident_enabled = False
+            return None
+
+    async def _try_resident(self, payload: dict, receipt: dict, cold_start: bool) -> bool:
+        """Return whether a resident run claimed this request.
+
+        Fall back only after withdrawing the request from its unique mailbox.
+        If Altium won the delete race, keep waiting for its terminal response.
+        """
+        bundle = self._resident_bundle(payload["command"])
+        session = ResidentSession.load(EXCHANGE_DIR)
+        if bundle is None:
+            await self._retire_resident(session)
+            return False
+        bundle_key = bundle.stem.rsplit("_", 1)[1]
+        executable = os.path.normcase(os.path.normpath(self.config.altium_exe_path))
+        reuse = (session is not None and session.bundle_key == bundle_key
+                 and session.executable == executable
+                 and session.lease.exists() and session.ready.exists() and not cold_start)
+        if not reuse:
+            await self._retire_resident(session)
+            session = ResidentSession.start(EXCHANGE_DIR, bundle_key, executable)
+        self._pending.write(receipt)
+        atomic_json(session.request, payload)
+        if reuse:
+            logger.info("Reusing native bridge for %s", payload["command"])
+            started = await self._wait_for_start(RESIDENT_PICKUP_TIMEOUT, session.request, resident=session)
+        elif self._launch_bridge_file(bundle, "RunResident"):
+            started = await self._wait_for_start(START_TIMEOUT_COLD if cold_start else START_TIMEOUT, session.request)
+        else:
+            started = False
+        if started:
+            return True
+        try:
+            session.request.unlink()
+        except FileNotFoundError:
+            return True
+        await self._retire_resident(session)
+        if not reuse:
+            logger.warning("Resident native bridge did not start; using one-shot execution")
+            self._resident_enabled = False
+            _dismiss_altium_dialogs(message_boxes_only=True, executable=self.config.altium_exe_path)
+        return False
 
     async def _execute_command_locked(self, command: str, params: Dict[str, Any], timeout: float = RESPONSE_TIMEOUT,
                                       picked_up: Optional[asyncio.Event] = None) -> Dict[str, Any]:
@@ -838,37 +928,33 @@ class AltiumBridge:
                 "created_unix": time.time(),
                 "operation_directory": params.get("operation_directory"),
             }
-            self._pending.write(receipt)
-            atomic_json(REQUEST_FILE, {"command": command, "request_id": request_id, **params})
-
-            logger.info(f"Wrote request file for command: {command} (request_id={request_id})")
+            payload = {"command": command, "request_id": request_id, **params}
+            logger.info("Dispatching %s (request_id=%s)", command, request_id)
 
             cold_start = not self._altium_running()
             if cold_start:
                 logger.info("Altium is not running - launching it, allowing time for startup")
 
-            success = await self.run_altium_script()
-            if not success:
-                REQUEST_FILE.unlink(missing_ok=True)
-                self._pending.discard()
-                return {"success": False, "error": "Failed to run Altium script"}
-
-            # A running Altium picks the request up within seconds. If it does
-            # not and a script of ours is stuck in the debugger, stop it and
-            # launch once more. The script consumes request.json, so a queued
-            # first launch cannot run it twice. Any other script is left alone:
-            # it may be one the user is running or debugging.
-            started = await self._wait_for_start(START_TIMEOUT_COLD if cold_start else START_TIMEOUT)
+            resident = await self._try_resident(payload, receipt, cold_start)
             recovered = False
-            if not started and STUCK_MARKER.exists():
-                logger.warning(f"Altium did not pick up the request within {START_TIMEOUT}s "
-                               f"and a script of ours is stuck - attempting recovery")
-                await self.stop_script_debugger()
-                await asyncio.sleep(2)
-                recovered = True
-                if REQUEST_FILE.exists():
-                    await self.run_altium_script()
-                started = await self._wait_for_start(START_TIMEOUT)
+            started = resident
+            if not resident:
+                self._pending.write(receipt)
+                atomic_json(REQUEST_FILE, payload)
+                if not await self.run_altium_script(command):
+                    REQUEST_FILE.unlink(missing_ok=True)
+                    self._pending.discard()
+                    return {"success": False, "error": "Failed to run Altium script"}
+                started = await self._wait_for_start(START_TIMEOUT_COLD if cold_start else START_TIMEOUT)
+                # Only stop a script the MCP previously marked as stuck.
+                if not started and STUCK_MARKER.exists():
+                    logger.warning("Bridge did not pick up the request; attempting executor recovery")
+                    await self.stop_script_debugger()
+                    await asyncio.sleep(2)
+                    recovered = True
+                    if REQUEST_FILE.exists():
+                        await self.run_altium_script(command)
+                    started = await self._wait_for_start(START_TIMEOUT)
 
             if not started:
                 try:
@@ -921,9 +1007,11 @@ class AltiumBridge:
                     progress_mark, last_progress = mark, now
                 if now - last_progress > timeout or now - start_time > max(RESPONSE_TIMEOUT_MAX, timeout):
                     break
-                await asyncio.sleep(EXCHANGE_POLL)
+                await asyncio.sleep(RESIDENT_POLL if resident else EXCHANGE_POLL)
 
             logger.error("Timeout waiting for Altium command %s", command)
+            if resident:
+                await self._retire_resident(ResidentSession.load(EXCHANGE_DIR))
             if command != "pcb_routing":
                 _mark_script_stuck(f"bridge command {command}")
                 await self.stop_script_debugger()
@@ -976,7 +1064,23 @@ class AltiumBridge:
 
         return virtual_path
 
-    async def run_altium_script(self) -> bool:
+    def _launch_bridge_process(self, command: str) -> bool:
+        try:
+            logger.info("Running command: %s", command)
+            process = subprocess.Popen(command, shell=True)
+            logger.info("Launched Altium with script, process ID: %s", process.pid)
+            return True
+        except OSError as error:
+            logger.error("Error launching Altium: %s", error)
+            return False
+
+    def _launch_bridge_file(self, bundle: Path, entry_point: str) -> bool:
+        return self._launch_bridge_process(
+            f'"{self.config.altium_exe_path}" -RScriptingSystem:RunScriptFile('
+            f'FileName={bundle}^|ProcName={entry_point})'
+        )
+
+    async def run_altium_script(self, command_name="") -> bool:
         """Run the Altium bridge script"""
         if not os.path.exists(self.config.altium_exe_path):
             logger.error(f"Altium executable not found at: {self.config.altium_exe_path}")
@@ -995,23 +1099,23 @@ class AltiumBridge:
             # project leaks window handles in Altium (see script_bundle.py).
             # The project stays the source, and the fallback.
             try:
-                bundle = script_bundle.ensure_bundle(script_path, EXCHANGE_DIR / "bridge")
-                command = (f'"{self.config.altium_exe_path}" -RScriptingSystem:RunScriptFile('
-                           f'FileName={bundle}^|ProcName=Run)')
+                bundle_dir = EXCHANGE_DIR / "bridge"
+                bundle = None
+                if (command_name in script_bundle.ROUTING_COMMANDS
+                        and Path(self.config.script_path).resolve() == DEFAULT_SCRIPT_PATH.resolve()):
+                    try:
+                        bundle = script_bundle.ensure_bundle(script_path, bundle_dir, command=command_name)
+                    except (OSError, ValueError) as error:
+                        logger.warning("Could not specialize the bridge for %s: %s", command_name, error)
+                if bundle is None:
+                    bundle = script_bundle.ensure_bundle(script_path, bundle_dir)
+                return self._launch_bridge_file(bundle, "Run")
             except (OSError, ValueError) as e:
                 logger.warning(f"Could not build the script bundle ({e}); running the project")
                 command = (f'"{self.config.altium_exe_path}" -RScriptingSystem:RunScript('
                            f'ProjectName="{script_path}"^|ProcName="Altium_API>Run")')
-            
-            logger.info(f"Running command: {command}")
-            
-            # Start the process
-            process = subprocess.Popen(command, shell=True)
-            
-            # Don't wait for completion - Altium will run the script and generate the response
-            logger.info(f"Launched Altium with script, process ID: {process.pid}")
-            return True
-        
+                return self._launch_bridge_process(command)
+
         except Exception as e:
             logger.error(f"Error launching Altium: {e}")
             return False
@@ -3458,7 +3562,8 @@ async def move_components(ctx: Context, cmp_designators: list, x_offset: float, 
     return json_dumps({"success": True, "result": result}, indent=2)
 
 @_tool()
-async def place_components(ctx: Context, placements: list, board_path: str = "") -> str:
+async def place_components(ctx: Context, placements: list, board_path: str = "",
+                           require_all: bool = False) -> str:
     """
     Place multiple components at absolute positions in a single Altium transaction.
 
@@ -3490,6 +3595,8 @@ async def place_components(ctx: Context, placements: list, board_path: str = "")
         board_path (str): Full path of the .PcbDoc; empty for the focused
             board, or the one the PCB tools last used. Give it whenever more
             than one board is open, so the parts move on the right one.
+        require_all (bool): Resolve every designator before moving any part.
+            Defaults to false, which moves the parts found and reports missing ones.
 
     Example:
         placements=[{"designator": "R1", "x": 1000, "y": 2000, "rotation": 90},
@@ -3506,21 +3613,24 @@ async def place_components(ctx: Context, placements: list, board_path: str = "")
     # request line by line, so nested JSON objects are not safe to send
     entries = []
     errors = []
+    seen = set()
     for idx, placement in enumerate(placements):
         if not isinstance(placement, dict):
             errors.append(f"placements[{idx}] must be an object")
             continue
 
-        designator = str(placement.get("designator", "")).strip()
+        raw_designator = placement.get("designator", "")
+        designator = raw_designator.strip() if isinstance(raw_designator, str) else ""
         x = placement.get("x")
         y = placement.get("y")
 
         if not designator or x is None or y is None:
             errors.append(f"placements[{idx}] must include designator, x, and y")
             continue
-        if "|" in designator:
-            errors.append(f"placements[{idx}] designator must not contain '|'")
+        if any(c in designator for c in "|\r\n\0") or designator.casefold() in seen:
+            errors.append(f"placements[{idx}] designator must be unique and delimiter-free")
             continue
+        seen.add(designator.casefold())
 
         rotation = placement.get("rotation", -1)
         layer = str(placement.get("layer", "") or "").strip().lower()
@@ -3540,18 +3650,23 @@ async def place_components(ctx: Context, placements: list, board_path: str = "")
             errors.append(str(e))
             continue
         try:
-            entry = f"{designator}|{float(x)}|{float(y)}|{float(rotation)}|{layer}|{lock}|{texts}"
-        except (TypeError, ValueError):
-            errors.append(f"placements[{idx}] x, y, and rotation must be numbers")
+            if any(isinstance(value, bool) for value in (x, y, rotation)):
+                raise ValueError()
+            x, y, rotation = map(float, (x, y, rotation))
+            if not (abs(x) <= pcb_layout.LIMIT_MILS and abs(y) <= pcb_layout.LIMIT_MILS
+                    and (rotation == -1 or 0 <= rotation <= 360)):
+                raise ValueError()
+        except (TypeError, ValueError, OverflowError):
+            errors.append(f"placements[{idx}] requires finite coordinates and rotation -1 or 0–360")
             continue
-        entries.append(entry)
+        entries.append(f"{designator}|{x}|{y}|{rotation}|{layer}|{lock}|{texts}")
 
     if errors:
         return json.dumps({"success": False, "error": "; ".join(errors)})
     if not entries:
         return json.dumps({"success": False, "error": "No placements provided"})
 
-    params = {"placements": entries}
+    params = {"placements": entries, "placement_require_all": "true" if require_all else "false"}
     if board_path:
         params["board_path"] = long_path(board_path)
     response = await altium_bridge.execute_command("place_components", params)
@@ -3813,7 +3928,8 @@ async def check_orientation(ctx: Context, cmp_designators: list = None, min_impr
     }, indent=2)
 
 @_tool(read_only=True)
-async def check_placement(ctx: Context, cmp_designators: list = None, clearance_mils: float = 6) -> str:
+async def check_placement(ctx: Context, cmp_designators: list = None, clearance_mils: float = 6,
+                          board_path: str = "") -> str:
     """
     Verify component placement: find overlaps and clearance violations.
 
@@ -3830,6 +3946,7 @@ async def check_placement(ctx: Context, cmp_designators: list = None, clearance_
             Omit to check the components currently selected in Altium.
         clearance_mils (float): Minimum allowed primitive-to-primitive distance
             in mils (default 6). Pairs closer than this are reported.
+        board_path (str): Full path of the PCB to check. Omit to use the focused PCB.
 
     Returns:
         str: JSON object with checked_count, violation_count, and a violations
@@ -3843,6 +3960,8 @@ async def check_placement(ctx: Context, cmp_designators: list = None, clearance_
     logger.info(f"Checking placement (designators={cmp_designators}, clearance={clearance_mils})")
 
     params = {"clearance_mils": clearance_mils}
+    if board_path:
+        params["board_path"] = long_path(board_path)
     if cmp_designators:
         params["designators"] = cmp_designators
 
@@ -5809,7 +5928,8 @@ async def _net_rules(nets, layer, board_path):
         if f[0] == "N" and len(f) >= 7:
             mil = lambda v: int(v) / routing.COORD_PER_MIL if v.strip().lstrip("-").isdigit() else None
             out[f[1]] = {"min": mil(f[2]), "preferred": mil(f[3]), "max": mil(f[4]), "rule": f[5].strip(),
-                         "clearance": mil(f[6]) if mil(f[6]) and mil(f[6]) > 0 else None}
+                         "clearance": mil(f[6]) if mil(f[6]) and mil(f[6]) > 0 else None,
+                         "paired": f[7].strip().lower() == "true" if len(f) >= 8 else None}
     return out
 
 
@@ -5818,7 +5938,7 @@ async def route_connections(ctx: Context, designators: list = None, nets: list =
                             layers: list = None, width_mils: float = None, clearance_mils: float = None,
                             via_diameter_mils: float = 24, via_hole_mils: float = 12, grid_mils: float = 2.5,
                             include_leaving: bool = False, max_connections: int = 100, dry_run: bool = False,
-                            board_path: str = "") -> str:
+                            board_path: str = "", routing_area: list = None) -> str:
     """
     Route unrouted connections automatically: a maze router finds a path for
     each connection, every segment 0, 45 or 90 degrees, keeping the clearance
@@ -5831,6 +5951,9 @@ async def route_connections(ctx: Context, designators: list = None, nets: list =
     obstacle for the next. Polygon pours are not obstacles: they pour again
     around new copper (repour_polygons). Everything is added in one undo
     step; check with run_drc and get_unrouted_connections.
+    Native differential-pair members are reported and skipped. Use
+    plan_pcb_diff_pair to plan those together. Keepouts, board outline and
+    scoped clearance rules require separate checks.
 
     Args:
         designators (list): Route the connections of these components that
@@ -5840,6 +5963,8 @@ async def route_connections(ctx: Context, designators: list = None, nets: list =
         nets (list): Route the connections of these nets (inside area when
             given).
         area (list): [x1, y1, x2, y2] in mils from the board origin.
+        routing_area (list): Optional hard rectangular copper boundary in
+            board-origin mils. The area argument only selects connections.
         layers (list): Layers routes may use, e.g. ["Top Layer"] (default)
             or ["Top Layer", "Bottom Layer"]; with more than one, vias
             (through, Top to Bottom) change layer.
@@ -5866,11 +5991,15 @@ async def route_connections(ctx: Context, designators: list = None, nets: list =
     layers = layers or ["Top Layer"]
     if not isinstance(layers, list) or not all(isinstance(l, str) and l.strip() for l in layers):
         return json.dumps({"success": False, "error": "layers must be a list of layer names"})
-    err = _route_params(width_mils or 6, clearance_mils or 6, via_diameter_mils, via_hole_mils, grid_mils)
+    err = _route_params(6 if width_mils is None else width_mils, 6 if clearance_mils is None else clearance_mils,
+                        via_diameter_mils, via_hole_mils, grid_mils)
     if err:
         return json.dumps({"success": False, "error": err})
     if not designators and not nets:
         return json.dumps({"success": False, "error": "Give designators or nets to route"})
+    route_box, error = _check_area(routing_area, "routing_area") if routing_area is not None else (None, "")
+    if error:
+        return json.dumps({"success": False, "error": error})
     un = json.loads(await get_unrouted_connections(ctx, designators=designators, nets=nets, area=area,
                                                    max_connections=100000, board_path=board_path))
     if not un.get("success"):
@@ -5881,7 +6010,17 @@ async def route_connections(ctx: Context, designators: list = None, nets: list =
     if not conns:
         return json.dumps({"success": True, "routed": 0, "failed": [], "note": "Nothing to route",
                            "unrouted": un.get("connection_count", 0)})
-    rules = await _net_rules({c["net"] for c in conns}, layers[0], board_path)
+    requested_nets = {c["net"] for c in conns}
+    rules = await _net_rules(requested_nets, layers[0], board_path)
+    if any(rules.get(net, {}).get("paired") is None for net in requested_nets):
+        return json.dumps({"success": False, "error": "Unable to verify differential-pair membership for all nets"})
+    paired = sorted(net for net in requested_nets if rules[net]["paired"])
+    conns = [c for c in conns if c["net"] not in paired]
+    if not conns:
+        return json.dumps({"success": True, "routed": 0, "failed": [], "tracks": 0, "vias": 0,
+                           "skipped_differential_pair_nets": paired,
+                           "note": "Use plan_pcb_diff_pair for native pairs"})
+    rules = {net: rule for net, rule in rules.items() if net not in paired}
     clearance = clearance_mils or max([r["clearance"] for r in rules.values() if r.get("clearance")] or [6.0])
 
     def widths(net):
@@ -5895,8 +6034,10 @@ async def route_connections(ctx: Context, designators: list = None, nets: list =
     xs = [p[0] for c in conns for p in (c["from"], c["to"])]
     ys = [p[1] for c in conns for p in (c["from"], c["to"])]
     margin = 150.0
-    box = [min(xs) - margin, min(ys) - margin, max(xs) + margin, max(ys) + margin]
-    lay = json.loads(await get_layout(ctx, area=box, include_touching=True, include_local_nets=False,
+    box = route_box or [min(xs) - margin, min(ys) - margin, max(xs) + margin, max(ys) + margin]
+    scan_box = ([box[0] - margin, box[1] - margin, box[2] + margin, box[3] + margin]
+                if route_box else box)
+    lay = json.loads(await get_layout(ctx, area=scan_box, include_touching=True, include_local_nets=False,
                                       include_pads=True, board_path=board_path, include_component_copper=True))
     if not lay.get("success"):
         return json.dumps(lay)
@@ -5917,7 +6058,7 @@ async def route_connections(ctx: Context, designators: list = None, nets: list =
             pending = [(c, k) for c, k in pending if abs(widths(c["net"])[k] - width) >= 1e-6]
             try:
                 grid = router.Board(box, grid_mils, signal, width, clearance, via_diameter_mils,
-                                    {c["net"] for c, _ in batch})
+                                    {c["net"] for c, _ in batch}, hard_bounds=route_box)
             except router.RouteError as e:
                 return json.dumps({"success": False, "error": str(e)})
             for s in base_shapes + new_shapes:
@@ -5943,14 +6084,16 @@ async def route_connections(ctx: Context, designators: list = None, nets: list =
                         failed.append(dict(info, width=width, why="no path keeps the clearance on the routing layers"))
                     continue
                 legs, via_pts = found
-                for layer, pts in legs:
-                    segs = _exact_segments(layer, c["net"], width, pts)
-                    tracks.extend(segs)
-                    for s in segs:
-                        shape = router.Shape("seg", c["net"], [layer], ax=s["start"][0], ay=s["start"][1],
-                                             bx=s["end"][0], by=s["end"][1], hw=width / 2)
-                        grid.add(shape)
-                        new_shapes.append(shape)
+                segments = [s for layer, pts in legs for s in _exact_segments(layer, c["net"], width, pts)]
+                if (not segments and not via_pts) or not grid.fits_bounds(segments, via_pts):
+                    failed.append(dict(info, why="no nonempty route fits inside routing_area"))
+                    continue
+                tracks.extend(segments)
+                for s in segments:
+                    shape = router.Shape("seg", c["net"], [s["layer"]], ax=s["start"][0], ay=s["start"][1],
+                                         bx=s["end"][0], by=s["end"][1], hw=width / 2)
+                    grid.add(shape)
+                    new_shapes.append(shape)
                 for vx, vy in via_pts:
                     vias.append({"net": c["net"], "x": round(vx, 4), "y": round(vy, 4), "diameter": via_diameter_mils,
                                  "hole": via_hole_mils, "start_layer": "Top Layer", "end_layer": "Bottom Layer"})
@@ -5977,7 +6120,8 @@ async def route_connections(ctx: Context, designators: list = None, nets: list =
         order = [c for c in conns if key(c) in failed_keys] + [c for c in conns if key(c) not in failed_keys]
     routed, failed, tracks, vias, used = best
     result = {"success": True, "routed": len(routed), "failed": failed, "tracks": len(tracks), "vias": len(vias),
-              "clearance_mils": clearance, "widths": used}
+              "clearance_mils": clearance, "widths": used, "native_drc_required": bool(tracks or vias),
+              "skipped_differential_pair_nets": paired}
     if dry_run:
         result.update({"dry_run": True, "track_list": tracks, "via_list": vias})
         return json.dumps(result, indent=1)

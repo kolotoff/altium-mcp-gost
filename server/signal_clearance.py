@@ -21,6 +21,11 @@ class _Copper:
 
     @property
     def bounds(self):
+        if len(self.points) == 2:
+            (ax, ay), (bx, by) = self.points
+            r = self.radius
+            return (min(ax, bx) - r, min(ay, by) - r,
+                    max(ax, bx) + r, max(ay, by) + r)
         x, y = zip(*self.points)
         return (min(x) - self.radius, min(y) - self.radius,
                 max(x) + self.radius, max(y) + self.radius)
@@ -45,6 +50,13 @@ def _disk(row, radius):
 def _near(a, b, clearance):
     return (a[0] <= b[2] + clearance and b[0] <= a[2] + clearance
             and a[1] <= b[3] + clearance and b[1] <= a[3] + clearance)
+
+
+def points_fit_corridor(points, area, radius):
+    """Test the center points of copper against the radius-inset corridor."""
+    x1, y1, x2, y2 = area
+    return all(x1 + radius <= x <= x2 - radius and y1 + radius <= y <= y2 - radius
+               for x, y in points)
 
 
 class SignalClearance:
@@ -106,10 +118,9 @@ class SignalClearance:
                 self.copper[layer].append((bounds, shape))
 
     def _inside(self, shape):
-        x1, y1, x2, y2 = self.area
         a, b = shape.points
         r = shape.radius
-        if not all(x1 + r <= x <= x2 - r and y1 + r <= y <= y2 - r for x, y in (a, b)):
+        if not points_fit_corridor(shape.points, self.area, r):
             return False
         # The trace or via capsule is wholly inside the rectangle. A rectangle
         # separated from the board perimeter by the required distance certifies
@@ -124,8 +135,7 @@ class SignalClearance:
         return all(not _near(bound, box, reach) or segment_segment(a, b, c, d) >= reach
                    for (c, d), box in zip(self.edges, self.edge_bounds))
 
-    def _conflicts(self, shape, obstacles):
-        bounds = shape.bounds
+    def _conflicts(self, shape, bounds, obstacles):
         return any(shape.net != other.net and _near(bounds, box, self.clearance)
                    and shape.gap(other) < self.clearance - 1e-6
                    for box, other in obstacles)
@@ -138,14 +148,15 @@ class SignalClearance:
         via_masks = list(self.via_masks)
         for row in vias:
             via = _disk(row, int(row["size_raw"]) / 2)
-            if any(_near(via.bounds, box, 0) and via.gap(pad) <= 0 for box, pad in self.pads):
+            bounds = via.bounds
+            if any(_near(bounds, box, 0) and via.gap(pad) <= 0 for box, pad in self.pads):
                 return False
             if self.mask_gap:
                 # A mask opening needs separation even between features on the same net.
-                if any(_near(via.bounds, box, self.mask_gap) and via.gap(shape) < self.mask_gap - 1e-6
+                if any(_near(bounds, box, self.mask_gap) and via.gap(shape) < self.mask_gap - 1e-6
                        for box, shape in self.pads + via_masks):
                     return False
-                via_masks.append((via.bounds, via))
+                via_masks.append((bounds, via))
             center = point(row)
             hole = int(row["hole_size_raw"]) / 2
             if any(math.dist(center, other) < hole + radius + self.hole_clearance - 1e-6
@@ -159,8 +170,11 @@ class SignalClearance:
         for layer, shapes in candidates.items():
             previous = []
             for shape in shapes:
-                if (not self._inside(shape) or self._conflicts(shape, self.copper[layer])
-                        or self._conflicts(shape, previous)):
+                if not self._inside(shape):
                     return False
-                previous.append((shape.bounds, shape))
+                bounds = shape.bounds
+                if (self._conflicts(shape, bounds, self.copper[layer])
+                        or self._conflicts(shape, bounds, previous)):
+                    return False
+                previous.append((bounds, shape))
         return True

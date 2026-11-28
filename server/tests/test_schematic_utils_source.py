@@ -3,6 +3,14 @@ import unittest
 
 
 class SchematicUtilsSourceTest(unittest.TestCase):
+    def test_create_only_batch_skips_post_create_lookup(self):
+        source = (Path(__file__).resolve().parents[1] / "AltiumScript" / "schematic_utils.pas").read_text(encoding="utf-8")
+        flush = source.split("function BatchFlushSymbol(", 1)[1].split("\nend;", 1)[0]
+        creation, lookup = flush.split("    Comp := nil;", 1)
+        self.assertRegex(creation, r"Result := 1;\s*if EditsList\.Count = 0 then Exit;")
+        self.assertIn("FindLibSymbol(Lib, SymName)", lookup)
+        self.assertIn("if (Mode = 'EDITSYMBOL') then", lookup)
+
     def test_pin_data_pipe_parsing_uses_strict_delimiter(self):
         source_path = Path(__file__).resolve().parents[1] / "AltiumScript" / "schematic_utils.pas"
         lines = source_path.read_text(encoding="utf-8").splitlines()

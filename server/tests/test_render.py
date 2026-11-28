@@ -5,6 +5,7 @@ Run from server/:  python -m unittest tests.test_render -v
 import os
 import sys
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
@@ -189,6 +190,25 @@ class SheetTest(unittest.TestCase):
         self.assertLessEqual(x0, 100)
         self.assertGreaterEqual(x1, 500)
         self.assertLess(x1, 2000)          # the template's 3000 mil line does not count
+
+    def test_resolves_each_font_once_per_image_at_that_images_scale(self):
+        records = [
+            {"RECORD": "31", "FONTIDCOUNT": "2", "SIZE1": "10", "FONTNAME1": "Times New Roman",
+             "SIZE2": "13", "FONTNAME2": "Arial"},
+            {"RECORD": "4", "TEXT": "A", "FONTID": "1"},
+            {"RECORD": "4", "TEXT": "B", "FONTID": "2", "ORIENTATION": "1"},
+            {"RECORD": "4", "TEXT": "C", "FONTID": "1"},
+            {"RECORD": "4", "TEXT": "D", "FONTID": "2"},
+        ]
+        box = [0, 0, 1000, 1000]
+        with patch.object(render, "_font", wraps=render._font) as font:
+            render.render_sheet(records, box, dpi=100)
+            first = [call.args for call in font.call_args_list]
+            font.reset_mock()
+            render.render_sheet(records, box, dpi=200)
+            second = [call.args for call in font.call_args_list]
+        self.assertEqual([name for _, name in first], ["times.ttf", "arial.ttf"])
+        self.assertEqual(second, [(2 * size, name) for size, name in first])
 
 
 if __name__ == "__main__":

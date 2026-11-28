@@ -403,11 +403,16 @@ def render_sheet(records: List[dict], bbox=None, dpi: float = 150) -> Tuple[Imag
     draw = ImageDraw.Draw(cv.image)
     lw = max(1, int(round(cv.d(10))))
     counts: Dict[str, int] = {}
+    font_cache = {}
 
     def text(x, y, s, font_id=1, orientation=0, justification=0, colour=TEXT):
-        name, size = fonts.get(int(font_id or 1), ("Times New Roman", 10))
-        h = size * EM_PER_POINT
-        font = _font(cv.d(h), "times.ttf" if "times" in name.lower() else "arial.ttf")
+        font_id = int(font_id or 1)
+        if font_id not in font_cache:
+            name, size = fonts.get(font_id, ("Times New Roman", 10))
+            height = size * EM_PER_POINT
+            font_name = "times.ttf" if "times" in name.lower() else "arial.ttf"
+            font_cache[font_id] = _font(cv.d(height), font_name), height
+        font, h = font_cache[font_id]
         w = draw.textlength(s, font=font) / cv.k if s else 0
         box = text_box(x, y, w, h, orientation % 4, justification)
         if orientation % 2 == 0:

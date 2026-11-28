@@ -6,6 +6,7 @@ import csv
 import hashlib
 import io
 import json
+import re
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
@@ -13,6 +14,8 @@ from pathlib import Path, PureWindowsPath
 from .drc_classic import classic_fields
 from .drc_compact import COMPACT_HEADER, read_compact_drc
 
+
+_JSON_STRING_SYNTAX = re.compile(r'["\\\x00-\x1f]')
 
 HEADERS = {
     "board": "field value",
@@ -99,7 +102,8 @@ def read_inventory(directory, encoding="utf-8-sig"):
         for rows in tables.values():
             for row in rows:
                 for field, value in row.items():
-                    row[field] = json.loads('"' + value + '"')
+                    if _JSON_STRING_SYNTAX.search(value):
+                        row[field] = json.loads('"' + value + '"')
     board_rows = tables.pop("board")
     board = {row["field"]: row["value"] for row in board_rows}
     if len(board) != len(board_rows):
@@ -115,8 +119,8 @@ def read_inventory(directory, encoding="utf-8-sig"):
             raise ValueError(f"Missing board field {field}: {directory}")
     if not PureWindowsPath(board["board_file"]).is_absolute():
         raise ValueError(f"Board identity is not a full Windows path: {directory}")
-    net_names = [row["net"] for row in tables["nets"]]
-    if len(net_names) != len(set(net_names)) or "" in net_names:
+    net_names = {row["net"] for row in tables["nets"]}
+    if len(net_names) != len(tables["nets"]) or "" in net_names:
         raise ValueError(f"Empty or duplicate net name: {directory}")
     counts = {
         "net_count": len(tables["nets"]),

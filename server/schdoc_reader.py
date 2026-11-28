@@ -38,11 +38,12 @@ def parse_records(stream: bytes, *, strict: bool = False) -> list:
             key, separator, value = field.partition(b"=")
             if not separator:
                 continue
-            key = key.decode("cp1252", "replace").upper()
+            # Most fields are ASCII, with the same characters in both encodings.
+            key = (key.decode("ascii") if key.isascii() else key.decode("cp1252", "replace")).upper()
             if key.startswith("%UTF8%"):
                 utf8[key[6:]] = value
             else:
-                rec[key] = value.decode("cp1252", "replace")
+                rec[key] = value.decode("ascii") if value.isascii() else value.decode("cp1252", "replace")
         # UTF-8 copies of text fields are stored as %UTF8%KEY
         for key, value in utf8.items():
             try:

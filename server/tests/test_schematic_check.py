@@ -151,6 +151,16 @@ class ReaderTest(unittest.TestCase):
         recs = parse_records(stream)
         self.assertEqual([r and r["RECORD"] for r in recs], ["1", None, "2"])
 
+    def test_ascii_and_cp1252_fields_preserve_utf8_overrides(self):
+        ascii_body = b"|Text=early|%utf8%Text=override|Text=late|Empty=|raw=a=b|\0"
+        mixed_body = b"|caf\xe9=co\x80|Text=Fran\xe7ais|%UTF8%Text=\xff|%UTF8%Alt=\xd1\x91|\0"
+        stream = struct.pack("<I", len(ascii_body)) + ascii_body
+        stream += struct.pack("<I", len(mixed_body)) + mixed_body
+        self.assertEqual(parse_records(stream, strict=True), [
+            {"TEXT": "override", "EMPTY": "", "RAW": "a=b"},
+            {"CAFÉ": "co€", "TEXT": "Français", "ALT": "ё"},
+        ])
+
     def test_coord_keeps_metric_fractions(self):
         self.assertAlmostEqual(coord({"X": "39", "X_FRAC": "37008"}, "X"), 393.70, places=2)
         self.assertEqual(coord({}, "X"), 0.0)

@@ -10,7 +10,7 @@ from .routing_geometry import (
     finite_number, point_segment, segment_segment, stack_positions, units_per_mm, via_on_layer,
 )
 from .routing_operations import integer
-from .signal_clearance import SignalClearance, point as _point
+from .signal_clearance import SignalClearance, point as _point, points_fit_corridor
 
 
 MULTI_LAYER = 74
@@ -413,14 +413,20 @@ def plan_pair(snapshot, pair, layer_id, width_mm, clearance_mm, corridor_raw,
     scale = units_per_mm(snapshot)
     shifts = [0] + [sign * step * i for i in range(1, 17) for sign in (1, -1)]
     best = None
+    radius = width / 2
     for shift in shifts:
         rails = [_rail_points(span, shift), _rail_points(span, shift, pitch)]
         if any(any(a[0] >= b[0] for a, b in zip(rail, rail[1:])) for rail in rails):
             continue
+        world_rails = [[_world(p[0], axis, point) for point in rail] for rail in rails]
+        # Via transitions start and stop on a flat, so changing layers still
+        # requires reaching each rail's corners and endpoints.
+        if not all(points_fit_corridor(rail, area, radius) for rail in world_rails):
+            continue
         direct = None
         for direct_layer in sorted(set(starts) & set(finishes), key=lambda value: (value != layer, value)):
-            tracks = [row for net, rail in zip(members[0], rails)
-                      for row in _tracks([_world(p[0], axis, point) for point in rail], net, direct_layer, width)]
+            tracks = [row for net, rail in zip(members[0], world_rails)
+                      for row in _tracks(rail, net, direct_layer, width)]
             if checker.clears(tracks):
                 direct = tracks, [], [direct_layer]
                 break

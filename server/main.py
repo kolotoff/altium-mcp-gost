@@ -24,6 +24,8 @@ from PIL import Image
 import glob
 import io
 import re
+from bisect import bisect_left
+from collections import Counter
 from contextlib import asynccontextmanager
 from functools import wraps
 import xml.etree.ElementTree as ET
@@ -165,6 +167,7 @@ RESIDENT_POLL = 0.05
 RESIDENT_PICKUP_TIMEOUT = 0.5
 RESIDENT_SETTLING_PICKUP_TIMEOUT = 5.0
 RESIDENT_DRAIN_TIMEOUT = 1.0
+RESIDENT_SETTLING_ERROR = "Altium is still releasing the previous bridge. Retry when it settles."
 ROUTING_MUTATION_TIMEOUT = 600
 ROUTING_NATIVE_DRC_TIMEOUT = 900
 
@@ -624,6 +627,7 @@ class AltiumBridge:
         self._pending = PendingCommand(EXCHANGE_DIR)
         self._command_tasks = set()
         self._resident_enabled = os.environ.get("ALTIUM_MCP_REUSE_BRIDGE", "1") != "0"
+        self._disabled_resident_groups: set[str] = set()
 
     def command_status(self) -> dict:
         """Inspect the pending receipt without invoking an Altium script."""
@@ -696,8 +700,10 @@ class AltiumBridge:
                 if (problem is None and bridge_script and
                         await _altium_remains_hung(self.config.altium_exe_path)):
                     problem = {"success": False, "error": ALTIUM_HUNG_ERROR}
-                if problem is None and not bridge_script:
-                    await self._retire_resident(ResidentSession.load(EXCHANGE_DIR))
+                if (problem is None and not bridge_script and not await self._retire_resident(
+                        ResidentSession.load(EXCHANGE_DIR), defer_if_live=True)):
+                    problem = {"success": False, "execution_state": "not_started",
+                               "error": RESIDENT_SETTLING_ERROR}
                 yield problem
             finally:
                 self._exchange_lock.release()
@@ -836,50 +842,88 @@ class AltiumBridge:
         return True
 
     @staticmethod
-    async def _retire_resident(session: Optional[ResidentSession]) -> None:
-        """Stop accepting work, then give the native idle loop time to exit."""
+    def _resident_may_own_marker(session: ResidentSession) -> bool:
+        """A live Altium instance that could have written the ready file."""
+        try:
+            written = session.ready.stat().st_mtime
+        except FileNotFoundError:
+            return False
+        try:
+            executable = os.path.normcase(os.path.realpath(session.executable))
+            for pid in win_processes.pids_by_name("X2.EXE"):
+                actual = win_processes.image_path(pid)
+                if actual and os.path.normcase(os.path.realpath(actual)) != executable:
+                    continue
+                handle = win32api.OpenProcess(win32con.PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+                try:
+                    started = win32process.GetProcessTimes(handle)["CreationTime"].timestamp()
+                finally:
+                    handle.Close()
+                if started <= written:
+                    return True
+        except Exception:
+            return True  # a failed process query cannot prove the bridge is dead
+        return False
+
+    @staticmethod
+    async def _retire_resident(session: Optional[ResidentSession], *,
+                               defer_if_live: bool = False) -> bool:
+        """Withdraw the lease and wait for the native idle loop to exit."""
         if session is None:
-            return
+            return True
         session.lease.unlink(missing_ok=True)
-        deadline = time.monotonic() + RESIDENT_DRAIN_TIMEOUT
-        while session.ready.exists() and time.monotonic() < deadline:
-            await asyncio.sleep(RESIDENT_POLL)
+        began = time.monotonic()
+        deadline = began + RESIDENT_DRAIN_TIMEOUT
+        while session.ready.exists():
+            if session.settling.exists():
+                deadline = max(deadline, began + RESIDENT_SETTLING_PICKUP_TIMEOUT)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                if defer_if_live and AltiumBridge._resident_may_own_marker(session):
+                    return False
+                break
+            await asyncio.sleep(min(RESIDENT_POLL, remaining))
         # A killed Altium process can leave a marker. No future call can
         # publish to this session's mailbox after its lease is revoked.
         session.ready.unlink(missing_ok=True)
         session.settling.unlink(missing_ok=True)
+        return True
 
     def _resident_bundle(self, command: str) -> Optional[Path]:
-        if (not self._resident_enabled or command not in script_bundle.ROUTING_COMMANDS
+        group = script_bundle.RESIDENT_GROUP_BY_COMMAND.get(command)
+        if (not self._resident_enabled or group is None or group in self._disabled_resident_groups
                 or Path(self.config.script_path).resolve() != DEFAULT_SCRIPT_PATH.resolve()
                 or STUCK_MARKER.exists()):
             return None
         try:
             return script_bundle.ensure_bundle(self._resolve_msix_path(self.config.script_path),
-                                               EXCHANGE_DIR / "bridge", resident=True)
+                                               EXCHANGE_DIR / "bridge", resident=True,
+                                               resident_group=group)
         except (OSError, ValueError) as error:
-            logger.warning("Could not build the resident bridge: %s", error)
-            self._resident_enabled = False
+            logger.warning("Could not build the %s resident bridge: %s", group, error)
+            self._disabled_resident_groups.add(group)
             return None
 
-    async def _try_resident(self, payload: dict, receipt: dict, cold_start: bool) -> bool:
+    async def _try_resident(self, payload: dict, receipt: dict, cold_start: bool) -> Optional[bool]:
         """Return whether a resident run claimed this request.
 
+        None means the previous bridge was still settling at the handoff.
         Fall back only after withdrawing the request from its unique mailbox.
         If Altium won the delete race, keep waiting for its terminal response.
         """
         bundle = self._resident_bundle(payload["command"])
         session = ResidentSession.load(EXCHANGE_DIR)
         if bundle is None:
-            await self._retire_resident(session)
-            return False
+            retired = await self._retire_resident(session, defer_if_live=not cold_start)
+            return False if retired else None
         bundle_key = bundle.stem.rsplit("_", 1)[1]
         executable = os.path.normcase(os.path.normpath(self.config.altium_exe_path))
         reuse = (session is not None and session.bundle_key == bundle_key
                  and session.executable == executable
                  and session.lease.exists() and session.ready.exists() and not cold_start)
         if not reuse:
-            await self._retire_resident(session)
+            if not await self._retire_resident(session, defer_if_live=not cold_start):
+                return None
             session = ResidentSession.start(EXCHANGE_DIR, bundle_key, executable)
         self._pending.write(receipt)
         atomic_json(session.request, payload)
@@ -896,10 +940,13 @@ class AltiumBridge:
             session.request.unlink()
         except FileNotFoundError:
             return True
-        await self._retire_resident(session)
+        if not await self._retire_resident(session, defer_if_live=not cold_start):
+            self._pending.discard()
+            return None
         if not reuse:
-            logger.warning("Resident native bridge did not start; using one-shot execution")
-            self._resident_enabled = False
+            group = script_bundle.RESIDENT_GROUP_BY_COMMAND[payload["command"]]
+            logger.warning("The %s resident bridge did not start; using one-shot execution", group)
+            self._disabled_resident_groups.add(group)
             _dismiss_altium_dialogs(message_boxes_only=True, executable=self.config.altium_exe_path)
         return False
 
@@ -936,6 +983,9 @@ class AltiumBridge:
                 logger.info("Altium is not running - launching it, allowing time for startup")
 
             resident = await self._try_resident(payload, receipt, cold_start)
+            if resident is None:
+                return {"success": False, "execution_state": "not_started",
+                        "error": RESIDENT_SETTLING_ERROR}
             recovered = False
             started = resident
             if not resident:
@@ -1010,11 +1060,15 @@ class AltiumBridge:
                 await asyncio.sleep(RESIDENT_POLL if resident else EXCHANGE_POLL)
 
             logger.error("Timeout waiting for Altium command %s", command)
-            if resident:
-                await self._retire_resident(ResidentSession.load(EXCHANGE_DIR))
-            if command != "pcb_routing":
+            session = ResidentSession.load(EXCHANGE_DIR) if resident else None
+            if session is not None:
+                await self._retire_resident(session, defer_if_live=True)
+            if command != "pcb_routing" and self._pending.response(request_id) is None:
                 _mark_script_stuck(f"bridge command {command}")
                 await self.stop_script_debugger()
+                await asyncio.sleep(self.STOP_SETTLE)
+                if session is not None:
+                    await self._retire_resident(session)
             outcome = (
                 " Check the design for partial changes before retrying."
                 if _is_mutating(command, params) else ""
@@ -1101,7 +1155,7 @@ class AltiumBridge:
             try:
                 bundle_dir = EXCHANGE_DIR / "bridge"
                 bundle = None
-                if (command_name in script_bundle.ROUTING_COMMANDS
+                if (command_name
                         and Path(self.config.script_path).resolve() == DEFAULT_SCRIPT_PATH.resolve()):
                     try:
                         bundle = script_bundle.ensure_bundle(script_path, bundle_dir, command=command_name)
@@ -1541,11 +1595,14 @@ async def get_schematic_data(ctx: Context, cmp_designators: list) -> str:
     """
     logger.info(f"Getting schematic data for components: {cmp_designators}")
     
-    # Execute the command in Altium to get schematic data
-    response = await altium_bridge.execute_command(
-        "get_schematic_data",
-        {}  # No parameters needed for this command in the Altium script
-    )
+    # The bundled reader accepts printable ASCII and skips empty entries.
+    # Custom scripts still receive the legacy unfiltered request.
+    params = {}
+    if (Path(altium_bridge.config.script_path) == DEFAULT_SCRIPT_PATH
+            and isinstance(cmp_designators, list) and cmp_designators
+            and all(isinstance(d, str) and d and d.isascii() and d.isprintable() for d in cmp_designators)):
+        params["filter_designators"] = cmp_designators
+    response = await altium_bridge.execute_command("get_schematic_data", params)
     
     # Check for success
     if not response.get("success", False):
@@ -1555,8 +1612,10 @@ async def get_schematic_data(ctx: Context, cmp_designators: list) -> str:
     
     # Get the schematic data
     schematic_data = response.get("result", [])
-    
-    if not schematic_data:
+
+    if not schematic_data or (
+        isinstance(schematic_data, dict) and schematic_data.get("has_components") is False
+    ):
         logger.info("No schematic data found")
         return json_dumps({"error": "No schematic data found"})
     
@@ -1564,6 +1623,8 @@ async def get_schematic_data(ctx: Context, cmp_designators: list) -> str:
         # Parse the data if it's a string
         if isinstance(schematic_data, str):
             schematic_list = json.loads(schematic_data)
+        elif isinstance(schematic_data, dict) and "has_components" in schematic_data:
+            schematic_list = schematic_data["components"]
         else:
             schematic_list = schematic_data
         
@@ -3414,7 +3475,8 @@ async def get_symbol_primitives(ctx: Context, library_path: str = "", symbol_nam
 
     response = await altium_bridge.execute_command(
         "get_symbol_primitives",
-        {"library_path": library_path, "symbol_name": symbol_name}
+        {"library_path": long_path(library_path) if os.path.isabs(library_path) else library_path,
+         "symbol_name": symbol_name}
     )
 
     if not response.get("success", False):
@@ -3682,24 +3744,25 @@ async def place_components(ctx: Context, placements: list, board_path: str = "",
 
 def _mst_length(points: list) -> float:
     """Minimum-spanning-tree length over (x, y) points (Prim's algorithm)."""
-    n = len(points)
-    if n < 2:
+    if len(points) < 2:
         return 0.0
-    import math
-    in_tree = [False] * n
-    best = [float("inf")] * n
-    best[0] = 0.0
+    remaining = list(points[1:])
+    best = [math.inf] * len(remaining)
+    current = points[0]
     total = 0.0
-    for _ in range(n):
-        u = min((i for i in range(n) if not in_tree[i]), key=lambda i: best[i])
-        in_tree[u] = True
-        total += best[u]
-        ux, uy = points[u]
-        for v in range(n):
-            if not in_tree[v]:
-                d = math.dist((ux, uy), points[v])
-                if d < best[v]:
-                    best[v] = d
+    while remaining:
+        next_index = 0
+        next_distance = math.inf
+        for index, point in enumerate(remaining):
+            best_distance = best[index]
+            distance = math.dist(current, point)
+            if distance < best_distance:
+                best_distance = best[index] = distance
+            if best_distance < next_distance:
+                next_index, next_distance = index, best_distance
+        total += next_distance
+        current = remaining.pop(next_index)
+        best.pop(next_index)
     return total
 
 @_tool(read_only=True)
@@ -3786,6 +3849,36 @@ def _rotate_offset(dx: float, dy: float, degrees: float) -> tuple:
     return (dx * math.cos(rad) - dy * math.sin(rad),
             dx * math.sin(rad) + dy * math.cos(rad))
 
+class _PlanePadIndex:
+    """X-sorted same-net pads for exact nearest-distance queries."""
+
+    def __init__(self, pads):
+        self.pads = sorted(pads, key=lambda pad: pad[1])
+        self.xs = [x for _, x, _ in self.pads]
+        self.owner_counts = Counter(owner for owner, _, _ in self.pads)
+
+    def nearest_distance(self, point, exclude_owner):
+        x, y = point
+        right = bisect_left(self.xs, x)
+        left = right - 1
+        nearest = math.inf
+        while left >= 0 or right < len(self.pads):
+            left_gap = x - self.xs[left] if left >= 0 else math.inf
+            right_gap = self.xs[right] - x if right < len(self.pads) else math.inf
+            # An x gap alone bounds all remaining Euclidean distances.
+            if min(left_gap, right_gap) >= nearest:
+                break
+            if left_gap < right_gap:
+                owner, px, py = self.pads[left]
+                left -= 1
+            else:
+                owner, px, py = self.pads[right]
+                right += 1
+            if owner != exclude_owner:
+                nearest = min(nearest, math.dist(point, (px, py)))
+        return nearest
+
+
 @_tool(read_only=True)
 async def check_orientation(ctx: Context, cmp_designators: list = None, min_improvement_mils: float = 25) -> str:
     """
@@ -3863,6 +3956,7 @@ async def check_orientation(ctx: Context, cmp_designators: list = None, min_impr
         net_pads.setdefault(p["net"], []).append((p["designator"], p["x"], p["y"]))
 
     PLANE_NET_PAD_COUNT = 40  # nets above this are treated as planes
+    plane_indices = {}
 
     suggestions = []
     checked = 0
@@ -3871,24 +3965,37 @@ async def check_orientation(ctx: Context, cmp_designators: list = None, min_impr
         if len(pins) != 2 or "x" not in comp:
             continue
         mirror = comp.get("layer") == "Bottom Layer"
+        designator = comp["designator"]
+        scored_pads = []
+        for pin in pins:
+            net = pin.get("net", "")
+            if not net:
+                continue
+            pads = net_pads.get(net, [])
+            if len(pads) > PLANE_NET_PAD_COUNT:
+                if net not in plane_indices:
+                    plane_indices[net] = _PlanePadIndex(pads)
+                plane = plane_indices[net]
+                if len(pads) - plane.owner_counts[designator] > PLANE_NET_PAD_COUNT:
+                    scored_pads.append((pin, plane, []))
+                    continue
+            candidates = [(x, y) for owner, x, y in pads if owner != designator]
+            if candidates:
+                scored_pads.append((pin, None, candidates))
 
         def score(rotation):
             """Hybrid per-pad score (see docstring); None if no pad scores."""
             total, detail = 0.0, []
-            for pin in pins:
-                net = pin.get("net", "")
-                cands = [(x, y) for (d, x, y) in net_pads.get(net, [])
-                         if d != comp["designator"]] if net else []
-                if not cands:
-                    continue
+            for pin, plane, candidates in scored_pads:
+                net = pin["net"]
                 dx = -pin["dx"] if mirror else pin["dx"]
                 ox, oy = _rotate_offset(dx, pin["dy"], rotation)
                 px, py = comp["x"] + ox, comp["y"] + oy
-                if len(cands) > PLANE_NET_PAD_COUNT:
-                    value = min(math.dist((px, py), c) for c in cands)
+                if plane is not None:
+                    value = plane.nearest_distance((px, py), designator)
                     metric = "nearest_return_mils"
                 else:
-                    value = _mst_length(cands + [(px, py)])
+                    value = _mst_length(candidates + [(px, py)])
                     metric = "net_airline_mils"
                 total += value
                 detail.append({"pin": pin["name"], "net": net, metric: round(value, 1)})
@@ -3902,6 +4009,8 @@ async def check_orientation(ctx: Context, cmp_designators: list = None, min_impr
 
         best_rot, best = current, cur
         for r in (0, 90, 180, 270):
+            if r == current:
+                continue
             s = score(r)
             if s is not None and s[0] < best[0]:
                 best_rot, best = r, s

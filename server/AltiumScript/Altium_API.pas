@@ -510,6 +510,27 @@ begin
     end;
 end;
 
+function ExecuteGetSchematicData(RequestData: TStringList): String;
+var
+    Designators: TStringList;
+    i: Integer;
+begin
+    Designators := TStringList.Create;
+    try
+        Designators.CaseSensitive := True;
+        for i := 0 to RequestData.Count - 1 do
+            if Pos('"filter_designators":', Trim(RequestData[i])) = 1 then
+            begin
+                ReadJSONStringArray(RequestData, i, Designators);
+                Designators.Sorted := True;
+                Break;
+            end;
+        Result := GetSchematicData(ROOT_DIR, Designators);
+    finally
+        Designators.Free;
+    end;
+end;
+
 // Extract the create schematic symbol logic
 function ExecuteCreateSchematicSymbol(RequestData: TStringList): String;
 var
@@ -1178,7 +1199,7 @@ begin
         end;
     end;
 
-    Result := GetSymbolPrimitives(ROOT_DIR, LibraryPath, SymbolName);
+    Result := GetSymbolPrimitives(LibraryPath, SymbolName);
 end;
 
 // Extract the get net connections logic
@@ -2105,7 +2126,7 @@ begin
         'create_schematic_symbol':
             Result := ExecuteCreateSchematicSymbol(RequestData);            
         'get_schematic_data':
-            Result := GetSchematicData(ROOT_DIR);            
+            Result := ExecuteGetSchematicData(RequestData);
         'get_pcb_layers':
             Result := GetPCBLayers(ROOT_DIR);            
         'set_pcb_layer_visibility':

@@ -114,6 +114,51 @@ class BundleTests(unittest.TestCase):
                 self.assertIn(f"RequestText(RequestData, 'command', '') <> '{command}'", text)
             self.assertEqual(resident, sb.ensure_bundle(project, directory, resident=True))
 
+    def test_one_shot_bundles_support_the_default_dispatcher_beyond_routing(self):
+        project = HERE.parent / "AltiumScript" / "Altium_API.PrjScr"
+        commands = {
+            "get_board_summary": "GetBoardSummary",
+            "get_schematic_pins": "GetSchematicPins",
+            "get_pcblib_footprints": "GetPCBLibraryFootprints",
+            "save_current_document": "SaveCurrentDocument",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            for command, handler in commands.items():
+                with self.subTest(command=command):
+                    bundle = sb.ensure_bundle(project, directory, command=command)
+                    text = bundle.read_text(encoding="latin-1")
+                    guard = f"if (RequestText(RequestData, 'command', '') <> '{command}') then Exit;"
+                    self.assertLess(text.index(guard), text.index("DeleteFile(REQUEST_FILE)"))
+                    self.assertIn(f"'{command}':", text)
+                    self.assertIn(handler + "(", text)
+                    self.assertNotIn("'create_symbols_batch':", text)
+                    self.assertEqual(defined_before_use(text), [])
+            save = sb.ensure_bundle(project, directory, command="save_current_document")
+            self.assertIn("if CommandType <> 'save_current_document' then\n"
+                          "                    EnsureDesignProjectFocused();",
+                          save.read_text(encoding="latin-1"))
+            for command in ("missing_branch", "../get_board_summary"):
+                with self.subTest(command=command), self.assertRaises(ValueError):
+                    sb.ensure_bundle(project, directory, command=command)
+
+    def test_resident_groups_claim_only_their_own_requests(self):
+        project = HERE.parent / "AltiumScript" / "Altium_API.PrjScr"
+        with tempfile.TemporaryDirectory() as directory:
+            keys = set()
+            for group, commands in sb.RESIDENT_COMMAND_GROUPS.items():
+                with self.subTest(group=group):
+                    bundle = sb.ensure_bundle(project, directory, resident=True, resident_group=group)
+                    source = bundle.read_text(encoding="latin-1")
+                    guards = re.findall(r"RequestText\(RequestData, 'command', ''\) <> '([a-z_]+)'", source)
+                    self.assertEqual(set(guards), commands)
+                    self.assertLess(source.index(guards[-1] + "') then Exit;"),
+                                    source.index("DeleteFile(REQUEST_FILE)"))
+                    self.assertIn("procedure RunResident;", source)
+                    keys.add(bundle.stem)
+            self.assertEqual(len(keys), len(sb.RESIDENT_COMMAND_GROUPS))
+            with self.assertRaisesRegex(ValueError, "Unknown resident command group"):
+                sb.ensure_bundle(project, directory, resident=True, resident_group="../custom")
+
     def test_keeps_the_newest_bundles(self):
         with tempfile.TemporaryDirectory() as d:
             unit = self.write(d, "u.pas", "procedure Run;\nbegin\nend;\n")

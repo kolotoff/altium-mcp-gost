@@ -1033,20 +1033,29 @@ The server communicates with Altium Designer using a scripting bridge:
 
 When adding bridge code: start every routine, and its `begin` and final `end;`, at column 0, and don't let routines call each other in a cycle (the bundle has no forward declarations). `tests/test_script_bundle.py` checks the real units. The sandbox runs its script as a file too.
 
-The built-in bridge reuses one native run for the routing dispatcher,
-routing-rule creation, unrouted-connection queries and document listing.
+The built-in bridge reuses one native run within each of four command
+groups. The routing group includes rule creation, unrouted connections,
+and document listing. The other groups cover placement and layout with
+pin and net reads, schematic reads, and symbol creation and inspection.
 It processes requests serially and releases Altium's script engine after
-10 idle seconds or before a sandbox or other MCP command runs. Altium pumps
+10 idle seconds or before a sandbox, another group, or a one-shot MCP
+command runs. Altium pumps
 UI messages between requests, while its script engine is reserved by the
 bridge. A resident run signals when it is processing the previous
-command's final UI messages. A follow-up then has up to five seconds
-to be claimed, compared with the usual half second. The server stops
-waiting if the resident lease ends. Set `ALTIUM_MCP_REUSE_BRIDGE=0` on
+command's final UI messages. A follow-up has up to five seconds to be
+claimed, compared with the usual half second, and switching groups gives
+the retiring bridge the same settling allowance. The server stops
+waiting for pickup if the resident lease ends. If the previous bridge
+still owns the script engine after the settling allowance, the next
+command returns a retryable error before publishing a request.
+Set `ALTIUM_MCP_REUSE_BRIDGE=0` on
 the MCP server to use one-shot execution. If a resident run misses a
 request, the server withdraws it
 before falling back. A claimed request retains its receipt and cannot be
 replayed automatically. The one-shot path uses command-specific files when
-available. Custom script projects continue to use their configured bundle.
+available. A group that fails to build or start falls back to one-shot
+execution for that group. Custom script projects continue to use their
+configured bundle.
 
 Altium's script engine also leaks memory: every property read of a board object costs roughly 100-200 bytes that are never freed. On a 40,000-object board that is about 25 MB per silkscreen export and 50 MB per full silkscreen check, so a long session of exports grows Altium by gigabytes until it runs out of memory and dies with unsaved work. The bridge scripts read each object's properties once and skip objects early; the silkscreen tools reuse one board export for up to 15 minutes and update it themselves after their own moves and link graphics.
 

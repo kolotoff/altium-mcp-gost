@@ -61,7 +61,7 @@ class SignalRoutingTest(unittest.TestCase):
 
     def test_pair_straight_on_exact_clearance_and_equal_length(self):
         snapshot = fixture()
-        result = self.pair(snapshot)
+        result = self.pair(snapshot, area(18, 43, 182, 59))
         self.assertEqual(len(result["operations"]), 2)
         self.assertAlmostEqual(result["minimum_track_gap_mm"], 8 * MIL)
         snapshot["tables"]["tracks"] = [op["new"] for op in result["operations"]]

@@ -1,4 +1,4 @@
-// Included only in the generated resident routing bridge.
+// Included only in the generated resident bridge.
 const
     BridgeResidentKey = '{BRIDGE_RESIDENT_BUNDLE_KEY}';
     BridgeIdleMS = 10000;

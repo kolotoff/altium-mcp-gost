@@ -2346,6 +2346,7 @@ begin
             Exit;
         end;
         Result := 1;
+        if EditsList.Count = 0 then Exit;
     end
     else
         Result := 2;
@@ -2368,6 +2369,21 @@ begin
         Exit;
     end;
     ApplySymbolEdits(Lib, Comp, EditsList, Problems);
+end;
+
+// Both the active view and the schematic server must identify the target.
+function SchLibViewIsFocused(Path: String): Boolean;
+var
+    FocusedView : IServerDocumentView;
+    FocusedDoc : IServerDocument;
+begin
+    Result := False;
+    FocusedView := Client.CurrentView;
+    if (FocusedView = nil) then Exit;
+    FocusedDoc := FocusedView.GetOwnerDocument;
+    if (FocusedDoc = nil) then Exit;
+    if (NormalizedPath(FocusedDoc.FileName) <> NormalizedPath(Path)) then Exit;
+    Result := SchLibIsFocused(Path);
 end;
 
 // Create or edit many symbols in a single script run from a spec file. The
@@ -2457,7 +2473,8 @@ begin
                 // focused one - never work on whatever else is focused.
                 LibPath := Trim(GetFieldFromPipeString(Line, 1));
                 if FileExists(LibPath) then
-                    ServerDoc := OpenLibraryDocument('SchLib', LibPath);
+                    if not SchLibViewIsFocused(LibPath) then
+                        ServerDoc := OpenLibraryDocument('SchLib', LibPath);
                 if not SchLibIsFocused(LibPath) then
                 begin
                     Result := 'ERROR: Could not open and focus ' + LibPath + ' - nothing was created or edited';
@@ -2560,21 +2577,24 @@ var
     VertsArray : TStringList;
     VProps     : TStringList;
     V          : Integer;
+    Vertex     : TLocation;
 begin
     VertsArray := TStringList.Create;
     try
-        for V := 1 to Poly.VerticesCount do
-        begin
-            VProps := TStringList.Create;
-            try
-                AddJSONNumber(VProps, 'x', CoordToMils(Poly.Vertex[V].X));
-                AddJSONNumber(VProps, 'y', CoordToMils(Poly.Vertex[V].Y));
+        VProps := TStringList.Create;
+        try
+            for V := 1 to Poly.VerticesCount do
+            begin
+                VProps.Clear;
+                Vertex := Poly.Vertex[V];
+                AddJSONNumber(VProps, 'x', CoordToMils(Vertex.X));
+                AddJSONNumber(VProps, 'y', CoordToMils(Vertex.Y));
                 VertsArray.Add(BuildJSONObject(VProps, 3));
-            finally
-                VProps.Free;
             end;
+            Props.Add(BuildJSONArray(VertsArray, 'vertices', 2));
+        finally
+            VProps.Free;
         end;
-        Props.Add(BuildJSONArray(VertsArray, 'vertices', 2));
     finally
         VertsArray.Free;
     end;
@@ -2583,7 +2603,7 @@ end;
 // Get the graphic primitives of symbols in a schematic library.
 // SymbolName = '' -> inventory mode: every symbol with per-type primitive
 // counts. SymbolName given -> full geometry dump of that symbol (mils).
-function GetSymbolPrimitives(ROOT_DIR: String; LibraryPath: String; SymbolName: String): String;
+function GetSymbolPrimitives(LibraryPath: String; SymbolName: String): String;
 var
     CurrentLib   : ISch_Lib;
     LibIterator  : ISch_Iterator;
@@ -2596,12 +2616,16 @@ var
     SymProps     : TStringList;
     PrimsArray   : TStringList;
     PrimProps    : TStringList;
-    OutputLines  : TStringList;
     Counts       : TStringList;
     TypeName     : String;
     i            : Integer;
     Found        : Boolean;
     PinObj       : ISch_Pin;
+    PrimLocation : TLocation;
+    PrimCorner   : TLocation;
+    SearchName   : String;
+    TargetPath   : String;
+    CurrentPath  : String;
 begin
     Result := '';
 
@@ -2616,11 +2640,15 @@ begin
             Result := 'ERROR: Library file not found: ' + LibraryPath;
             Exit;
         end;
-        ServerDoc := OpenLibraryDocument('SchLib', LibraryPath);
-        if ServerDoc = Nil then
+        TargetPath := NormalizePath(LibraryPath);
+        if not SchLibViewIsFocused(TargetPath) then
         begin
-            Result := 'ERROR: Failed to open library: ' + LibraryPath;
-            Exit;
+            ServerDoc := OpenLibraryDocument('SchLib', TargetPath);
+            if ServerDoc = Nil then
+            begin
+                Result := 'ERROR: Failed to open library: ' + LibraryPath;
+                Exit;
+            end;
         end;
     end;
 
@@ -2631,12 +2659,24 @@ begin
         Exit;
     end;
 
-    ResultProps := TStringList.Create;
-    SymbolsArray := TStringList.Create;
-    Found := False;
+    CurrentPath := CurrentLib.DocumentName;
+    if (LibraryPath <> '') then
+        if (NormalizedPath(NormalizePath(CurrentPath)) <> NormalizedPath(TargetPath)) then
+        begin
+            Result := 'ERROR: Could not focus schematic library: ' + LibraryPath;
+            Exit;
+        end;
 
+    ResultProps := TStringList.Create;
+    SymbolsArray := nil;
+    PrimProps := nil;
     try
-        AddJSONProperty(ResultProps, 'library_name', ExtractFileName(CurrentLib.DocumentName));
+        SymbolsArray := TStringList.Create;
+        if (SymbolName <> '') then
+            PrimProps := TStringList.Create;
+        Found := False;
+        SearchName := UpperCase(SymbolName);
+        AddJSONProperty(ResultProps, 'library_name', ExtractFileName(CurrentPath));
 
         LibIterator := CurrentLib.SchLibIterator_Create;
         LibIterator.AddFilter_ObjectSet(MkSet(eSchComponent));
@@ -2698,7 +2738,7 @@ begin
                     SymProps.Free;
                 end;
             end
-            else if (SymbolName = '*') or (UpperCase(LibComp.LibReference) = UpperCase(SymbolName)) then
+            else if (SymbolName = '*') or (UpperCase(LibComp.LibReference) = SearchName) then
             begin
                 // Dump mode: full geometry of every primitive.
                 // SymbolName '*' dumps every symbol into the symbols array.
@@ -2715,13 +2755,12 @@ begin
                     Prim := PrimIterator.FirstSchObject;
                     while (Prim <> Nil) do
                     begin
-                        PrimProps := TStringList.Create;
+                        PrimProps.Clear;
+                        // One unreadable primitive must not crash the dump:
+                        // a property access that throws would otherwise leave
+                        // the script paused in the debugger, wedging all
+                        // later script runs.
                         try
-                          // One unreadable primitive must not crash the dump:
-                          // a property access that throws would otherwise leave
-                          // the script paused in the debugger, wedging all
-                          // later script runs
-                          try
                             case Prim.ObjectId of
                                 ePin:
                                 begin
@@ -2731,8 +2770,9 @@ begin
                                     AddJSONProperty(PrimProps, 'pin_name', PinObj.Name);
                                     AddJSONInteger(PrimProps, 'electrical', PinObj.Electrical);
                                     AddJSONInteger(PrimProps, 'orientation', PinObj.Orientation);
-                                    AddJSONNumber(PrimProps, 'x', CoordToMils(PinObj.Location.X));
-                                    AddJSONNumber(PrimProps, 'y', CoordToMils(PinObj.Location.Y));
+                                    PrimLocation := PinObj.Location;
+                                    AddJSONNumber(PrimProps, 'x', CoordToMils(PrimLocation.X));
+                                    AddJSONNumber(PrimProps, 'y', CoordToMils(PrimLocation.Y));
                                     AddJSONNumber(PrimProps, 'length', CoordToMils(PinObj.PinLength));
                                     AddJSONBoolean(PrimProps, 'show_name', PinObj.ShowName);
                                     AddJSONBoolean(PrimProps, 'show_designator', PinObj.ShowDesignator);
@@ -2747,20 +2787,24 @@ begin
                                 eRectangle:
                                 begin
                                     AddJSONProperty(PrimProps, 'type', 'rectangle');
-                                    AddJSONNumber(PrimProps, 'x1', CoordToMils(Prim.Location.X));
-                                    AddJSONNumber(PrimProps, 'y1', CoordToMils(Prim.Location.Y));
-                                    AddJSONNumber(PrimProps, 'x2', CoordToMils(Prim.Corner.X));
-                                    AddJSONNumber(PrimProps, 'y2', CoordToMils(Prim.Corner.Y));
+                                    PrimLocation := Prim.Location;
+                                    AddJSONNumber(PrimProps, 'x1', CoordToMils(PrimLocation.X));
+                                    AddJSONNumber(PrimProps, 'y1', CoordToMils(PrimLocation.Y));
+                                    PrimCorner := Prim.Corner;
+                                    AddJSONNumber(PrimProps, 'x2', CoordToMils(PrimCorner.X));
+                                    AddJSONNumber(PrimProps, 'y2', CoordToMils(PrimCorner.Y));
                                     AddJSONInteger(PrimProps, 'line_width', Prim.LineWidth);
                                     AddJSONBoolean(PrimProps, 'is_solid', Prim.IsSolid);
                                 end;
                                 eLine:
                                 begin
                                     AddJSONProperty(PrimProps, 'type', 'line');
-                                    AddJSONNumber(PrimProps, 'x1', CoordToMils(Prim.Location.X));
-                                    AddJSONNumber(PrimProps, 'y1', CoordToMils(Prim.Location.Y));
-                                    AddJSONNumber(PrimProps, 'x2', CoordToMils(Prim.Corner.X));
-                                    AddJSONNumber(PrimProps, 'y2', CoordToMils(Prim.Corner.Y));
+                                    PrimLocation := Prim.Location;
+                                    AddJSONNumber(PrimProps, 'x1', CoordToMils(PrimLocation.X));
+                                    AddJSONNumber(PrimProps, 'y1', CoordToMils(PrimLocation.Y));
+                                    PrimCorner := Prim.Corner;
+                                    AddJSONNumber(PrimProps, 'x2', CoordToMils(PrimCorner.X));
+                                    AddJSONNumber(PrimProps, 'y2', CoordToMils(PrimCorner.Y));
                                     AddJSONInteger(PrimProps, 'line_width', Prim.LineWidth);
                                 end;
                                 ePolyline:
@@ -2779,8 +2823,9 @@ begin
                                 eArc:
                                 begin
                                     AddJSONProperty(PrimProps, 'type', 'arc');
-                                    AddJSONNumber(PrimProps, 'cx', CoordToMils(Prim.Location.X));
-                                    AddJSONNumber(PrimProps, 'cy', CoordToMils(Prim.Location.Y));
+                                    PrimLocation := Prim.Location;
+                                    AddJSONNumber(PrimProps, 'cx', CoordToMils(PrimLocation.X));
+                                    AddJSONNumber(PrimProps, 'cy', CoordToMils(PrimLocation.Y));
                                     AddJSONNumber(PrimProps, 'radius', CoordToMils(Prim.Radius));
                                     AddJSONNumber(PrimProps, 'start_angle', Prim.StartAngle);
                                     AddJSONNumber(PrimProps, 'end_angle', Prim.EndAngle);
@@ -2789,8 +2834,9 @@ begin
                                 eEllipticalArc:
                                 begin
                                     AddJSONProperty(PrimProps, 'type', 'elliptical_arc');
-                                    AddJSONNumber(PrimProps, 'cx', CoordToMils(Prim.Location.X));
-                                    AddJSONNumber(PrimProps, 'cy', CoordToMils(Prim.Location.Y));
+                                    PrimLocation := Prim.Location;
+                                    AddJSONNumber(PrimProps, 'cx', CoordToMils(PrimLocation.X));
+                                    AddJSONNumber(PrimProps, 'cy', CoordToMils(PrimLocation.Y));
                                     AddJSONNumber(PrimProps, 'radius', CoordToMils(Prim.Radius));
                                     AddJSONNumber(PrimProps, 'secondary_radius', CoordToMils(Prim.SecondaryRadius));
                                     AddJSONNumber(PrimProps, 'start_angle', Prim.StartAngle);
@@ -2800,8 +2846,9 @@ begin
                                 eEllipse:
                                 begin
                                     AddJSONProperty(PrimProps, 'type', 'ellipse');
-                                    AddJSONNumber(PrimProps, 'cx', CoordToMils(Prim.Location.X));
-                                    AddJSONNumber(PrimProps, 'cy', CoordToMils(Prim.Location.Y));
+                                    PrimLocation := Prim.Location;
+                                    AddJSONNumber(PrimProps, 'cx', CoordToMils(PrimLocation.X));
+                                    AddJSONNumber(PrimProps, 'cy', CoordToMils(PrimLocation.Y));
                                     AddJSONNumber(PrimProps, 'radius', CoordToMils(Prim.Radius));
                                     AddJSONNumber(PrimProps, 'secondary_radius', CoordToMils(Prim.SecondaryRadius));
                                     AddJSONBoolean(PrimProps, 'is_solid', Prim.IsSolid);
@@ -2816,8 +2863,9 @@ begin
                                 ePie:
                                 begin
                                     AddJSONProperty(PrimProps, 'type', 'pie');
-                                    AddJSONNumber(PrimProps, 'cx', CoordToMils(Prim.Location.X));
-                                    AddJSONNumber(PrimProps, 'cy', CoordToMils(Prim.Location.Y));
+                                    PrimLocation := Prim.Location;
+                                    AddJSONNumber(PrimProps, 'cx', CoordToMils(PrimLocation.X));
+                                    AddJSONNumber(PrimProps, 'cy', CoordToMils(PrimLocation.Y));
                                     AddJSONNumber(PrimProps, 'radius', CoordToMils(Prim.Radius));
                                     AddJSONNumber(PrimProps, 'start_angle', Prim.StartAngle);
                                     AddJSONNumber(PrimProps, 'end_angle', Prim.EndAngle);
@@ -2827,10 +2875,12 @@ begin
                                 eRoundRectangle:
                                 begin
                                     AddJSONProperty(PrimProps, 'type', 'round_rectangle');
-                                    AddJSONNumber(PrimProps, 'x1', CoordToMils(Prim.Location.X));
-                                    AddJSONNumber(PrimProps, 'y1', CoordToMils(Prim.Location.Y));
-                                    AddJSONNumber(PrimProps, 'x2', CoordToMils(Prim.Corner.X));
-                                    AddJSONNumber(PrimProps, 'y2', CoordToMils(Prim.Corner.Y));
+                                    PrimLocation := Prim.Location;
+                                    AddJSONNumber(PrimProps, 'x1', CoordToMils(PrimLocation.X));
+                                    AddJSONNumber(PrimProps, 'y1', CoordToMils(PrimLocation.Y));
+                                    PrimCorner := Prim.Corner;
+                                    AddJSONNumber(PrimProps, 'x2', CoordToMils(PrimCorner.X));
+                                    AddJSONNumber(PrimProps, 'y2', CoordToMils(PrimCorner.Y));
                                     AddJSONNumber(PrimProps, 'corner_x_radius', CoordToMils(Prim.CornerXRadius));
                                     AddJSONNumber(PrimProps, 'corner_y_radius', CoordToMils(Prim.CornerYRadius));
                                     AddJSONInteger(PrimProps, 'line_width', Prim.LineWidth);
@@ -2840,8 +2890,9 @@ begin
                                 begin
                                     AddJSONProperty(PrimProps, 'type', 'label');
                                     AddJSONProperty(PrimProps, 'text', Prim.Text);
-                                    AddJSONNumber(PrimProps, 'x', CoordToMils(Prim.Location.X));
-                                    AddJSONNumber(PrimProps, 'y', CoordToMils(Prim.Location.Y));
+                                    PrimLocation := Prim.Location;
+                                    AddJSONNumber(PrimProps, 'x', CoordToMils(PrimLocation.X));
+                                    AddJSONNumber(PrimProps, 'y', CoordToMils(PrimLocation.Y));
                                 end;
                             eParameter:
                                 AddJSONProperty(PrimProps, 'type', '');
@@ -2875,13 +2926,10 @@ begin
                                     PrimsArray.Add(BuildJSONObject(PrimProps, 1));
                                 end;
                             end;
-                          except
+                        except
                             PrimProps.Clear;
                             AddJSONProperty(PrimProps, 'type', 'unreadable');
                             PrimsArray.Add(BuildJSONObject(PrimProps, 1));
-                          end;
-                        finally
-                            PrimProps.Free;
                         end;
 
                         Prim := PrimIterator.NextSchObject;
@@ -2917,21 +2965,16 @@ begin
             Exit;
         end;
 
-        OutputLines := TStringList.Create;
-        try
-            OutputLines.Text := BuildJSONObject(ResultProps);
-            Result := WriteJSONToFile(OutputLines, ROOT_DIR + '\temp_symbol_primitives.json');
-        finally
-            OutputLines.Free;
-        end;
+        Result := BuildJSONObject(ResultProps);
     finally
+        if (PrimProps <> nil) then PrimProps.Free;
+        if (SymbolsArray <> nil) then SymbolsArray.Free;
         ResultProps.Free;
-        SymbolsArray.Free;
     end;
 end;
 
 // Function to get all schematic component data
-function GetSchematicData(ROOT_DIR: String): String;
+function GetSchematicData(ROOT_DIR: String; Designators: TStringList): String;
 var
     Project     : IProject;
     Doc         : IDocument;
@@ -2944,12 +2987,12 @@ var
     ComponentsArray : TStringList;
     CompProps   : TStringList;
     ParamsProps : TStringList;
-    OutputLines : TStringList;
+    OutputLines, ResultProps : TStringList;
     Designator, Sheet, ParameterName, ParameterValue : String;
     x, y, width, height, rotation : String;
     left, right, top, bottom : String;
     i : Integer;
-    SchematicCount, ComponentCount : Integer;
+    Filtered, HasComponents : Boolean;
 begin
     Result := '';
 
@@ -2962,21 +3005,14 @@ begin
         Exit;
     end;
 
+    Filtered := Designators.Count > 0;
+    HasComponents := False;
+
     // Create array for components
     ComponentsArray := TStringList.Create;
 
     try
-        // Count the number of schematic documents
-        SchematicCount := 0;
-        For i := 0 to Project.DM_LogicalDocumentCount - 1 Do
-        Begin
-            Doc := Project.DM_LogicalDocuments(i);
-            If Doc.DM_DocumentKind = 'SCH' Then
-                SchematicCount := SchematicCount + 1;
-        End;
-
         // Process each schematic document
-        ComponentCount := 0;
         For i := 0 to Project.DM_LogicalDocumentCount - 1 Do
         Begin
             Doc := Project.DM_LogicalDocuments(i);
@@ -2995,12 +3031,16 @@ begin
                     Component := Iterator.FirstSchObject;
                     While (Component <> Nil) Do
                     Begin
-                        // Create component properties
-                        CompProps := TStringList.Create;
+                        HasComponents := True;
+                        Designator := Component.Designator.Text;
+                        if Filtered and (Designators.IndexOf(Designator) < 0) then
+                        begin
+                            Component := Iterator.NextSchObject;
+                            Continue;
+                        end;
 
+                        CompProps := TStringList.Create;
                         try
-                            // Get basic component properties
-                            Designator := Component.Designator.Text;
                             Sheet := Doc.DM_FullPath;
 
                             // Get position, dimensions and rotation
@@ -3066,7 +3106,6 @@ begin
                                 
                                 // Add to components array
                                 ComponentsArray.Add(BuildJSONObject(CompProps, 1));
-                                ComponentCount := ComponentCount + 1;
                             finally
                                 ParamsProps.Free;
                             end;
@@ -3083,6 +3122,21 @@ begin
             End;
         End;
         
+        // Legacy unfiltered requests return a bare array. Distinguish an empty
+        // project from a nonempty project with no matching designators.
+        if Filtered then
+        begin
+            ResultProps := TStringList.Create;
+            try
+                AddJSONBoolean(ResultProps, 'has_components', HasComponents);
+                ResultProps.Add(BuildJSONArray(ComponentsArray, 'components'));
+                Result := BuildJSONObject(ResultProps);
+            finally
+                ResultProps.Free;
+            end;
+            Exit;
+        end;
+
         // Build the final JSON array
         OutputLines := TStringList.Create;
         try
@@ -4193,11 +4247,14 @@ var
     Names : TStringList;
     Items : TStringList;
     i     : Integer;
+    Functions : String;
 begin
+    Functions := PinFunctionsText(Pin);
+    if Functions = '' then Exit;
     Names := TStringList.Create;
     Items := TStringList.Create;
     try
-        Names.Text := StringReplace(PinFunctionsText(Pin), '/', #13#10, REPLACEALL);
+        Names.Text := StringReplace(Functions, '/', #13#10, REPLACEALL);
         for i := 0 to Names.Count - 1 do
             Items.Add('"' + JSONEscapeString(Names[i]) + '"');
         if (Items.Count > 0) then
@@ -4216,31 +4273,36 @@ var
     Items  : TStringList;
     PProps : TStringList;
 begin
-    Items := TStringList.Create;
+    Iter := Pin.SchIterator_Create;
     try
-        Iter := Pin.SchIterator_Create;
         Iter.AddFilter_ObjectSet(MkSet(eParameter));
         Param := Iter.FirstSchObject;
-        while (Param <> nil) do
-        begin
-            if IsOwnParameter(Param, Pin) then
-            begin
-                PProps := TStringList.Create;
-                try
-                    AddJSONProperty(PProps, 'name', Param.Name);
-                    AddJSONProperty(PProps, 'value', Param.Text);
-                    Items.Add(BuildJSONObject(PProps, 3));
-                finally
-                    PProps.Free;
+        if (Param = nil) then Exit;
+        Items := TStringList.Create;
+        try
+            PProps := TStringList.Create;
+            try
+                while (Param <> nil) do
+                begin
+                    if IsOwnParameter(Param, Pin) then
+                    begin
+                        PProps.Clear;
+                        AddJSONProperty(PProps, 'name', Param.Name);
+                        AddJSONProperty(PProps, 'value', Param.Text);
+                        Items.Add(BuildJSONObject(PProps, 3));
+                    end;
+                    Param := Iter.NextSchObject;
                 end;
+                if (Items.Count > 0) then
+                    Props.Add(BuildJSONArray(Items, 'parameters', 2));
+            finally
+                PProps.Free;
             end;
-            Param := Iter.NextSchObject;
+        finally
+            Items.Free;
         end;
-        Pin.SchIterator_Destroy(Iter);
-        if (Items.Count > 0) then
-            Props.Add(BuildJSONArray(Items, 'parameters', 2));
     finally
-        Items.Free;
+        Pin.SchIterator_Destroy(Iter);
     end;
 end;
 

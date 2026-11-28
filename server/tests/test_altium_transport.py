@@ -5,6 +5,7 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -54,6 +55,75 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         self.start_patch(patch.object(main.script_bundle, "ensure_bundle", return_value=bundle))
         bridge.config.script_path = str(main.DEFAULT_SCRIPT_PATH)
         return bundle
+
+    async def test_specialization_failure_and_custom_projects_use_the_full_bundle(self):
+        bridge = main.AltiumBridge()
+        bridge.config.altium_exe_path = main.sys.executable
+        bridge.config.script_path = str(main.DEFAULT_SCRIPT_PATH)
+        bundle = self.root / "full.pas"
+        bundle_dir = self.root / "bridge"
+        with patch.object(main.script_bundle, "ensure_bundle",
+                          side_effect=[ValueError("unknown branch"), bundle]) as build, \
+                patch.object(bridge, "_launch_bridge_file", return_value=True) as launch:
+            self.assertTrue(await bridge.run_altium_script("missing_branch"))
+            self.assertEqual(build.call_args_list[0].kwargs, {"command": "missing_branch"})
+            build.assert_called_with(bridge.config.script_path, bundle_dir)
+            launch.assert_called_once_with(bundle, "Run")
+
+        project = self.root / "custom.PrjScr"
+        project.touch()
+        bridge.config.script_path = str(project)
+        with patch.object(main.script_bundle, "ensure_bundle", return_value=bundle) as build, \
+                patch.object(bridge, "_launch_bridge_file", return_value=True) as launch:
+            self.assertTrue(await bridge.run_altium_script("get_board_summary"))
+            build.assert_called_once_with(str(project), bundle_dir)
+            launch.assert_called_once_with(bundle, "Run")
+
+    def test_resident_build_uses_the_command_group_for_the_default_bridge(self):
+        bridge = main.AltiumBridge()
+        bridge._resident_enabled = True
+        bridge.config.script_path = str(main.DEFAULT_SCRIPT_PATH)
+        bundle = self.root / "bridge.pas"
+        with patch.object(main.script_bundle, "ensure_bundle", return_value=bundle) as build:
+            for command, group in (
+                ("get_layout", "placement"), ("check_placement", "placement"),
+                ("get_component_pins", "placement"), ("get_net_connections", "placement"),
+                ("get_schematic_pins", "schematic"), ("create_symbols_batch", "symbols"),
+                ("list_open_documents", "routing"),
+            ):
+                self.assertEqual(bridge._resident_bundle(command), bundle)
+                build.assert_called_with(bridge.config.script_path, self.root / "bridge",
+                                         resident=True, resident_group=group)
+            build.reset_mock()
+            self.assertIsNone(bridge._resident_bundle("save_current_document"))
+            build.assert_not_called()
+
+    def test_resident_build_failure_only_disables_the_failed_group(self):
+        bridge = main.AltiumBridge()
+        self.enable_resident(bridge)
+        routing_bundle = self.root / "routing_123456abcdef.pas"
+        with patch.object(main.script_bundle, "ensure_bundle", side_effect=[
+            ValueError("bad symbols unit"), routing_bundle,
+        ]) as build:
+            self.assertIsNone(bridge._resident_bundle("create_schematic_symbol"))
+            self.assertIsNone(bridge._resident_bundle("get_symbol_primitives"))
+            self.assertEqual(bridge._resident_bundle("pcb_routing"), routing_bundle)
+        self.assertEqual(build.call_count, 2)
+
+    async def test_resident_start_failure_only_disables_the_failed_group(self):
+        bridge = main.AltiumBridge()
+        bundle = self.enable_resident(bridge)
+
+        async def one_shot(command):
+            self.reply(self.claim())
+            return True
+
+        with patch.object(bridge, "_launch_bridge_file", return_value=False), \
+                patch.object(bridge, "run_altium_script", side_effect=one_shot):
+            result = await bridge.execute_command("create_symbols_batch", {})
+        self.assertTrue(result["success"])
+        self.assertIsNone(bridge._resident_bundle("get_symbol_primitives"))
+        self.assertEqual(bridge._resident_bundle("pcb_routing"), bundle)
 
     async def test_resident_reused_by_separate_servers_and_drained_for_sandbox(self):
         first, second = main.AltiumBridge(), main.AltiumBridge()
@@ -112,6 +182,7 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
             return True
 
         with patch.object(bridge, "run_altium_script", side_effect=launch) as one_shot, \
+                patch.object(main.AltiumBridge, "_resident_may_own_marker", return_value=False), \
                 patch.object(bridge, "_launch_bridge_file") as resident_launch:
             result = await bridge.execute_command("pcb_routing", {"operation": "batch"})
         self.assertTrue(result["success"])
@@ -149,6 +220,181 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 worker.cancel()
                 await asyncio.gather(worker, return_exceptions=True)
+
+    async def test_resident_switch_waits_for_the_old_group_to_finish_ui_work(self):
+        bridge = main.AltiumBridge()
+        placement_bundle = self.enable_resident(bridge)
+        executable = os.path.normcase(os.path.normpath(bridge.config.altium_exe_path))
+        old = ResidentSession.start(self.root, "000000000000", executable)
+        old.ready.touch()
+        old.settling.touch()
+        finished = asyncio.Event()
+
+        async def finish_old():
+            while old.lease.exists():
+                await asyncio.sleep(.002)
+            await asyncio.sleep(.1)
+            old.ready.unlink()
+            old.settling.unlink()
+            finished.set()
+
+        def launch(bundle, entry):
+            self.assertTrue(finished.is_set())
+            self.assertEqual((bundle, entry), (placement_bundle, "RunResident"))
+            current = ResidentSession.load(self.root)
+            self.assertNotEqual(old.token, current.token)
+            self.reply(self.claim(current.request))
+            return True
+
+        with patch.object(main, "RESIDENT_SETTLING_PICKUP_TIMEOUT", .5), \
+                patch.object(bridge, "_launch_bridge_file", side_effect=launch) as boot, \
+                patch.object(bridge, "run_altium_script") as one_shot:
+            worker = asyncio.create_task(finish_old())
+            try:
+                self.assertTrue((await bridge.execute_command("get_layout", {}))["success"])
+                boot.assert_called_once()
+                one_shot.assert_not_called()
+            finally:
+                worker.cancel()
+                await asyncio.gather(worker, return_exceptions=True)
+
+    async def test_resident_switch_timeout_leaves_the_next_request_unstarted(self):
+        bridge = main.AltiumBridge()
+        self.enable_resident(bridge)
+        executable = os.path.normcase(os.path.normpath(bridge.config.altium_exe_path))
+        retiring = ResidentSession.start(self.root, "000000000000", executable)
+        retiring.ready.touch()
+        retiring.settling.touch()
+        with patch.object(main, "RESIDENT_SETTLING_PICKUP_TIMEOUT", .08), \
+                patch.object(main.AltiumBridge, "_resident_may_own_marker", return_value=True), \
+                patch.object(bridge, "_launch_bridge_file") as boot, \
+                patch.object(bridge, "run_altium_script") as one_shot:
+            for _ in range(2):
+                result = await bridge.execute_command("get_layout", {})
+                self.assertEqual(result["execution_state"], "not_started")
+            async with bridge.exclusive_execution() as problem:
+                self.assertEqual(problem["execution_state"], "not_started")
+        self.assertEqual(bridge.command_status(), {"pending": False})
+        self.assertFalse(retiring.lease.exists())
+        self.assertTrue(retiring.ready.exists())
+        self.assertTrue(retiring.settling.exists())
+        boot.assert_not_called()
+        one_shot.assert_not_called()
+
+    async def test_reuse_timeout_withdraws_unclaimed_work_without_launching_behind_ui(self):
+        bridge = main.AltiumBridge()
+        self.enable_resident(bridge)
+        executable = os.path.normcase(os.path.normpath(bridge.config.altium_exe_path))
+        active = ResidentSession.start(self.root, "123456abcdef", executable)
+        active.ready.touch()
+        active.settling.touch()
+        with patch.object(main, "RESIDENT_SETTLING_PICKUP_TIMEOUT", .08), \
+                patch.object(main.AltiumBridge, "_resident_may_own_marker", return_value=True), \
+                patch.object(bridge, "_launch_bridge_file") as boot, \
+                patch.object(bridge, "run_altium_script") as one_shot:
+            result = await bridge.execute_command("create_pcb_rule", {})
+        self.assertEqual(result["execution_state"], "not_started")
+        self.assertEqual(bridge.command_status(), {"pending": False})
+        self.assertFalse(active.request.exists())
+        self.assertFalse(active.lease.exists())
+        self.assertTrue(active.ready.exists())
+        boot.assert_not_called()
+        one_shot.assert_not_called()
+
+    async def test_retirement_removes_settling_markers_from_a_dead_process(self):
+        stale = ResidentSession.start(self.root, "000000000000", "X2.EXE")
+        stale.ready.touch()
+        stale.settling.touch()
+        with patch.object(main, "RESIDENT_SETTLING_PICKUP_TIMEOUT", .08), \
+                patch.object(main.AltiumBridge, "_resident_may_own_marker", return_value=False):
+            self.assertTrue(await main.AltiumBridge._retire_resident(stale, defer_if_live=True))
+        self.assertFalse(stale.lease.exists())
+        self.assertFalse(stale.ready.exists())
+        self.assertFalse(stale.settling.exists())
+
+    async def test_sandbox_does_not_start_behind_the_idle_bridge_message_pump(self):
+        bridge = main.AltiumBridge()
+        idle = ResidentSession.start(self.root, "000000000000", "X2.EXE")
+        idle.ready.touch()
+        with patch.object(main.AltiumBridge, "_resident_may_own_marker", return_value=True):
+            async with bridge.exclusive_execution() as problem:
+                self.assertEqual(problem["execution_state"], "not_started")
+        self.assertFalse(idle.lease.exists())
+        self.assertTrue(idle.ready.exists())
+
+    def test_only_processes_older_than_the_ready_marker_can_own_it(self):
+        session = ResidentSession.start(self.root, "000000000000", str(self.root / "X2.EXE"))
+        session.ready.touch()
+        written = session.ready.stat().st_mtime
+        with patch.object(main.win_processes, "pids_by_name", return_value=[123]), \
+                patch.object(main.win_processes, "image_path", return_value=session.executable), \
+                patch.object(main.win32api, "OpenProcess") as open_process, \
+                patch.object(main.win32process, "GetProcessTimes", side_effect=[
+                    {"CreationTime": datetime.fromtimestamp(written - 1, timezone.utc)},
+                    {"CreationTime": datetime.fromtimestamp(written + 1, timezone.utc)},
+                    OSError("unknown"),
+                ]):
+            self.assertTrue(main.AltiumBridge._resident_may_own_marker(session))
+            self.assertFalse(main.AltiumBridge._resident_may_own_marker(session))
+            self.assertTrue(main.AltiumBridge._resident_may_own_marker(session))
+            self.assertEqual(open_process.return_value.Close.call_count, 3)
+        with patch.object(main.win_processes, "pids_by_name", return_value=[123]), \
+                patch.object(main.win_processes, "image_path", return_value=str(self.root / "other" / "X2.EXE")):
+            self.assertFalse(main.AltiumBridge._resident_may_own_marker(session))
+
+    async def test_late_routing_response_keeps_handoff_protected(self):
+        bridge = main.AltiumBridge()
+        self.enable_resident(bridge)
+        active = None
+        request = None
+
+        def launch(bundle, entry):
+            nonlocal active, request
+            active = ResidentSession.load(self.root)
+            active.ready.touch()
+            active.settling.touch()
+            request = self.claim(active.request)
+            return True
+
+        with patch.object(main, "ROUTING_MUTATION_TIMEOUT", .025), \
+                patch.object(main, "RESIDENT_SETTLING_PICKUP_TIMEOUT", .08), \
+                patch.object(main.AltiumBridge, "_resident_may_own_marker", return_value=True), \
+                patch.object(bridge, "_launch_bridge_file", side_effect=launch) as boot, \
+                patch.object(bridge, "run_altium_script") as one_shot:
+            timed_out = await bridge.execute_command("pcb_routing", {"operation": "batch"}, timeout=.025)
+            self.assertEqual(timed_out["execution_state"], "unknown")
+            self.assertTrue(bridge.command_status()["pending"])
+            self.reply(request)
+            next_request = await bridge.execute_command("get_layout", {})
+            self.assertEqual(next_request["execution_state"], "not_started")
+            self.assertEqual(bridge.command_status(), {"pending": False})
+            boot.assert_called_once()
+            one_shot.assert_not_called()
+        self.assertTrue(active.ready.exists())
+        self.assertTrue(active.settling.exists())
+
+    async def test_response_timeout_keeps_exchange_locked_until_stop_settles(self):
+        bridge = main.AltiumBridge()
+        stop_sent = asyncio.Event()
+
+        async def launch(command):
+            self.claim()
+            return True
+
+        async def stop():
+            stop_sent.set()
+
+        with patch.object(bridge, "run_altium_script", side_effect=launch), \
+                patch.object(bridge, "stop_script_debugger", side_effect=stop), \
+                patch.object(bridge, "STOP_SETTLE", .08):
+            task = asyncio.create_task(bridge.execute_command("edit", {}, timeout=.025))
+            try:
+                await asyncio.wait_for(stop_sent.wait(), 1)
+                self.assertTrue(bridge._command_lock.locked())
+                self.assertFalse(task.done())
+                self.assertEqual((await task)["execution_state"], "unknown")
+            finally:
+                await asyncio.gather(task, return_exceptions=True)
 
     async def test_released_resident_ends_the_settling_wait_without_stealing_request(self):
         session = ResidentSession.start(self.root, "123456abcdef", "X2.EXE")

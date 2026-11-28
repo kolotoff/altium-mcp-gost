@@ -6,6 +6,7 @@ No board names, net classes, coordinate exceptions or fixed route widths occur h
 
 from __future__ import annotations
 
+from collections import defaultdict
 from copy import deepcopy
 import math
 
@@ -88,15 +89,41 @@ def primitive_identity(kind, row):
     )
 
 
+def _copy_batch_inventory(snapshot):
+    # Native TSV rows contain only strings. Pre-copy those rows without copying
+    # each field, and let deepcopy handle other data and shared references.
+    memo = {}
+    for rows in snapshot["tables"].values():
+        if type(rows) is not list:
+            continue
+        for row in rows:
+            if type(row) is dict and all(
+                type(key) is str and type(value) is str for key, value in row.items()
+            ):
+                memo[id(row)] = row.copy()
+    return deepcopy(snapshot, memo)
+
+
 def plan_batch(before, operations, *, allow_via_in_pad=False):
     if not isinstance(operations, list) or not 1 <= len(operations) <= 256:
         raise ValueError("Batch requires 1-256 explicit operations")
     known = {r["net"] for r in before["tables"]["nets"]}
     layers = {int(r["layer_id"]) for r in before["tables"]["layers"]}
-    expected = deepcopy(before)
+    expected = _copy_batch_inventory(before)
     normalized = []
     old_targets = set()
     destinations = set()
+    geometry_index = {}
+
+    def rows_with_geometry(kind, key):
+        # Only index a primitive type when its original rows must be checked.
+        if kind not in geometry_index:
+            by_geometry = defaultdict(list)
+            for record in before["tables"][TABLES[kind]]:
+                by_geometry[geometry(kind, record)].append(record)
+            geometry_index[kind] = by_geometry
+        return geometry_index[kind].get(key, ())
+
     for index, operation in enumerate(operations):
         kind, action = operation.get("kind"), operation.get("action")
         if kind not in TABLES or action not in {"add", "edit", "remove"}:
@@ -132,11 +159,7 @@ def plan_batch(before, operations, *, allow_via_in_pad=False):
             if identity in old_targets:
                 raise ValueError("A primitive can be targeted only once per batch")
             old_targets.add(identity)
-            matches = [
-                r
-                for r in before["tables"][table]
-                if primitive_identity(kind, r) == primitive_identity(kind, old)
-            ]
+            matches = [r for r in rows_with_geometry(kind, old_geometry) if r["net"] == net]
             if len(matches) != 1:
                 raise ValueError("Old primitive must match exactly one snapshot record")
             expected["tables"][table].remove(matches[0])
@@ -195,16 +218,10 @@ def plan_batch(before, operations, *, allow_via_in_pad=False):
                 raise ValueError("Duplicate destination geometry in batch")
             destinations.add(destination)
             # Reject overlap with any original primitive except this exact target.
-            collisions = [
-                r
-                for r in before["tables"][table]
-                if geometry(kind, r) == new_geometry
-                and not (
-                    old is not None
-                    and primitive_identity(kind, r) == primitive_identity(kind, old)
-                )
-            ]
-            if collisions:
+            if any(
+                old_geometry != new_geometry or r["net"] != net
+                for r in rows_with_geometry(kind, new_geometry)
+            ):
                 raise ValueError("Destination geometry is already occupied")
             record = {k: str(integer(new[k], k)) for k in GEOMETRY_FIELDS[kind]}
             record.update(net=net, selected="false")

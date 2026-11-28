@@ -14,9 +14,26 @@ from pathlib import Path
 
 _ROUTINE = re.compile(r"^(?:function|procedure)\s+([A-Za-z_]\w*)", re.I)
 _NOISE = re.compile(r"//[^\n]*|\{[^}]*\}|\(\*.*?\*\)|'(?:[^']|'')*'", re.S)
+_COMMAND_NAME = re.compile(r"[a-z][a-z0-9_]*")
 ROUTING_COMMANDS = frozenset({
     "pcb_routing", "get_unrouted_connections", "create_pcb_rule", "list_open_documents",
 })
+RESIDENT_COMMAND_GROUPS = {
+    "routing": ROUTING_COMMANDS,
+    "placement": frozenset({
+        "get_layout", "place_components", "check_placement", "get_component_pins",
+        "get_net_connections",
+    }),
+    "schematic": frozenset({"get_schematic_data", "get_schematic_pins"}),
+    "symbols": frozenset({
+        "create_schematic_symbol", "create_symbols_batch", "get_symbol_primitives",
+        "get_library_symbol_reference",
+    }),
+}
+RESIDENT_GROUP_BY_COMMAND = {
+    command: group for group, commands in RESIDENT_COMMAND_GROUPS.items()
+    for command in commands
+}
 RESIDENT_KEY_PLACEHOLDER = "'{BRIDGE_RESIDENT_BUNDLE_KEY}'"
 
 
@@ -105,17 +122,20 @@ def _specialize_dispatch(routines, commands):
     if len(branches) != len(case_commands):
         raise ValueError("Expected one branch for each selected bridge command")
     if "pcb_routing" not in commands:
-        run = _replace_once(run, dispatch, (
-            "                EnsureDesignProjectFocused();\n"
-            "                CommandResult := ExecuteCommand(CommandType);"
-        ))
+        focus = "                EnsureDesignProjectFocused();\n"
+        if "save_current_document" in commands:
+            focus = (
+                "                if CommandType <> 'save_current_document' then\n"
+                "                    EnsureDesignProjectFocused();\n"
+            )
+        run = _replace_once(run, dispatch, focus + "                CommandResult := ExecuteCommand(CommandType);")
     return {
         run_index: run,
         command_index: head + case_start + "".join(branches) + case_end + tail,
     }
 
 
-def bundle_text(units, command=None, *, resident=False):
+def bundle_text(units, command=None, *, resident=False, resident_group="routing"):
     """One script file from the given unit paths (in project order)."""
     decls, routines = [], []
     for path in units:
@@ -124,10 +144,10 @@ def bundle_text(units, command=None, *, resident=False):
     index = {name: n for n, (name, _, _) in enumerate(routines)}
     if len(index) != len(routines):
         raise ValueError("a routine name is defined twice")
-    commands = ROUTING_COMMANDS if resident else {command} if command is not None else set()
+    commands = RESIDENT_COMMAND_GROUPS[resident_group] if resident else {command} if command is not None else set()
     entry_point = "runresident" if resident else "run"
     if commands:
-        if not commands <= ROUTING_COMMANDS or not {entry_point, "dispatchbridgerequest", "executecommand"} <= index.keys():
+        if not {entry_point, "dispatchbridgerequest", "executecommand"} <= index.keys():
             raise ValueError("Unsupported bridge specialization")
         specialized = _specialize_dispatch(
             {name: (i, routines[i][1]) for name, i in index.items()}, commands
@@ -135,11 +155,6 @@ def bundle_text(units, command=None, *, resident=False):
         for i, replacement in specialized.items():
             name, _, source = routines[i]
             routines[i] = (name, replacement, source)
-    calls = []
-    for name, text, _ in routines:
-        words = {w.lower() for w in re.findall(r"[A-Za-z_]\w*", _NOISE.sub(" ", text))}
-        calls.append(sorted(index[w] for w in words if w in index and w != name))
-
     order, state = [], {}
 
     def visit(n, trail):
@@ -149,7 +164,9 @@ def bundle_text(units, command=None, *, resident=False):
             raise ValueError("routines call each other in a cycle: " +
                              " -> ".join(routines[k][0] for k in trail + [n]))
         state[n] = "busy"
-        for k in calls[n]:
+        name, text, _ = routines[n]
+        words = {w.lower() for w in re.findall(r"[A-Za-z_]\w*", _NOISE.sub(" ", text))}
+        for k in sorted(index[w] for w in words if w in index and w != name):
             visit(k, trail + [n])
         state[n] = "done"
         order.append(n)
@@ -176,7 +193,7 @@ def project_units(project_file):
 _built = {}
 
 
-def ensure_bundle(project_file, out_dir, keep=3, *, command=None, resident=False):
+def ensure_bundle(project_file, out_dir, keep=3, *, command=None, resident=False, resident_group="routing"):
     """The bundle of the project's units, as a file in out_dir named after its
     content. Built again only when a unit changes.
 
@@ -190,11 +207,15 @@ def ensure_bundle(project_file, out_dir, keep=3, *, command=None, resident=False
     units = project_units(project_file)
     if resident:
         if command is not None:
-            raise ValueError("The resident bridge handles all supported routing commands")
+            raise ValueError("A resident bridge serves a command group")
+        if resident_group not in RESIDENT_COMMAND_GROUPS:
+            raise ValueError(f"Unknown resident command group {resident_group}")
         out_dir /= "resident"
+        if resident_group != "routing":
+            out_dir /= resident_group
         units.append(project_file.with_name("bridge_resident.pas"))
     elif command is not None:
-        if command not in ROUTING_COMMANDS:
+        if not _COMMAND_NAME.fullmatch(command):
             raise ValueError("Unsupported bridge specialization")
         out_dir /= command
     stamp = tuple((str(p), p.stat().st_mtime_ns, p.stat().st_size)
@@ -203,7 +224,7 @@ def ensure_bundle(project_file, out_dir, keep=3, *, command=None, resident=False
     cached = _built.get(key)
     if cached and cached[0] == stamp and cached[1].exists():
         return cached[1]
-    source = bundle_text(units, command, resident=resident)
+    source = bundle_text(units, command, resident=resident, resident_group=resident_group)
     bundle_key = hashlib.sha256(source.encode("latin-1")).hexdigest()[:12]
     if resident:
         source = _replace_once(source, RESIDENT_KEY_PLACEHOLDER, f"'{bundle_key}'")

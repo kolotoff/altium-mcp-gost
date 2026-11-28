@@ -178,6 +178,21 @@ class SnapshotTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "was changed"):
             audit.read_snapshot(self.root / "before")
 
+    def test_inventory_rejects_duplicate_and_unknown_net_names(self):
+        tables = example_tables()
+        tables["nets"].append(dict(tables["nets"][0]))
+        path = self.root / "duplicate"
+        write_snapshot(path, tables, seal=False)
+        with self.assertRaisesRegex(ValueError, "duplicate net name"):
+            audit.read_inventory(path)
+
+        tables["nets"].pop()
+        tables["tracks"][0]["net"] = "signal"
+        path = self.root / "unknown"
+        write_snapshot(path, tables, seal=False)
+        with self.assertRaisesRegex(ValueError, "Unknown net in tracks.tsv"):
+            audit.read_inventory(path)
+
     def test_manifest_requires_all_tables_and_correct_generation(self):
         path = self.root / "before"
         write_snapshot(path, seal=False, snapshot_id="generation-one")
@@ -186,6 +201,18 @@ class SnapshotTests(unittest.TestCase):
         (path / "polygons.tsv").unlink()
         with self.assertRaisesRegex(ValueError, "require component"):
             audit.seal_inventory(path, "generation-one")
+
+    def test_json_string_fields_preserve_escapes_and_reject_raw_controls(self):
+        path = self.root / "escaped"
+        tables = example_tables()
+        comment = 'Quoted "part" \\ TVS\tline\r\n\x01'
+        tables["components"][0]["comment"] = comment
+        snapshot = write_snapshot(path, tables)
+        self.assertEqual(comment, snapshot["tables"]["components"][0]["comment"])
+        components = path / "components.tsv"
+        components.write_bytes(components.read_bytes().replace(b"\\u0001", b"\x01"))
+        with self.assertRaisesRegex(ValueError, "Invalid control character"):
+            audit.read_inventory(path)
 
     def test_components_layers_and_polygon_changes_are_visible(self):
         before = write_snapshot(self.root / "before")
@@ -215,6 +242,26 @@ class SnapshotTests(unittest.TestCase):
         unrelated = write_snapshot(self.root / "unrelated", tables)
         self.assertFalse(reconcile_batch(before, unrelated, plan)["verified"])
 
+    def test_batch_expected_inventory_copies_rows_and_preserves_shared_references(self):
+        before = write_snapshot(self.root / "before")
+        track = before["tables"]["tracks"][0]
+        pad = before["tables"]["pads"][0]
+        via = before["tables"]["vias"][0]
+        via["metadata"] = {"labels": ["original"]}
+        before["metadata"] = {"pad": pad, "via": via}
+
+        plan = plan_batch(before, [dict(kind="track", action="remove", old=track)])
+        expected = plan["expected"]
+        self.assertEqual(expected["tables"]["tracks"], [])
+        self.assertEqual(before["tables"]["tracks"], [track])
+        self.assertIs(expected["tables"]["pads"][0], expected["metadata"]["pad"])
+        self.assertIs(expected["tables"]["vias"][0], expected["metadata"]["via"])
+
+        expected["metadata"]["pad"]["net"] = "changed"
+        expected["metadata"]["via"]["metadata"]["labels"].append("changed")
+        self.assertNotEqual(pad["net"], "changed")
+        self.assertEqual(via["metadata"]["labels"], ["original"])
+
     def test_duplicate_targets_unknown_nets_and_unqualified_via_spans_are_rejected(
         self,
     ):
@@ -229,6 +276,27 @@ class SnapshotTests(unittest.TestCase):
         via = dict(before["tables"]["vias"][0], x_raw="9000", high_layer_id="5")
         with self.assertRaisesRegex(ValueError, "through span"):
             plan_batch(before, [dict(kind="via", action="add", new=via)])
+
+    def test_batch_matches_reversed_track_geometry_with_exact_net_identity(self):
+        tables = example_tables()
+        old = tables["tracks"][0]
+        reversed_track = dict(
+            old, x1_raw=old["x2_raw"], x2_raw=old["x1_raw"], net="GND"
+        )
+        tables["tracks"].append(reversed_track)
+        # A track-only batch does not validate the geometry of unrelated vias.
+        tables["vias"][0]["hole_size_raw"] = "0"
+        before = write_snapshot(self.root / "cross-net", tables)
+        remove = [dict(kind="track", action="remove", old=old)]
+        result = plan_batch(before, remove)
+        self.assertEqual(result["expected"]["tables"]["tracks"], [reversed_track])
+        with self.assertRaisesRegex(ValueError, "Destination geometry is already occupied"):
+            plan_batch(before, [dict(kind="track", action="edit", old=old, new=old)])
+
+        reversed_track["net"] = old["net"]
+        before = write_snapshot(self.root / "same-net", tables)
+        with self.assertRaisesRegex(ValueError, "match exactly one snapshot record"):
+            plan_batch(before, remove)
 
     def test_batch_rejects_unrequested_same_net_arc_removal(self):
         tables = example_tables()

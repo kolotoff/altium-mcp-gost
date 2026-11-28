@@ -1069,12 +1069,15 @@ Files exchanged with the scripts are read and written the way Altium does: in th
 
 The optional Windows extension runs supported editor commands in Altium Designer's
 process. It uses the same public MCP tools and one native owner across both
-backends. DelphiScript handles commands outside the extension's capability list
-and calls declined before execution. Guarded routing batches and native DRC use
-DelphiScript. Document and ratsnest reads reuse an already-running guarded
-routing bundle so they can keep the next guarded command warm. A lost response
-keeps its receipt and blocks further Altium
-commands until its outcome is reconciled.
+backends. With the adapter enabled, guarded routing batches use the managed
+command when the extension advertises it. Both baseline checks and the batch
+edits run in one editor request. The Python planner and full inventory
+reconciliation are shared across backends. Current snapshot exports include
+Altium's exact floating-point signature spellings for the managed checks.
+Earlier snapshots use DelphiScript for guarded apply. DelphiScript also handles native DRC,
+commands outside the extension's capability list, and calls the adapter can
+prove never started. A lost response keeps its receipt and blocks further
+Altium commands until its outcome is reconciled.
 
 Build with a .NET SDK that supports the Altium installation's hosted framework and
 that installation's Altium SDK assemblies. Altium documents its SDK access and

@@ -84,11 +84,17 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         bridge = main.AltiumBridge()
         bridge._managed_enabled = True
         bridge.config.script_path = str(main.DEFAULT_SCRIPT_PATH)
-        endpoint = ManagedEndpoint(42, "b" * 32, "test-build", "26.11", frozenset({"place_components"}))
+        command = "pcb_routing"
+        params = {"operation": "batch", "operation_directory": str(self.root)}
+        sdk_command = "pcb_routing_batch"
+        endpoint = ManagedEndpoint(42, "b" * 32, "test-build", "26.11", frozenset({sdk_command}))
 
-        async def timeout(_endpoint, request_id, command, _params, _timeout, before_send):
+        async def timeout(_endpoint, request_id, native_command, actual_params, timeout, before_send):
+            self.assertEqual(native_command, sdk_command)
+            self.assertEqual(actual_params, params)
+            self.assertEqual(timeout, main.ROUTING_MUTATION_TIMEOUT)
             before_send()
-            self.assertEqual(bridge._pending.load()["command"], command)
+            self.assertEqual(bridge._pending.load()["command"], sdk_command)
             self.assertEqual(bridge._pending.load()["request_id"], request_id)
             raise ManagedOutcomeUnknown("lost response")
 
@@ -98,9 +104,10 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(bridge._managed, "execute", side_effect=timeout) as execute, \
                 patch.object(bridge._managed, "response", new=sdk_status), \
                 patch.object(bridge, "_execute_command_locked", new=script):
-            result = await bridge.execute_command("place_components", {})
+            result = await bridge.execute_command(command, params, timeout=0.01)
             self.assertEqual(result["execution_state"], "unknown")
             self.assertFalse((await bridge.inspect_command_status())["terminal_response_available"])
+            self.assertEqual((await bridge.execute_command(command, params))["execution_state"], "unknown")
             self.assertEqual((await bridge.execute_command("get_schematic_data", {}))["execution_state"], "unknown")
             script.assert_not_awaited()
             receipt = bridge._pending.load()
@@ -111,24 +118,84 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
             execute.assert_awaited_once()
             self.assertIsNone(bridge._pending.load())
 
+    async def test_guarded_batch_retires_the_resident_bridge_and_keeps_terminal_failure(self):
+        bridge = main.AltiumBridge()
+        bridge._managed_enabled = True
+        bundle = self.enable_resident(bridge)
+        resident = ResidentSession.start(self.root, bundle.stem.rsplit("_", 1)[-1],
+                                         bridge.config.altium_exe_path)
+        endpoint = ManagedEndpoint(42, "b" * 32, "test-build", "26.11", frozenset({"pcb_routing_batch"}))
+
+        async def execute(_endpoint, _id, command, _params, _timeout, before_send):
+            self.assertEqual(command, "pcb_routing_batch")
+            self.assertFalse(resident.lease.exists())
+            before_send()
+            return "terminal", {"success": False, "error": "PCB changed since baseline snapshot; refresh and replan."}
+
+        with patch.object(bridge._managed, "endpoint", new=AsyncMock(return_value=endpoint)), \
+                patch.object(bridge._managed, "execute", side_effect=execute), \
+                patch.object(bridge, "_execute_command_locked", new=AsyncMock()) as script:
+            response = await bridge.execute_command("pcb_routing", {"operation": "batch"})
+            self.assertFalse(response["success"])
+            self.assertIn("PCB changed since baseline snapshot", response["error"])
+            script.assert_not_awaited()
+            self.assertIsNone(bridge._pending.load())
+
     async def test_managed_decline_releases_pending_before_script_fallback(self):
         bridge = main.AltiumBridge()
         bridge._managed_enabled = True
         bridge.config.script_path = str(main.DEFAULT_SCRIPT_PATH)
-        endpoint = ManagedEndpoint(42, "b" * 32, "test-build", "26.11", frozenset({"get_schematic_data"}))
+        endpoint = ManagedEndpoint(42, "b" * 32, "test-build", "26.11", frozenset({"pcb_routing_batch"}))
+        params = {"operation": "batch"}
 
-        async def decline(_endpoint, _id, _command, _params, _timeout, before_send):
+        async def decline(_endpoint, _id, command, _params, _timeout, before_send):
+            self.assertEqual(command, "pcb_routing_batch")
             before_send()
-            return "not_started", {"success": False, "error": "wrong native view"}
+            return "not_started", {"success": False, "error": "unsupported native inventory"}
 
-        async def fallback(*_args):
+        async def fallback(command, actual_params, _timeout):
             self.assertIsNone(bridge._pending.load())
+            self.assertEqual((command, actual_params), ("pcb_routing", params))
             return {"success": True, "result": "script"}
 
         with patch.object(bridge._managed, "endpoint", new=AsyncMock(return_value=endpoint)), \
                 patch.object(bridge._managed, "execute", side_effect=decline), \
                 patch.object(bridge, "_execute_command_locked", side_effect=fallback):
-            self.assertEqual((await bridge.execute_command("get_schematic_data", {}))["result"], "script")
+            self.assertEqual((await bridge.execute_command("pcb_routing", params))["result"], "script")
+
+    async def test_guarded_batch_disconnect_keeps_its_receipt_and_owner(self):
+        bridge = main.AltiumBridge()
+        bridge._managed_enabled = True
+        bridge.config.script_path = str(main.DEFAULT_SCRIPT_PATH)
+        endpoint = ManagedEndpoint(42, "b" * 32, "test-build", "26.11", frozenset({"pcb_routing_batch"}))
+        sent, release = asyncio.Event(), asyncio.Event()
+
+        async def execute(_endpoint, _id, _command, _params, _timeout, before_send):
+            before_send()
+            sent.set()
+            await release.wait()
+            raise ManagedOutcomeUnknown("lost response")
+
+        with patch.object(bridge._managed, "endpoint", new=AsyncMock(return_value=endpoint)), \
+                patch.object(bridge._managed, "execute", side_effect=execute) as managed, \
+                patch.object(bridge._managed, "response", new=AsyncMock(return_value=None)), \
+                patch.object(bridge, "_execute_command_locked", new=AsyncMock()) as script:
+            params = {"operation": "batch"}
+            caller = asyncio.create_task(bridge.execute_command("pcb_routing", params))
+            await asyncio.wait_for(sent.wait(), 1)
+            try:
+                caller.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await caller
+                self.assertTrue(bridge._command_lock.locked())
+                self.assertTrue(bridge.command_status()["pending"])
+            finally:
+                release.set()
+            retry = await bridge.execute_command("pcb_routing", params)
+            self.assertEqual(retry["execution_state"], "unknown")
+            self.assertEqual(retry["pending_command"], bridge._pending.load())
+            managed.assert_awaited_once()
+            script.assert_not_awaited()
 
     async def test_managed_mode_keeps_the_loaded_guarded_routing_bundle(self):
         bridge = main.AltiumBridge()

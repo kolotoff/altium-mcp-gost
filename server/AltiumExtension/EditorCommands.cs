@@ -15,14 +15,14 @@ internal sealed partial class EditorCommands(IClient client)
         ["list_open_documents", "get_board_summary", "get_schematic_data", "get_schematic_pins",
          "get_layout", "get_symbol_primitives", "get_component_pins", "place_components", "create_schematic_symbol",
          "get_net_connections", "check_placement", "create_symbols_batch", "get_unrouted_connections",
-         "net_rules", "place_copper"];
+         "net_rules", "place_copper", "pcb_routing_batch"];
     internal IReadOnlyList<string> Mutations { get; } =
         ["place_components", "create_schematic_symbol", "create_symbols_batch", "get_unrouted_connections",
-         "net_rules", "place_copper"];
+         "net_rules", "place_copper", "pcb_routing_batch"];
     private string? boardPath;
     private string? projectPath;
 
-    internal object Execute(string command, JsonElement parameters)
+    internal object Execute(string command, JsonElement parameters, string requestId)
     {
         boardPath = null;
         projectPath = null;
@@ -54,6 +54,7 @@ internal sealed partial class EditorCommands(IClient client)
             "get_unrouted_connections" => ReadUnroutedConnections(parameters),
             "net_rules" => ReadNetRules(parameters),
             "place_copper" => PlaceCopper(parameters),
+            "pcb_routing_batch" => ApplyGuardedRoutingBatch(parameters, requestId),
             _ => throw new CommandUnavailable("The command is unavailable in the managed bridge")
         };
     }

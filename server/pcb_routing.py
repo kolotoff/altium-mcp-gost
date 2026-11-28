@@ -60,14 +60,22 @@ def validate_board_path(value):
     return value
 
 
-def _baseline(snapshot, directory):
-    source = Path(snapshot["directory"]) / "board-signature.txt"
+def _baseline(snapshot, directory, *, include_float_values=False):
+    source_directory = Path(snapshot["directory"])
+    source = source_directory / "board-signature.txt"
     shutil.copyfile(source, directory / "baseline-signature.txt")
     if (
         hashlib.sha256((directory / "baseline-signature.txt").read_bytes()).hexdigest()
         != snapshot["manifest"]["fingerprint"]
     ):
         raise ValueError("Baseline signature changed while staging the operation")
+    if include_float_values and (
+        sealed := snapshot["manifest"]["files"].get(audit.ROUTING_FLOAT_VALUES)
+    ):
+        values = (source_directory / audit.ROUTING_FLOAT_VALUES).read_bytes()
+        if len(values) != sealed["bytes"] or hashlib.sha256(values).hexdigest() != sealed["sha256"]:
+            raise ValueError("Baseline float values changed while staging the operation")
+        (directory / f"baseline-{audit.ROUTING_FLOAT_VALUES}").write_bytes(values)
 
 
 class RoutingService:
@@ -259,7 +267,7 @@ class RoutingService:
     async def _batch(self, before, operations, apply, output, allow_via_in_pad, undo_group=False):
         plan = plan_batch(before, operations, allow_via_in_pad=allow_via_in_pad)
         directory = output_directory(output, "routing-batches")
-        _baseline(before, directory)
+        _baseline(before, directory, include_float_values=apply)
         (directory / "operations.tsv").write_text(batch_tsv(plan), encoding="utf-8-sig")
         write_json(
             directory / "plan.json", {

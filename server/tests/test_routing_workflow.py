@@ -556,6 +556,32 @@ class WorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["applied"])
         native.assert_not_awaited()
 
+    async def test_live_batch_stages_only_sealed_native_float_values(self):
+        baseline = self.root / "native-baseline"
+        write_snapshot(baseline, snapshot_id="native", seal=False)
+        source = baseline / audit.ROUTING_FLOAT_VALUES
+        values = b"value\ttext\r\n268435456,0,0\t1\r\n"
+        source.write_bytes(values)
+        manifest = audit.seal_inventory(baseline, "native")
+        self.assertIn(audit.ROUTING_FLOAT_VALUES, manifest["files"])
+
+        async def native(command, params):
+            self.assertEqual((command, params["operation"]), ("pcb_routing", "batch"))
+            staged = Path(params["operation_directory"]) / f"baseline-{audit.ROUTING_FLOAT_VALUES}"
+            self.assertEqual(staged.read_bytes(), values)
+            return {"success": False, "error": "native test stub"}
+
+        service = workflow.RoutingService(AsyncMock(side_effect=native))
+        operations = [dict(kind="track", action="remove", old=self.before["tables"]["tracks"][0])]
+        dry_run = await service.batch(baseline, operations)
+        service.execute.assert_not_awaited()
+        self.assertFalse((Path(dry_run["operation_directory"]) / f"baseline-{audit.ROUTING_FLOAT_VALUES}").exists())
+        await service.batch(baseline, operations, apply=True)
+        source.write_bytes(values.replace(b"\t1\r\n", b"\t2\r\n"))
+        with self.assertRaisesRegex(ValueError, "Snapshot file was changed: routing-float-values.tsv"):
+            await service.batch(baseline, operations, apply=True)
+        service.execute.assert_awaited_once()
+
     async def test_apply_reconciles_readback_instead_of_trusting_native_success(self):
         old = self.before["tables"]["tracks"][0]
         new = dict(old, width_raw="150")

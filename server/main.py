@@ -803,17 +803,18 @@ class AltiumBridge:
         if (not self._managed_enabled or STUCK_MARKER.exists()
                 or Path(self.config.script_path).resolve() != DEFAULT_SCRIPT_PATH.resolve()):
             return None
+        guarded_batch = command == "pcb_routing" and params.get("operation") == "batch"
+        managed_command = "pcb_routing_batch" if guarded_batch else command
         workflow = _resident_workflow.get()
         resident = ResidentSession.load(EXCHANGE_DIR)
-        if (workflow is None and command in script_bundle.ROUTING_COMMANDS and resident is not None
+        if (not guarded_batch and workflow is None and command in script_bundle.ROUTING_COMMANDS and resident is not None
                 and resident.lease.exists() and self._resident_may_own_marker(resident)):
             bundle = self._resident_bundle(command)
             if bundle is not None and bundle.stem.rsplit("_", 1)[-1] == resident.bundle_key:
-                # Standalone reads often occur between guarded routing calls.
-                # Reuse their already-loaded bundle so the next apply stays warm.
+                # Let script-backed routing support calls share their loaded bundle.
                 return None
         endpoint = await self._managed.endpoint(self.config.altium_exe_path)
-        if endpoint is None or command not in endpoint.commands:
+        if endpoint is None or managed_command not in endpoint.commands:
             return None
         if workflow and not script_bundle.RESIDENT_COMMAND_GROUPS[workflow] <= endpoint.commands:
             # Partially migrated workflows would otherwise retire their own
@@ -827,17 +828,17 @@ class AltiumBridge:
 
         request_id = uuid.uuid4().hex
         receipt = {
-            "request_id": request_id, "command": command, "created_unix": time.time(),
+            "request_id": request_id, "command": managed_command, "created_unix": time.time(),
             "operation_directory": params.get("operation_directory"), "transport": "managed",
             "pid": endpoint.pid, "instance_id": endpoint.instance_id, "build": endpoint.build,
         }
         try:
             reply = await self._managed.execute(
-                endpoint, request_id, command, params, timeout, lambda: self._pending.write(receipt),
+                endpoint, request_id, managed_command, params, timeout, lambda: self._pending.write(receipt),
             )
         except ManagedOutcomeUnknown as error:
             logger.warning("Managed Altium SDK command %s (request_id=%s, pid=%s, build=%s) unresolved: %s",
-                           command, request_id, endpoint.pid, endpoint.build, error)
+                           managed_command, request_id, endpoint.pid, endpoint.build, error)
             return {
                 "success": False,
                 "error": f"Altium SDK command '{command}' did not return a terminal reply. "
@@ -849,17 +850,17 @@ class AltiumBridge:
         state, result = reply
         if state == "not_started":
             self._pending.discard()
-            logger.info("Managed adapter declined %s before execution: %s", command, result.get("error", ""))
+            logger.info("Managed adapter declined %s before execution: %s", managed_command, result.get("error", ""))
             return None
         self._remember_managed_target(result)
         response = {**result, "request_id": request_id}
         if result.get("execution_state") == "unknown":
             logger.warning("Managed Altium SDK command %s (request_id=%s, pid=%s, build=%s) needs reconciliation",
-                           command, request_id, endpoint.pid, endpoint.build)
+                           managed_command, request_id, endpoint.pid, endpoint.build)
             return {**response, "pending_command": receipt}
         self._pending.archive(receipt, response)
         logger.info("Managed Altium SDK command %s (request_id=%s, pid=%s, build=%s)",
-                    command, request_id, endpoint.pid, endpoint.build)
+                    managed_command, request_id, endpoint.pid, endpoint.build)
         return response
 
     async def _execute_watched(self, command: str, params: Dict[str, Any], timeout: float,

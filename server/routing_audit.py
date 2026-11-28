@@ -367,6 +367,7 @@ def category(rule):
 
 
 SNAPSHOT_SCHEMA = "altium-mcp-routing-snapshot/v1"
+ROUTING_FLOAT_VALUES = "routing-float-values.tsv"
 SNAPSHOT_LIMITS = [
     "Legacy AllLayers inventory can omit extended mechanical objects.",
     "Includes component placement, straight/arc tracks, copper stack and polygon definitions.",
@@ -390,6 +391,9 @@ def seal_inventory(directory: Path, snapshot_id: str) -> dict:
         )
     _, signature = read_source(directory / "board-signature.txt", "ascii")
     sources = inventory["sources"] + [signature]
+    if (directory / ROUTING_FLOAT_VALUES).is_file():
+        _, float_values = read_source(directory / ROUTING_FLOAT_VALUES, "ascii")
+        sources.append(float_values)
     manifest = {
         "schema": SNAPSHOT_SCHEMA,
         "snapshot_id": snapshot_id,
@@ -419,7 +423,8 @@ def read_snapshot(directory: Path) -> dict:
         "inventory-status.txt",
         "board-signature.txt",
     }
-    if set(manifest.get("files", {})) != expected_files:
+    sealed_files = set(manifest.get("files", {}))
+    if not expected_files <= sealed_files <= expected_files | {ROUTING_FLOAT_VALUES}:
         raise ValueError("Snapshot manifest has incomplete or unexpected file coverage")
     for name, expected in manifest["files"].items():
         path = directory / name

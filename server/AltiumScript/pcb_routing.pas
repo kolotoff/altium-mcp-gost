@@ -7,6 +7,7 @@
 
 var
     RoutingFailure : String;
+    RoutingFloatValues : TStringList;
 
 procedure RoutingFail(ErrorText : String);
 begin
@@ -18,9 +19,41 @@ begin
     Result := '"' + JSONEscapeString(Value) + '"';
 end;
 
-function RoutingFloat(Value : Double) : String;
+procedure RoutingRecordFloat(Value : Double; Token : String);
+var Normalized, Mantissa : Double; Exponent, HighBits, LowBits : Integer;
 begin
-    Result := StringReplace(FloatToStr(Value), ',', '.', MkSet(rfReplaceAll));
+    if RoutingFloatValues=nil then Exit;
+    if Value=0 then
+    begin
+        RoutingFloatValues.Add('0,0,0'+#9+Token);
+        Exit;
+    end;
+    Normalized:=Abs(Value); Exponent:=0;
+    while (Normalized<1) and (Exponent>-1074) do
+    begin
+        Normalized:=Normalized*2.0;
+        Dec(Exponent);
+    end;
+    while (Normalized>=2) and (Exponent<1023) do
+    begin
+        Normalized:=Normalized*0.5;
+        Inc(Exponent);
+    end;
+    if not ((Normalized>=1) and (Normalized<2)) then Exit;
+    { Encode the exact binary value with two signed-Integer-sized pieces. }
+    Mantissa:=Normalized*4503599627370496.0;
+    HighBits:=Trunc(Mantissa/16777216.0);
+    LowBits:=Trunc(Mantissa-HighBits*16777216.0);
+    if Value<0 then HighBits:=-HighBits;
+    RoutingFloatValues.Add(IntToStr(HighBits)+','+IntToStr(LowBits)+','+IntToStr(Exponent)+#9+Token);
+end;
+
+function RoutingFloat(Value : Double) : String;
+var Token : String;
+begin
+    Token:=StringReplace(FloatToStr(Value), ',', '.', MkSet(rfReplaceAll));
+    RoutingRecordFloat(Value,Token);
+    Result:=Token;
 end;
 
 function RoutingBool(Value : Boolean) : String;
@@ -518,12 +551,20 @@ procedure RoutingExport(Board : IPCB_Board; Directory, SnapshotID : String);
 var Signature : TStringList;
 begin
     Signature:=TStringList.Create;
+    RoutingFloatValues:=TStringList.Create;
     try
+        RoutingFloatValues.Sorted:=True;
+        RoutingFloatValues.Duplicates:=dupIgnore;
         RoutingWrite(Directory+'\inventory-status.txt','exporting');
         RoutingCollect(Board,Signature,Directory,SnapshotID,nil,nil,nil); if RoutingFailure<>'' then Exit;
         Signature.SaveToFile(Directory+'\board-signature.txt');
+        RoutingFloatValues.Sorted:=False;
+        RoutingFloatValues.Insert(0,'value'+#9+'text');
+        RoutingFloatValues.SaveToFile(Directory+'\routing-float-values.tsv');
         RoutingWrite(Directory+'\inventory-status.txt','complete');
     finally
+        RoutingFloatValues.Free;
+        RoutingFloatValues:=nil;
         Signature.Free;
     end;
 end;

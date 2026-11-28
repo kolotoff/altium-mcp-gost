@@ -256,7 +256,8 @@ internal sealed class BridgePipe(Control dispatcher, EditorCommands commands)
     {
         try
         {
-            return Terminal(request.RequestId, commands.RememberTargets(commands.Execute(request.Command!, request.Params)));
+            return Terminal(request.RequestId,
+                commands.RememberTargets(commands.Execute(request.Command!, request.Params, request.RequestId!)));
         }
         catch (CommandUnavailable error)
         {

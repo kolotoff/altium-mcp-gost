@@ -131,7 +131,12 @@ def _exchange(pid: int, request: dict, timeout: float, before_send=None) -> tupl
                 or type(reply["result"].get("success")) is not bool
             ):
                 raise ValueError("Uncorrelated or invalid Altium SDK pipe reply")
-            return reply["state"], reply["result"]
+            result = reply["result"]
+            if reply["state"] == "not_started" and (
+                result["success"] or result.get("execution_state") not in (None, "not_started")
+            ):
+                raise ValueError("Contradictory Altium SDK refusal")
+            return reply["state"], result
         except (pywintypes.error, OSError, ValueError) as error:
             raise ManagedOutcomeUnknown(str(error)) from error
     finally:

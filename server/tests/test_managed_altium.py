@@ -5,6 +5,7 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
+from threading import Event
 import unittest
 from unittest.mock import patch
 
@@ -20,9 +21,11 @@ from server.managed_altium import (
 
 
 class ManagedPipeTests(unittest.TestCase):
-    def round_trip(self, response_id, before_send):
+    def round_trip(self, response_id, before_send, *, state="terminal", result=None):
         pid = os.getpid()
         request_id = "a" * 32
+        if result is None:
+            result = {"success": True, "result": "Вывод"}
         with ExitStack() as cleanup:
             handle = win32pipe.CreateNamedPipe(
                 rf"\\.\pipe\altium-mcp-sdk-{pid}",
@@ -31,6 +34,8 @@ class ManagedPipeTests(unittest.TestCase):
                 1, 65536, 65536, 1000, None,
             )
             cleanup.callback(handle.Close)
+            listening = Event()
+
             def server():
                 deadline = time.monotonic() + 2.0
                 operation = pywintypes.OVERLAPPED()
@@ -38,15 +43,16 @@ class ManagedPipeTests(unittest.TestCase):
                 try:
                     try:
                         code = win32pipe.ConnectNamedPipe(handle, operation)
-                        _wait_io(handle, operation, code, deadline)
+                        listening.set()
+                        if code != ERROR_PIPE_CONNECTED:
+                            _wait_io(handle, operation, code, deadline)
                     except pywintypes.error as error:
                         if error.winerror != ERROR_PIPE_CONNECTED:
                             raise
                 finally:
                     operation.hEvent.Close()
                 request = _read_frame(handle, deadline)
-                result = {"success": True, "result": "Вывод"}
-                response = {"protocol": 1, "request_id": response_id, "state": "terminal", "result": result}
+                response = {"protocol": 1, "request_id": response_id, "state": state, "result": result}
                 encoded = json.dumps(response, ensure_ascii=False).encode() + b"\n"
                 _write_frame(handle, encoded[:24], deadline)
                 _write_frame(handle, encoded[24:], deadline)
@@ -54,6 +60,7 @@ class ManagedPipeTests(unittest.TestCase):
 
             with ThreadPoolExecutor(max_workers=1) as pool:
                 worker = pool.submit(server)
+                self.assertTrue(listening.wait(1.0))
                 request = _request("list_open_documents", request_id, {})
                 try:
                     return _exchange(pid, request, 1.0, before_send)
@@ -69,6 +76,16 @@ class ManagedPipeTests(unittest.TestCase):
     def test_wrong_id_after_send_is_unknown(self):
         with self.assertRaises(ManagedOutcomeUnknown):
             self.round_trip("b" * 32, lambda: None)
+
+    def test_contradictory_refusal_after_send_is_unknown(self):
+        for result in ({"success": True}, {"success": False, "execution_state": "unknown"}):
+            with self.subTest(result=result), self.assertRaises(ManagedOutcomeUnknown):
+                self.round_trip("a" * 32, lambda: None, state="not_started", result=result)
+
+    def test_clean_refusal_is_not_started(self):
+        result = {"success": False, "error": "adapter unavailable"}
+        self.assertEqual(self.round_trip("a" * 32, lambda: None, state="not_started", result=result),
+                         ("not_started", result))
 
     def test_ambiguous_process_inventory_never_uses_a_cached_endpoint(self):
         client = ManagedAltium()

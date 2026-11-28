@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework Condition="'$(AltiumTargetFramework)' == ''">net8.0-windows</TargetFramework>
+    <TargetFramework Condition="'$(AltiumTargetFramework)' != ''">$(AltiumTargetFramework)</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <GenerateRuntimeConfigurationFiles>false</GenerateRuntimeConfigurationFiles>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="Altium.SDK">
+      <HintPath>$(AltiumSystemDir)/Altium.SDK.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Altium.SDK.Interfaces">
+      <HintPath>$(AltiumSystemDir)/Altium.SDK.Interfaces.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <None Update="AltiumMcpSdk.ins;AltiumMcpSdk.rcs" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <Target Name="CheckAltiumSdk" BeforeTargets="ResolveAssemblyReferences">
+    <Error Condition="!Exists('$(AltiumSystemDir)/Altium.SDK.dll') Or !Exists('$(AltiumSystemDir)/Altium.SDK.Interfaces.dll')"
+           Text="Set AltiumSystemDir to the target Altium Designer installation's System directory." />
+  </Target>
+</Project>

@@ -159,6 +159,31 @@ class BundleTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Unknown resident command group"):
                 sb.ensure_bundle(project, directory, resident=True, resident_group="../custom")
 
+    def test_pcb_workflow_keeps_route_and_fanout_phases_in_one_bundle(self):
+        route = sb.RESIDENT_WORKFLOW_BY_TOOL["route_connections"]
+        self.assertEqual(sb.RESIDENT_WORKFLOW_BY_TOOL["fanout_pads"], route)
+        phases = ("get_unrouted_connections", "net_rules", "get_layout", "place_copper",
+                  "get_unrouted_connections")
+        self.assertEqual({sb.resident_group_for(phase, route) for phase in phases}, {route})
+        self.assertEqual(sb.resident_group_for("pcb_routing", route), "routing")
+        self.assertEqual(sb.resident_group_for("get_layout"), "placement")
+        self.assertEqual(sb.resident_group_for("get_board_summary"), "placement")
+        for phase in ("net_rules", "place_copper", "geometry", "save_current_document"):
+            with self.subTest(phase=phase):
+                self.assertIsNone(sb.resident_group_for(phase))
+
+    def test_silkscreen_workflow_and_routing_have_separate_bundles(self):
+        route = sb.RESIDENT_WORKFLOW_BY_TOOL["route_connections"]
+        labels = sb.RESIDENT_WORKFLOW_BY_TOOL["place_label_block"]
+        self.assertNotEqual(route, labels)
+        commands = ("export_silkscreen_data", "place_designators", "edit_silk_graphics",
+                    "check_silkscreen")
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertEqual(sb.resident_group_for(command, labels), labels)
+                self.assertIsNone(sb.resident_group_for(command, route))
+        self.assertEqual(sb.resident_group_for("get_layout", labels), "placement")
+
     def test_keeps_the_newest_bundles(self):
         with tempfile.TemporaryDirectory() as d:
             unit = self.write(d, "u.pas", "procedure Run;\nbegin\nend;\n")

@@ -1,0 +1,23 @@
+PL PLAltiumMcpSdk:Start
+    Command='AltiumMcpSdk:Run'
+    Params='Cmd=StartAdapter'
+    Caption='&Start local bridge'
+    Image=''
+    Description='Start the Altium MCP local bridge'
+End
+
+Tree MNAltiumMcpSdk Caption='Altium &MCP' TopLevel=True
+    Link MNAltiumMcpSdk_Start PLID='PLAltiumMcpSdk:Start' End
+End
+
+Insertion MNAltiumMcpSdk_InsEmpty TargetID='MNNoDocument' InsertType='Before' RefID0='MNNoDocument_Window'
+    TreeCopy MNNoDocument_AltiumMcpSdk OriginalID=MNAltiumMcpSdk IDSuffix='_1' End
+End
+
+Insertion MNAltiumMcpSdk_InsSch TargetID='MNSchematicMenu' InsertType='Before' RefID0='MNSchematic_Window1'
+    TreeCopy MNSchematic_AltiumMcpSdk OriginalID=MNAltiumMcpSdk IDSuffix='_2' End
+End
+
+Insertion MNAltiumMcpSdk_InsPcb TargetID='MNPCBMenu' InsertType='Before' RefID0='MNPCBMenu_Window1'
+    TreeCopy MNPCBMenu_AltiumMcpSdk OriginalID=MNAltiumMcpSdk IDSuffix='_3' End
+End

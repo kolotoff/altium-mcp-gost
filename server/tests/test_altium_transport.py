@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, patch
 
 from server import main
 from server.altium_transport import ResidentSession, atomic_json
+from server.managed_altium import ManagedEndpoint, ManagedOutcomeUnknown
 
 
 class TransportTests(unittest.IsolatedAsyncioTestCase):
@@ -78,6 +79,74 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await bridge.run_altium_script("get_board_summary"))
             build.assert_called_once_with(str(project), bundle_dir)
             launch.assert_called_once_with(bundle, "Run")
+
+    async def test_managed_timeout_reconciles_before_any_script_fallback(self):
+        bridge = main.AltiumBridge()
+        bridge._managed_enabled = True
+        bridge.config.script_path = str(main.DEFAULT_SCRIPT_PATH)
+        endpoint = ManagedEndpoint(42, "b" * 32, "test-build", "26.11", frozenset({"place_components"}))
+
+        async def timeout(_endpoint, request_id, command, _params, _timeout, before_send):
+            before_send()
+            self.assertEqual(bridge._pending.load()["command"], command)
+            self.assertEqual(bridge._pending.load()["request_id"], request_id)
+            raise ManagedOutcomeUnknown("lost response")
+
+        sdk_status = AsyncMock(return_value=None)
+        script = AsyncMock(return_value={"success": True})
+        with patch.object(bridge._managed, "endpoint", new=AsyncMock(return_value=endpoint)), \
+                patch.object(bridge._managed, "execute", side_effect=timeout) as execute, \
+                patch.object(bridge._managed, "response", new=sdk_status), \
+                patch.object(bridge, "_execute_command_locked", new=script):
+            result = await bridge.execute_command("place_components", {})
+            self.assertEqual(result["execution_state"], "unknown")
+            self.assertFalse((await bridge.inspect_command_status())["terminal_response_available"])
+            self.assertEqual((await bridge.execute_command("get_schematic_data", {}))["execution_state"], "unknown")
+            script.assert_not_awaited()
+            receipt = bridge._pending.load()
+            sdk_status.return_value = {"success": True, "request_id": receipt["request_id"]}
+            self.assertTrue((await bridge.inspect_command_status())["terminal_response_available"])
+            self.assertTrue((await bridge.execute_command("get_schematic_data", {}))["success"])
+            script.assert_awaited_once()
+            execute.assert_awaited_once()
+            self.assertIsNone(bridge._pending.load())
+
+    async def test_managed_decline_releases_pending_before_script_fallback(self):
+        bridge = main.AltiumBridge()
+        bridge._managed_enabled = True
+        bridge.config.script_path = str(main.DEFAULT_SCRIPT_PATH)
+        endpoint = ManagedEndpoint(42, "b" * 32, "test-build", "26.11", frozenset({"get_schematic_data"}))
+
+        async def decline(_endpoint, _id, _command, _params, _timeout, before_send):
+            before_send()
+            return "not_started", {"success": False, "error": "wrong native view"}
+
+        async def fallback(*_args):
+            self.assertIsNone(bridge._pending.load())
+            return {"success": True, "result": "script"}
+
+        with patch.object(bridge._managed, "endpoint", new=AsyncMock(return_value=endpoint)), \
+                patch.object(bridge._managed, "execute", side_effect=decline), \
+                patch.object(bridge, "_execute_command_locked", side_effect=fallback):
+            self.assertEqual((await bridge.execute_command("get_schematic_data", {}))["result"], "script")
+
+    async def test_managed_mode_keeps_the_loaded_guarded_routing_bundle(self):
+        bridge = main.AltiumBridge()
+        bridge._managed_enabled = True
+        bundle = self.enable_resident(bridge)
+        resident = ResidentSession.start(self.root, bundle.stem.rsplit("_", 1)[-1],
+                                         bridge.config.altium_exe_path)
+        resident.ready.touch()
+        sdk_endpoint = AsyncMock()
+        script = AsyncMock(return_value={"success": True})
+        with patch.object(bridge, "_resident_may_own_marker", return_value=True), \
+                patch.object(bridge._managed, "endpoint", new=sdk_endpoint), \
+                patch.object(bridge, "_execute_command_locked", new=script):
+            result = await bridge.execute_command("get_unrouted_connections", {})
+        self.assertTrue(result["success"])
+        self.assertTrue(resident.lease.exists())
+        sdk_endpoint.assert_not_awaited()
+        script.assert_awaited_once()
 
     def test_resident_build_uses_the_command_group_for_the_default_bridge(self):
         bridge = main.AltiumBridge()

@@ -1033,10 +1033,12 @@ The server communicates with Altium Designer using a scripting bridge:
 
 When adding bridge code: start every routine, and its `begin` and final `end;`, at column 0, and don't let routines call each other in a cycle (the bundle has no forward declarations). `tests/test_script_bundle.py` checks the real units. The sandbox runs its script as a file too.
 
-The built-in bridge reuses one native run within each of four command
+The built-in bridge reuses one native run within each of four general command
 groups. The routing group includes rule creation, unrouted connections,
 and document listing. The other groups cover placement and layout with
-pin and net reads, schematic reads, and symbol creation and inspection.
+pin and net reads and board summary, schematic reads, and symbol creation
+and inspection. The compound routing and fanout tools share a separate
+bundle across their native phases. Label placement has a dedicated bundle.
 It processes requests serially and releases Altium's script engine after
 10 idle seconds or before a sandbox, another group, or a one-shot MCP
 command runs. Altium pumps
@@ -1062,6 +1064,43 @@ Altium's script engine also leaks memory: every property read of a board object 
 As a backstop, the server checks Altium before every call and refuses when it is within 1,000 USER objects of the cap (the user's own menu scripts still leak each time they run) or using more than half of the machine's RAM, asking for a save and restart.
 
 Files exchanged with the scripts are read and written the way Altium does: in the Windows ANSI code page, or as UTF-8 when the file starts with a byte-order mark.
+
+### Managed Altium SDK extension
+
+The optional Windows extension runs supported editor commands in Altium Designer's
+process. It uses the same public MCP tools and one native owner across both
+backends. DelphiScript handles commands outside the extension's capability list
+and calls declined before execution. Guarded routing batches and native DRC use
+DelphiScript. Document and ratsnest reads reuse an already-running guarded
+routing bundle so they can keep the next guarded command warm. A lost response
+keeps its receipt and blocks further Altium
+commands until its outcome is reconciled.
+
+Build with a .NET SDK that supports the Altium installation's hosted framework and
+that installation's Altium SDK assemblies. Altium documents its SDK access and
+host requirements separately. [SDK quick start](https://www.altium.com/documentation/altium-developer-center/quick-starts/ad-sdk) · [SDK runtime](https://docs.developer.altium.com/ad-sdk-docs/guides/runtime-and-hosting/)
+
+```powershell
+$altium = 'C:\Program Files\Altium\AD26\X2.EXE'
+.\tools\install_altium_mcp_sdk.ps1 -AltiumExe $altium -Action Build
+# Close Altium before registering or updating the extension.
+.\tools\install_altium_mcp_sdk.ps1 -AltiumExe $altium -Action Install -SkipBuild
+```
+
+After restarting Altium, use **Altium MCP → Start local bridge** or invoke
+the registered process with its activation parameter from PowerShell.
+
+```powershell
+Start-Process -FilePath $altium -ArgumentList '-RAltiumMcpSdk:Run(Cmd=StartAdapter)'
+```
+
+Set `ALTIUM_MCP_NATIVE_ADAPTER=auto` in the MCP server's
+environment before restarting the server. The default is `script`. Set the
+optional `ALTIUM_MCP_SDK_LOG` environment variable on Altium to an absolute
+diagnostic log path if the managed endpoint fails to start. The server log
+identifies native calls served by the managed adapter by process and build.
+Use the same installer with `-Action Uninstall` while Altium is closed to remove
+the local registration and installed extension files.
 
 ## References
 - Get scripts' project path from Jeff Collins and William Kitchen's stripped down version

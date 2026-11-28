@@ -413,6 +413,6 @@ def register_routing_tools(register_tool, bridge):
     @tool(read_only=True)
     async def get_altium_command_status(ctx: Context) -> str:
         """Inspect the correlated transport's pending command without sending a script."""
-        return encode(bridge.command_status())
+        return encode(await bridge.inspect_command_status())
 
     return exported

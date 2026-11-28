@@ -27,6 +27,7 @@ import re
 from bisect import bisect_left
 from collections import Counter
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from functools import wraps
 import xml.etree.ElementTree as ET
 
@@ -42,6 +43,7 @@ import pcblib_file
 import uuid
 
 from server.altium_transport import PendingCommand, ResidentSession, atomic_json
+from server.managed_altium import ManagedAltium, ManagedOutcomeUnknown
 from server.project_validation import validate_project
 from server.routing_mcp import register_routing_tools
 
@@ -263,6 +265,7 @@ def _lift_failed_result(response: Dict[str, Any]) -> Dict[str, Any]:
 mcp = FastMCP("AltiumMCP", instructions="Altium integration through the Model Context Protocol")
 
 READ_ONLY = ToolAnnotations(readOnlyHint=True)
+_resident_workflow: ContextVar[Optional[str]] = ContextVar("resident_workflow", default=None)
 
 
 def _tool(read_only: bool = False):
@@ -273,7 +276,24 @@ def _tool(read_only: bool = False):
     default mcp would infer an output schema from "-> str" and send every
     result twice, once more as structuredContent.
     """
-    return mcp.tool(annotations=READ_ONLY if read_only else None, structured_output=False)
+    register = mcp.tool(annotations=READ_ONLY if read_only else None, structured_output=False)
+
+    def decorate(fn):
+        group = script_bundle.RESIDENT_WORKFLOW_BY_TOOL.get(fn.__name__)
+        if group is None:
+            return register(fn)
+
+        @wraps(fn)
+        async def within_workflow(*args, **kwargs):
+            token = _resident_workflow.set(group)
+            try:
+                return await fn(*args, **kwargs)
+            finally:
+                _resident_workflow.reset(token)
+
+        return register(within_workflow)
+
+    return decorate
 
 
 def _absolute_output_path(value: str, extension: str) -> Path:
@@ -628,6 +648,8 @@ class AltiumBridge:
         self._command_tasks = set()
         self._resident_enabled = os.environ.get("ALTIUM_MCP_REUSE_BRIDGE", "1") != "0"
         self._disabled_resident_groups: set[str] = set()
+        self._managed_enabled = os.environ.get("ALTIUM_MCP_NATIVE_ADAPTER", "script").lower() == "auto"
+        self._managed = ManagedAltium()
 
     def command_status(self) -> dict:
         """Inspect the pending receipt without invoking an Altium script."""
@@ -635,6 +657,13 @@ class AltiumBridge:
             return self._pending.status()
         except (OSError, ValueError) as error:
             return {"pending": True, "error": str(error)}
+
+    async def inspect_command_status(self) -> dict:
+        status = self.command_status()
+        if status.get("transport") == "managed" and not status["terminal_response_available"]:
+            result = await self._managed.response(self.config.altium_exe_path, status)
+            status["terminal_response_available"] = result is not None
+        return status
 
     async def ensure_paths(self, need_script: bool = True) -> Optional[str]:
         """Return what is missing and where to configure it, if anything."""
@@ -659,7 +688,7 @@ class AltiumBridge:
     async def execute_command(self, command: str, params: Dict[str, Any], timeout: float = RESPONSE_TIMEOUT,
                               watcher: Optional[Callable[[asyncio.Event], Awaitable[None]]] = None,
                               preflight: Optional[Callable[[], Optional[str]]] = None) -> Dict[str, Any]:
-        """Execute a command in Altium via the bridge script.
+        """Execute a correlated native Altium command.
 
         watcher, if given, runs beside the command while it holds the locks
         (to answer dialogs the command raises, say), from the moment the
@@ -696,7 +725,7 @@ class AltiumBridge:
                 yield {"success": False, "error": f"Altium MCP is busy with another command after {LOCK_TIMEOUT} s."}
                 return
             try:
-                problem = self._reconcile_pending_command()
+                problem = await self._reconcile_pending_command()
                 if (problem is None and bridge_script and
                         await _altium_remains_hung(self.config.altium_exe_path)):
                     problem = {"success": False, "error": ALTIUM_HUNG_ERROR}
@@ -708,12 +737,16 @@ class AltiumBridge:
             finally:
                 self._exchange_lock.release()
 
-    def _reconcile_pending_command(self):
+    async def _reconcile_pending_command(self):
         try:
             pending = self._pending.load()
             if pending is None:
                 return None
             response = self._pending.response(pending["request_id"], legacy=True)
+            if response is None and pending.get("transport") == "managed":
+                response = await self._managed.response(self.config.altium_exe_path, pending)
+                if response is not None:
+                    self._remember_managed_target(response)
             if response is None:
                 return {
                     "success": False,
@@ -744,12 +777,90 @@ class AltiumBridge:
                 if preflight_error:
                     return {"success": False, "error": preflight_error}
                 if watcher is None:
-                    response = await self._execute_command_locked(command, params, timeout)
+                    response = await self._try_managed_locked(command, params, timeout)
+                    if response is None:
+                        response = await self._execute_command_locked(command, params, timeout)
                 else:
                     response = await self._execute_watched(command, params, timeout, watcher)
             except (OSError, ValueError) as error:
                 return {"success": False, "error": str(error), "execution_state": "inspect_pending_receipt"}
         return _lift_failed_result(response)
+
+    @staticmethod
+    def _remember_managed_target(result: dict) -> None:
+        for field, filename in (("managed_board_path", "last_board.txt"),
+                                ("managed_project_path", "last_project.txt")):
+            path = result.pop(field, None)
+            if isinstance(path, str) and Path(path).is_absolute():
+                try:
+                    write_altium_text(EXCHANGE_DIR / filename, path + "\n")
+                except OSError as error:
+                    logger.warning("Could not remember the Altium SDK target in %s: %s", filename, error)
+
+    async def _try_managed_locked(self, command: str, params: Dict[str, Any],
+                                  timeout: float) -> Optional[Dict[str, Any]]:
+        """Try the SDK adapter while holding the existing native owner lock."""
+        if (not self._managed_enabled or STUCK_MARKER.exists()
+                or Path(self.config.script_path).resolve() != DEFAULT_SCRIPT_PATH.resolve()):
+            return None
+        workflow = _resident_workflow.get()
+        resident = ResidentSession.load(EXCHANGE_DIR)
+        if (workflow is None and command in script_bundle.ROUTING_COMMANDS and resident is not None
+                and resident.lease.exists() and self._resident_may_own_marker(resident)):
+            bundle = self._resident_bundle(command)
+            if bundle is not None and bundle.stem.rsplit("_", 1)[-1] == resident.bundle_key:
+                # Standalone reads often occur between guarded routing calls.
+                # Reuse their already-loaded bundle so the next apply stays warm.
+                return None
+        endpoint = await self._managed.endpoint(self.config.altium_exe_path)
+        if endpoint is None or command not in endpoint.commands:
+            return None
+        if workflow and not script_bundle.RESIDENT_COMMAND_GROUPS[workflow] <= endpoint.commands:
+            # Partially migrated workflows would otherwise retire their own
+            # resident script and pay for another launch at the next step.
+            return None
+        problem = altium_limit_problem()
+        if problem:
+            return {"success": False, "error": f"Not running '{command}': {problem}"}
+        if not await self._retire_resident(resident, defer_if_live=True):
+            return {"success": False, "execution_state": "not_started", "error": RESIDENT_SETTLING_ERROR}
+
+        request_id = uuid.uuid4().hex
+        receipt = {
+            "request_id": request_id, "command": command, "created_unix": time.time(),
+            "operation_directory": params.get("operation_directory"), "transport": "managed",
+            "pid": endpoint.pid, "instance_id": endpoint.instance_id, "build": endpoint.build,
+        }
+        try:
+            reply = await self._managed.execute(
+                endpoint, request_id, command, params, timeout, lambda: self._pending.write(receipt),
+            )
+        except ManagedOutcomeUnknown as error:
+            logger.warning("Managed Altium SDK command %s (request_id=%s, pid=%s, build=%s) unresolved: %s",
+                           command, request_id, endpoint.pid, endpoint.build, error)
+            return {
+                "success": False,
+                "error": f"Altium SDK command '{command}' did not return a terminal reply. "
+                         "Inspect the pending command and design before retrying.",
+                "request_id": request_id, "execution_state": "unknown", "pending_command": receipt,
+            }
+        if reply is None:
+            return None
+        state, result = reply
+        if state == "not_started":
+            self._pending.discard()
+            logger.info("Managed adapter declined %s before execution: %s", command, result.get("error", ""))
+            return None
+        self._remember_managed_target(result)
+        response = {**result, "request_id": request_id}
+        if result.get("execution_state") == "unknown":
+            logger.warning("Managed Altium SDK command %s (request_id=%s, pid=%s, build=%s) needs reconciliation",
+                           command, request_id, endpoint.pid, endpoint.build)
+            return {**response, "pending_command": receipt}
+        self._pending.archive(receipt, response)
+        logger.info("Managed Altium SDK command %s (request_id=%s, pid=%s, build=%s)",
+                    command, request_id, endpoint.pid, endpoint.build)
+        return response
 
     async def _execute_watched(self, command: str, params: Dict[str, Any], timeout: float,
                                watcher: Callable[[asyncio.Event], Awaitable[None]]) -> Dict[str, Any]:
@@ -890,7 +1001,7 @@ class AltiumBridge:
         return True
 
     def _resident_bundle(self, command: str) -> Optional[Path]:
-        group = script_bundle.RESIDENT_GROUP_BY_COMMAND.get(command)
+        group = script_bundle.resident_group_for(command, _resident_workflow.get())
         if (not self._resident_enabled or group is None or group in self._disabled_resident_groups
                 or Path(self.config.script_path).resolve() != DEFAULT_SCRIPT_PATH.resolve()
                 or STUCK_MARKER.exists()):
@@ -944,7 +1055,7 @@ class AltiumBridge:
             self._pending.discard()
             return None
         if not reuse:
-            group = script_bundle.RESIDENT_GROUP_BY_COMMAND[payload["command"]]
+            group = script_bundle.resident_group_for(payload["command"], _resident_workflow.get())
             logger.warning("The %s resident bridge did not start; using one-shot execution", group)
             self._disabled_resident_groups.add(group)
             _dismiss_altium_dialogs(message_boxes_only=True, executable=self.config.altium_exe_path)

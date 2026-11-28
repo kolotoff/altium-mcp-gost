@@ -18,11 +18,11 @@ _COMMAND_NAME = re.compile(r"[a-z][a-z0-9_]*")
 ROUTING_COMMANDS = frozenset({
     "pcb_routing", "get_unrouted_connections", "create_pcb_rule", "list_open_documents",
 })
-RESIDENT_COMMAND_GROUPS = {
+_RESIDENT_DEFAULT_GROUPS = {
     "routing": ROUTING_COMMANDS,
     "placement": frozenset({
         "get_layout", "place_components", "check_placement", "get_component_pins",
-        "get_net_connections",
+        "get_net_connections", "get_board_summary",
     }),
     "schematic": frozenset({"get_schematic_data", "get_schematic_pins"}),
     "symbols": frozenset({
@@ -30,11 +30,32 @@ RESIDENT_COMMAND_GROUPS = {
         "get_library_symbol_reference",
     }),
 }
+RESIDENT_COMMAND_GROUPS = {
+    **_RESIDENT_DEFAULT_GROUPS,
+    "pcb_routing_workflow": frozenset({
+        "get_unrouted_connections", "net_rules", "get_layout", "place_copper",
+    }),
+    "pcb_label_workflow": frozenset({
+        "export_silkscreen_data", "place_designators", "edit_silk_graphics", "check_silkscreen",
+    }),
+}
 RESIDENT_GROUP_BY_COMMAND = {
-    command: group for group, commands in RESIDENT_COMMAND_GROUPS.items()
+    command: group for group, commands in _RESIDENT_DEFAULT_GROUPS.items()
     for command in commands
 }
+RESIDENT_WORKFLOW_BY_TOOL = {
+    "route_connections": "pcb_routing_workflow",
+    "fanout_pads": "pcb_routing_workflow",
+    "place_label_block": "pcb_label_workflow",
+}
 RESIDENT_KEY_PLACEHOLDER = "'{BRIDGE_RESIDENT_BUNDLE_KEY}'"
+
+
+def resident_group_for(command, preferred_group=None):
+    """Choose the workflow's bundle only for its allowlisted native commands."""
+    if preferred_group and command in RESIDENT_COMMAND_GROUPS[preferred_group]:
+        return preferred_group
+    return RESIDENT_GROUP_BY_COMMAND.get(command)
 
 
 def _is_section(line):
